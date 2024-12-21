@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  env:
+    build: .
+    # cuda用のsetting
+    shm_size: '24gb'
+    deploy:
+      resources:
+        reservations:
+          devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+    volumes:
+      # TODO sshは上書きされないようにコンテナ内ではread onlyにしたい
+      # modeを使えばできそうだけどうまくいかなかったので保留
+      - type: bind
+        source: ./
+        target: /home/user/work/
+      - type: bind
+        source: ~/.ssh/
+        target: /home/user/.ssh/
+      - type: bind
+        source: ~/.kaggle/
+        target: /home/user/.kaggle/
+      # - type: bind
+      #   source: /mnt/ssd/kaggle-comp/output/  # TODO: ここは適宜変更
+      #   target: /home/user/work/output/
+    ports:
+      - 8888:8888
+      - 8501:8501
+    tty: true
+    stdin_open: True
+    hostname: kuzira
