@@ -24,9 +24,9 @@ services:
       - type: bind
         source: ~/.kaggle/
         target: /home/user/.kaggle/
-      # - type: bind
-      #   source: /mnt/ssd/kaggle-comp/output/  # TODO: ここは適宜変更
-      #   target: /home/user/work/output/
+      - type: bind
+        source: /mnt/ssd/kaggle-luxai-s3/output/  # TODO: ここは適宜変更
+        target: /home/user/work/output/
     ports:
       - 8888:8888
       - 8501:8501

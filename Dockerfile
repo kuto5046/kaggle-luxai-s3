@@ -1,5 +1,5 @@
 # pytorch versionに注意
-FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04
+FROM nvidia/cuda:12.1.0-cudnn8-devel-ubuntu22.04
 
 # 時間設定
 RUN ln -sf /usr/share/zoneinfo/Asia/Tokyo /etc/localtime
@@ -44,7 +44,8 @@ RUN apt-get -y update && apt-get install -y \
     xonsh \
     nodejs \
     npm \
-    curl
+    curl \
+    htop
 
 # node js を最新Verにする
 RUN npm -y install n -g && \
@@ -88,9 +89,9 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 RUN echo 'eval "$(uv generate-shell-completion zsh)"' >> ~/.zshrc
 ENV PATH ${HOME}/.cargo/bin/:$PATH
 # マウント前なので、pyproject.tomlをコピーしてuv syncを実行
-COPY pyproject.toml uv.lock ./
-RUN uv sync
+# COPY pyproject.toml uv.lock ./
+# RUN uv sync
 # 後ほどマウントするため、pyproject.tomlとuv.lockを削除
-RUN rm pyproject.toml uv.lock
+# RUN rm pyproject.toml uv.lock
 # pre-commit install
 # RUN uv run pre-commit install

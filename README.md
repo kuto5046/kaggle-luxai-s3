@@ -9,26 +9,18 @@ docker compose up -d --build
 あとはvscodeのdevcontainerでコンテナに入って作業する
 
 ## dataset準備
-docker内だとkaggle APIが有効になっている
-
-dataset一覧チェック
-```
-kaggle datasets list
-```
 
 datasetをdownload
 ```bash
 cd input
-kaggle datasets download <DATASET_NAME>
-```
-解凍(同じ名前のディレクトリを作成してその中に解凍)
-```bash
-unzip <DATASET_NAME>.zip -d <DATASET_NAME>
+kaggle competitions download -c 
+unzip lux-ai-season-3.zip -d lux-ai-season-3
 ```
 
 ## 初めにすること
 pre-commitをinstall
 ```sh
+uv sync
 uv run pre-commit install
 ```
 
