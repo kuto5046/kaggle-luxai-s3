@@ -45,6 +45,8 @@ RUN apt-get -y update && apt-get install -y \
     nodejs \
     npm \
     curl \
+    fd-find \
+    python3.10-venv \
     htop
 
 # node js を最新Verにする

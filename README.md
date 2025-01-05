@@ -13,7 +13,7 @@ docker compose up -d --build
 datasetをdownload
 ```bash
 cd input
-kaggle competitions download -c 
+kaggle competitions download -c
 unzip lux-ai-season-3.zip -d lux-ai-season-3
 ```
 
