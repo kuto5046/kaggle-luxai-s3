@@ -1,4 +1,4 @@
-# kaggle-template
+# kaggle luxai season3
 kaggleコンペ用のテンプレートレポジトリ
 
 ## 環境構築
@@ -22,6 +22,11 @@ pre-commitをinstall
 ```sh
 uv sync
 uv run pre-commit install
+```
+
+ツールをinstall
+```sh
+uv pip install -e Lux-Design-S3/src
 ```
 
 wandbのprojectをwebから作成
