@@ -1,6 +1,0 @@
-root_dir: /home/user/work
-input_dir: ${path.root_dir}/input
-output_dir: ${path.root_dir}/output
-feature_dir: ${path.output_dir}/feature_store
-model_dir: ${path.output_dir}/train
-sub_dir: ./

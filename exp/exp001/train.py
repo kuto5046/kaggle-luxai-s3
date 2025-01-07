@@ -1,73 +1,140 @@
 import logging
-from typing import Any
 from pathlib import Path
+from dataclasses import dataclass
 
-import hydra
-import wandb
-import polars as pl
-from lightning import seed_everything
-from omegaconf import DictConfig
+import numpy as np
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+from lightning import Trainer, seed_everything
+from lux.models import LaxLitModel, LaxLitDataModule
+from sklearn.metrics import confusion_matrix
+from lightning.pytorch.callbacks import (
+    ModelCheckpoint,
+    RichProgressBar,
+    RichModelSummary,
+    LearningRateMonitor,
+)
+from lightning.pytorch.loggers.wandb import WandbLogger
+
+sns.set_theme()
 
 LOGGER = logging.getLogger(__name__)
 
 
+@dataclass
+class Config:
+    exp_name: str = Path(__file__).parent.name
+    notes: str = "baseline"
+    seed: int = 2025
+    debug: bool = False
+    n_splits: int = 5
+    use_fold: int = 0
+    root_dir: Path = Path("/home/user/work")
+    feature_version: str = exp_name
+    feature_dir: Path = root_dir / f"output/feature_store/{feature_version}"
+    output_dir = root_dir / f"exp/{exp_name}/output"
+    in_channels: int = 13  # state space
+    out_channels: int = 6  # action space
+    epoch: int = 10
+    limit_train_batches: float = 1.0
+    limit_val_batches: float = 1.0
+    use_amp: bool = False
+    batch_size: int = 512
+    num_workers: int = 12
+    ckpt_path: str = None
+    lr: float = 0.001
+    weight_decay: float = 0.01
+    warmup_step_rate: float = 0.1
+
+
+def get_confusion_matrix(y_true: np.ndarray, y_pred: np.ndarray, n: int) -> None:
+    data = confusion_matrix(y_true, y_pred, labels=np.arange(n), normalize="true")
+    df_cm = pd.DataFrame(data, columns=np.arange(n), index=np.arange(n))
+    df_cm.index.name = "Actual"
+    df_cm.columns.name = "Predicted"
+    plt.figure(figsize=(12, 12))
+    return sns.heatmap(df_cm, cmap="Blues", annot=True, fmt=".3f")
+
+
 class TrainPipeline:
-    def __init__(self, cfg: DictConfig) -> None:
-        # cfg.pathの中身をPathに変換する
-        for key, value in cfg.path.items():
-            cfg.path[key] = Path(value)
-
+    def __init__(self, cfg: Config) -> None:
         seed_everything(cfg.seed, workers=True)  # data loaderのworkerもseedする
-
-        # hydraのrun_dirに同じpathが設定されているので自動でディレクトリが作成される
-        self.output_dir = cfg.path.output_dir / cfg.exp_name / cfg.run_name
+        self.output_dir = cfg.output_dir
+        self.output_dir.mkdir(exist_ok=True, parents=True)
 
         self.cfg = cfg
-        self.models: list[Any] = []
-        self.oofs: list[pl.DataFrame] = []
-        self.scores: list[float] = []
-        assert cfg.phase == "train", "TrainPipeline only supports train phase"
+        self.debug_config()
 
-    def setup_dataset(self, fold: int) -> None:
-        pass
+    def debug_config(self) -> None:
+        if self.cfg.debug:
+            self.cfg.epoch = 2
+            self.cfg.limit_train_batches = 0.1
+            self.cfg.limit_val_batches = 0.1
 
-    def setup_callbacks(self) -> list:
-        return []
+    def setup_dataset(self) -> None:
+        self.datamodule = LaxLitDataModule(self.cfg)
 
-    def setup_logger(self, fold: int) -> None:
-        wandb.init(
-            project="kaggle-template",
+    def setup_callbacks(self) -> None:
+        epoch_checkpoint = ModelCheckpoint(
+            dirpath=self.output_dir,
+            monitor="Loss/valid",
+            mode="min",
+            filename="best_model",
+            save_weights_only=True,
+            verbose=True,
+        )
+        lr_monitor = LearningRateMonitor("step")
+        progress_bar = RichProgressBar()
+        model_summary = RichModelSummary(max_depth=2)
+        self.callbacks = [
+            epoch_checkpoint,
+            lr_monitor,
+            progress_bar,
+            model_summary,
+        ]
+
+    def setup_logger(self) -> None:
+        self.pl_logger = WandbLogger(
+            project="kaggle-luxai-s3",
             entity="kuto5046",
-            name=f"{self.cfg.exp_name}_{self.cfg.run_name}_fold{fold}",
+            name=f"{self.cfg.exp_name}",
             group=self.cfg.exp_name,
-            tags=self.cfg.tags,
             mode="disabled" if self.cfg.debug else "online",
             notes=self.cfg.notes,
         )
 
-    def train(self, fold: int) -> None:
-        pass
+    def setup_model(self) -> None:
+        self.model = LaxLitModel(self.cfg)
 
-    def evaluate(self) -> None:
-        pass
+    def train(self) -> None:
+        self.trainer = Trainer(
+            # env
+            # default_root_dir=Path.cwd(),
+            accelerator="auto",
+            precision="16-mixed" if self.cfg.use_amp else 32,
+            max_epochs=self.cfg.epoch,
+            callbacks=self.callbacks,
+            logger=self.pl_logger,
+            num_sanity_val_steps=0,
+            sync_batchnorm=True,
+            limit_train_batches=self.cfg.limit_train_batches,
+            limit_val_batches=self.cfg.limit_val_batches,
+            deterministic=True,  # for reproducibility
+        )
+        self.trainer.fit(self.model, datamodule=self.datamodule, ckpt_path=self.cfg.ckpt_path)
 
     def run(self) -> None:
-        for fold in self.cfg.use_folds:
-            self.setup_logger(fold)
-            self.setup_dataset(fold)
-            self.train(fold)
-            self.evaluate()
-            # 最後のfold以外であればwandbをfinishする
-            if fold != self.cfg.use_folds[-1]:
-                wandb.finish()
-
-        oof = pl.concat(self.oofs).sort("Id")
-        oof.write_csv(self.output_dir / "oof.csv")
-        wandb.finish()
+        self.setup_logger()
+        self.setup_dataset()
+        self.setup_callbacks()
+        self.setup_model()
+        self.train()
+        self.pl_logger.finalize(status="success")
 
 
-@hydra.main(config_path="./", config_name="config", version_base="1.2")  # type: ignore
-def main(cfg: DictConfig) -> None:
+def main() -> None:
+    cfg = Config()
     pipeline = TrainPipeline(cfg)
     pipeline.run()
 

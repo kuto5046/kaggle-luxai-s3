@@ -1,6 +1,0 @@
-root_dir: /kaggle
-input_dir: ${path.root_dir}/input
-output_dir: ${path.root_dir}/working/output
-feature_dir: ${path.output_dir}/feature_store
-model_dir: ${path.root_dir}/input
-sub_dir: ./
