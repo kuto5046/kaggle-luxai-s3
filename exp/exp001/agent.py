@@ -3,8 +3,8 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from models import LuxUNetModel
 from lux.utils import Action, extract_state, get_valid_policy_map
+from lux.models import LuxUNetModel
 from lux.params import EnvParams
 from scipy.special import softmax
 
@@ -13,13 +13,14 @@ class Config:
     seed: int = 2025
     in_channels: int = 13
     out_channels: int = 6
-    checkpoint_path: Path = Path(__file__).parent / "best_model.ckpt"
+    checkpoint_path: Path = Path(__file__).parent / "output/best_model.ckpt"
 
 
 class ILAgent:
     def __init__(self, env_cfg: EnvParams, checkpoint_path: Path, in_channels: int, out_channels: int) -> None:
         self.torch_model = LuxUNetModel(in_channels=in_channels, out_channels=out_channels)
-        self.torch_model.load_state_dict(torch.load(checkpoint_path))
+        ckpt = torch.load(checkpoint_path, weights_only=True)
+        self.torch_model.load_state_dict(ckpt["state_dict"], strict=False)
         self.torch_model.eval()
         self.player = None
         self.env_cfg = env_cfg
@@ -37,6 +38,10 @@ class ILAgent:
         return policy_map
 
 
+cfg = Config()
+imitation_model = ILAgent(EnvParams, cfg.checkpoint_path, cfg.in_channels, cfg.out_channels)
+
+
 class Agent:
     def __init__(self, player: str, env_cfg: EnvParams) -> None:
         self.cfg = Config()
@@ -46,10 +51,9 @@ class Agent:
         self.opp_team_id = 1 if self.team_id == 0 else 0
         np.random.seed(self.cfg.seed)
         self.env_cfg = env_cfg
-        self.imitation_model = ILAgent(self.cfg.checkpoint_path, self.cfg.in_channels, self.cfg.out_channels)
 
     def act(self, step: int, obs, remainingOverageTime: int = 60):
-        policy_map = self.imitation_model.predict(obs, self.team_id)
+        policy_map = imitation_model.predict(obs, self.team_id)
 
         unit_mask = np.array(obs["units_mask"][self.team_id])  # shape (max_units, )
         unit_positions = np.array(obs["units"]["position"][self.team_id])  # shape (max_units, 2)
