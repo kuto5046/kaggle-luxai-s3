@@ -34,7 +34,7 @@ class Config:
     feature_version: str = exp_name
     feature_dir: Path = root_dir / f"output/feature_store/{feature_version}"
     output_dir = root_dir / f"exp/{exp_name}/output"
-    in_channels: int = 13  # state space
+    in_channels: int = 15  # state space
     out_channels: int = 6  # action space
     epoch: int = 10
     limit_train_batches: float = 1.0
