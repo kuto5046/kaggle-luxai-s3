@@ -107,7 +107,9 @@ class DataProcessor:
                     if step_info[target_team_idx]["status"] == "DONE":
                         max_steps.append(str(step_idx))
                         break
-                    state = extract_state(step_info, target_team_idx)
+                    # gt_obs = step_info[0]["info"]["replay"]["observations"][0]
+                    obs = json.loads(step_info[target_team_idx]["observation"]["obs"])
+                    state = extract_state(obs, target_team_idx)
                     action = extract_action(step_info, target_team_idx)
                     episode_action_group.create_dataset(f"{step_idx}", data=action)
                     episode_state_group.create_dataset(f"{step_idx}", data=state)
