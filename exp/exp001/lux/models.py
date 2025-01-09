@@ -12,6 +12,9 @@ from torchmetrics import Accuracy, MetricCollection
 from transformers import get_cosine_schedule_with_warmup
 from torch.utils.data import Dataset, DataLoader
 
+import wandb
+from lux.utils import State, Action, to_np
+
 
 class LaxDataset(Dataset):
     def __init__(self, df: pl.DataFrame, cfg: dataclass, mode: str = "train") -> None:
@@ -30,8 +33,8 @@ class LaxDataset(Dataset):
     def __getitem__(self, idx: int) -> dict[str, np.ndarray]:
         episode_id, step_idx = self.ids[idx]
         return {
-            "state": np.array(self.h5_file[episode_id]["states"][step_idx]),
-            "action": np.array(self.h5_file[episode_id]["actions"][step_idx]),
+            "state": np.array(self.h5_file[episode_id]["states"][step_idx]).astype(np.float32),
+            "action": np.array(self.h5_file[episode_id]["actions"][step_idx]).astype(np.float32),
         }
 
 
@@ -82,12 +85,13 @@ class LaxLitModel(LightningModule):
     def __init__(self, cfg: dataclass) -> None:
         super().__init__()
         self.cfg = cfg
-        self.model = LuxUNetModel(in_channels=cfg.in_channels, out_channels=cfg.out_channels)
+        self.model = LuxUNetModel(in_channels=len(State), out_channels=len(Action))
         self.criterion = self.get_criterion()
 
         metrics = self.get_metrics()
         self.train_metrics = metrics.clone(postfix="/train")
         self.valid_metrics = metrics.clone(postfix="/valid")
+        self.valid_outputs = {"ground_truth": [], "predictions": []}
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.model(x)
@@ -104,7 +108,7 @@ class LaxLitModel(LightningModule):
         outputs = self(features)
         policy_logits = outputs["policy"]
         _value_logits = outputs["value"]
-        loss, class_wise_dice = self.criterion(policy_logits, targets)
+        loss = self.criterion(policy_logits, targets)
 
         self.log(
             f"Loss/{mode}",
@@ -116,8 +120,8 @@ class LaxLitModel(LightningModule):
         )
 
         preds = torch.softmax(policy_logits, dim=1).argmax(dim=1).flatten()
-        gts = one_hot_encoder(targets, self.cfg.out_channels).argmax(dim=1).flatten()
-        unit_masks = (features[:, 4] == 1).flatten()  # unitが存在するところだけで計算する
+        gts = targets.flatten()
+        unit_masks = (features[:, State.OWN_UNIT_COUNT.value] > 0).flatten()  # unitが存在するところだけで計算する
 
         preds = preds[unit_masks]
         gts = gts[unit_masks]
@@ -125,6 +129,8 @@ class LaxLitModel(LightningModule):
             self.train_metrics.update(preds, gts)
         else:
             self.valid_metrics.update(preds, gts)
+            self.valid_outputs["ground_truth"].append(to_np(gts))
+            self.valid_outputs["predictions"].append(to_np(preds))
         return loss
 
     def on_train_epoch_end(self) -> None:
@@ -138,6 +144,22 @@ class LaxLitModel(LightningModule):
         # スコア評価
         output = self.valid_metrics.compute()
         self.log_dict(output, on_step=False, on_epoch=True, prog_bar=False, logger=True)
+        # best_valid_lossを更新した場合のみconfusion matrixをlogする
+        if self.trainer.callback_metrics["Loss/valid"] < self.trainer.callback_metrics.get(
+            "best_valid_loss", float("inf")
+        ):
+            self.trainer.callback_metrics["best_valid_loss"] = self.trainer.callback_metrics["Loss/valid"]
+            wandb.log(
+                {
+                    "confusion_matrix": wandb.plot.confusion_matrix(
+                        probs=None,
+                        y_true=np.concatenate(self.valid_outputs["ground_truth"]),
+                        preds=np.concatenate(self.valid_outputs["predictions"]),
+                        class_names=[action.name for action in Action],
+                    )
+                }
+            )
+        self.valid_outputs = {"ground_truth": [], "predictions": []}
         # メトリクスのリセット
         self.valid_metrics.reset()
 
@@ -176,23 +198,14 @@ class LaxLitModel(LightningModule):
         return scheduler
 
     def get_criterion(self) -> torch.nn.Module:
-        return DiceLoss(n_classes=self.cfg.out_channels)
+        return DiceLoss(n_classes=len(Action))
 
     def get_metrics(self) -> MetricCollection:
         return MetricCollection(
             [
-                Accuracy(task="multiclass", num_classes=self.cfg.out_channels),
+                Accuracy(task="multiclass", num_classes=len(Action)),
             ]
         )
-
-
-def one_hot_encoder(input_tensor: torch.Tensor, n_classes: int) -> torch.Tensor:
-    tensor_list = []
-    for i in range(n_classes):
-        temp_prob = input_tensor == i
-        tensor_list.append(temp_prob.unsqueeze(1))
-    output_tensor = torch.cat(tensor_list, dim=1)
-    return output_tensor.float()
 
 
 class DiceLoss(nn.Module):
@@ -203,6 +216,14 @@ class DiceLoss(nn.Module):
             self.weights = torch.ones(n_classes)
         else:
             self.weights = torch.tensor(weights)
+
+    def _one_hot_encoder(self, input_tensor):
+        tensor_list = []
+        for i in range(self.n_classes):
+            temp_prob = input_tensor == i
+            tensor_list.append(temp_prob.unsqueeze(1))
+        output_tensor = torch.cat(tensor_list, dim=1)
+        return output_tensor.float()
 
     def _dice_loss(self, score, target):
         target = target.float()
@@ -216,7 +237,7 @@ class DiceLoss(nn.Module):
 
     def forward(self, inputs, target):
         inputs = torch.softmax(inputs, dim=1)
-        target = one_hot_encoder(target, self.n_classes)
+        target = self._one_hot_encoder(target)
         assert inputs.size() == target.size(), f"predict {inputs.size()} & target {target.size()} shape do not match"
         class_wise_dice = []
         loss = 0.0
@@ -224,7 +245,7 @@ class DiceLoss(nn.Module):
             dice = self._dice_loss(inputs[:, i], target[:, i])
             class_wise_dice.append(1.0 - dice.item())
             loss += dice * self.weights[i]  # Apply the class weight
-        return loss / torch.sum(self.weights), class_wise_dice
+        return loss / torch.sum(self.weights)
 
 
 class DoubleConv(nn.Module):

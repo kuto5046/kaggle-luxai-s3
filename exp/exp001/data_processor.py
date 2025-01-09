@@ -102,21 +102,21 @@ class DataProcessor:
                 episode_state_group = episode_group.create_group("states")
                 target_team_idx = np.argmax([r or 0 for r in json_load["rewards"]])  # win or tie
                 steps = json_load["steps"]
-                for step_idx, step_info in enumerate(steps):
-                    # DONEのstep以降は無視
-                    if step_info[target_team_idx]["status"] == "DONE":
-                        max_steps.append(str(step_idx))
-                        break
+                for step_idx in range(len(steps) - 1):
+                    step_info = steps[step_idx]
+                    next_step_info = steps[step_idx + 1]
+
                     # gt_obs = step_info[0]["info"]["replay"]["observations"][0]
                     obs = json.loads(step_info[target_team_idx]["observation"]["obs"])
                     state = extract_state(obs, target_team_idx)
-                    action = extract_action(step_info, target_team_idx)
+                    # stateの次のステップにおけるactionを予測したいのでnext_stepの行動を取得する
+                    action = extract_action(next_step_info, target_team_idx)
                     episode_action_group.create_dataset(f"{step_idx}", data=action)
                     episode_state_group.create_dataset(f"{step_idx}", data=state)
+
+                max_steps.append(len(steps) - 1)
         return pl.DataFrame(
             {"EpisodeId": valid_ids, "MaxStep": max_steps},
-            # h5pyのkeyとして使うためにstrに変換
-            schema={"EpisodeId": pl.String, "MaxStep": pl.String},
         )
 
     def add_fold(self, df: pl.DataFrame) -> pl.DataFrame:
