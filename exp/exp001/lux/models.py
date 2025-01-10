@@ -23,7 +23,7 @@ class LaxDataset(Dataset):
         self.mode = mode
         self.ids = []
         for episode_id, max_step in df[["EpisodeId", "MaxStep"]].to_numpy():
-            for step_idx in range(int(max_step)):
+            for step_idx in range(1, int(max_step)):  # step_idx=0は初期状態なのでスキップ
                 self.ids.append((str(episode_id), str(step_idx)))
         self.h5_file = h5py.File(self.cfg.feature_dir / "episodes.h5", "r")
 
