@@ -60,10 +60,12 @@ class Agent:
 
     def act(self, step: int, obs, remainingOverageTime: int = 60):
         policy_map = imitation_model.predict(obs, self.team_id)
+
         unit_mask = np.array(obs["units_mask"][self.team_id])  # shape (max_units, )
         unit_positions = np.array(obs["units"]["position"][self.team_id])  # shape (max_units, 2)
-        # ids of units you can control at this timestep
         available_unit_ids = np.where(unit_mask)[0]
+
+        opp_unit_positions = np.array([pos for pos in obs["units"]["position"][self.opp_team_id] if pos[0] != -1])
         actions = np.zeros((self.env_cfg["max_units"], 3), dtype=int)
         # unit ids range from 0 to max_units - 1
         for unit_id in available_unit_ids:
@@ -75,10 +77,34 @@ class Agent:
             else:
                 action = policy.argmax()
 
-            # sapの場合は何もしない
             if action == Action.SAP.value:
-                actions[unit_id] = [0, 0, 0]
+                # params.unit_sap_rangeの範囲内にいる敵ユニットをランダムに選択
+                opp_unit_ids = get_nearby_enemy_unit_ids(unit_pos, opp_unit_positions, self.env_cfg["unit_sap_range"])
+                # 敵のユニットがいる場合はランダムにサンプリングしてSAPする
+                if len(opp_unit_ids) > 0:
+                    opp_unit_id = np.random.choice(opp_unit_ids)
+                    opp_unit_pos = opp_unit_positions[opp_unit_id]
+                    relative_pos = calc_relative_pos(unit_pos, opp_unit_pos)
+                    # print(f"{unit_pos=}, {opp_unit_pos=}", file=sys.stderr)
+                    actions[unit_id] = [Action.SAP.value, relative_pos[0], relative_pos[1]]
+                else:
+                    actions[unit_id] = [Action.CENTER.value, 0, 0]
+
             else:
                 actions[unit_id] = [action, 0, 0]
-        # print(actions, file=sys.stderr)
         return actions
+
+
+# 相対位置を計算
+def calc_relative_pos(base_pos: np.ndarray, target_pos: np.ndarray) -> np.ndarray:
+    return target_pos - base_pos
+
+
+# マスの半径kマス以内に該当するかどうか
+def is_within_k_tiles(base_pos: np.ndarray, target_pos: np.ndarray, k: int) -> bool:
+    return np.abs(base_pos[0] - target_pos[0]) <= k and np.abs(base_pos[1] - target_pos[1]) <= k
+
+
+# 自身の周囲kタイル以内にいる敵ユニットを抽出
+def get_nearby_enemy_unit_ids(unit_pos: np.ndarray, opp_unit_positions: np.ndarray, k: int) -> list[int]:
+    return [unit_id for unit_id, pos in enumerate(opp_unit_positions) if is_within_k_tiles(unit_pos, pos, k)]

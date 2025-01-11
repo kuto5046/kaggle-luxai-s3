@@ -111,11 +111,14 @@ def get_valid_policy_map(obs: dict[str, Any], team_id: int) -> np.ndarray:
     for unit_id in available_unit_ids:
         pos = tuple(obs["units"]["position"][team_id][unit_id])
         energy = obs["units"]["energy"][team_id][unit_id]
-        # mask = obs["units_mask"][team_id][unit_idx]  # Trueの場合見えない
-        validate_policy_map[:5, pos[0], pos[1]] = 1  # 移動行動は一旦全て有効化
+
+        validate_policy_map[:6, pos[0], pos[1]] = 1  # 行動は一旦全て有効化
         for dir in range(1, 5):
             if not can_move(pos, energy, dir, tile_type_map):
                 validate_policy_map[dir, pos[0], pos[1]] = 0
+
+        if not can_sap(energy):
+            validate_policy_map[Action.SAP.value, pos[0], pos[1]] = 0
     return validate_policy_map
 
 
@@ -156,3 +159,9 @@ def can_move(pos: tuple[int, int], energy: int, dir: int, tile_type_map: np.ndar
     if tile_type_map[next_pos[0], next_pos[1]] == TileType.ASTEROID.value:
         return False
     return True
+
+
+def can_sap(energy: int):
+    # 行動にはcostがかからない
+    return True
+    # return energy >= EnvParams.unit_sap_cost
