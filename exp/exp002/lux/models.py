@@ -1,3 +1,4 @@
+import random
 from typing import Any
 from dataclasses import dataclass
 
@@ -8,12 +9,68 @@ import polars as pl
 import torch.nn.functional as F
 from torch import nn, optim
 from lightning import LightningModule, LightningDataModule
+from torchvision import transforms
 from torchmetrics import Accuracy, MetricCollection
 from transformers import get_cosine_schedule_with_warmup
 from torch.utils.data import Dataset, DataLoader
 
 import wandb
 from lux.utils import State, Action, to_np
+
+
+class LuxAugment:
+    def __init__(self) -> None:
+        self.p = 0.5
+
+    def switch_action(self, action: int, i: int, j: int) -> int:
+        action = np.where(action == i, -1, action)
+        action = np.where(action == j, i, action)
+        action = np.where(action == -1, j, action)
+        return action
+
+    def rotate_action(self, action: int, offset: int = 0) -> int:
+        # right(2)->up(1)
+        action = np.where(action == 1 + offset, -1, action)
+        action = np.where(action == 2 + offset, 1 + offset, action)
+
+        # up(1) -> left(4)
+        action = np.where(action == 4 + offset, -2, action)
+        action = np.where(action == -1, 4 + offset, action)
+
+        # left(4) -> down(3)
+        action = np.where(action == 3 + offset, -1, action)
+        action = np.where(action == -2, 3 + offset, action)
+
+        # down(3) -> right(2)
+        action = np.where(action == -1, 2 + offset, action)
+        return action
+
+    def __call__(self, inputs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+        # x,yが実際のmapと行列で異なるので操作を直感的にするために転置後に処理する
+        state = inputs["state"].transpose((0, 1, 3, 2))
+        action = inputs["action"].T.copy()
+
+        # Flip vertically↑↓(# switch up(1) and down(3))
+        if random.random() < self.p:
+            state = np.flip(state, axis=2).copy()
+            action = np.flip(action, axis=0)
+            action = self.switch_action(action, Action.UP.value, Action.DOWN.value)
+
+        # Flip horizontally →← (switch left(2) and right(4))
+        if random.random() < self.p:
+            state = np.flip(state, axis=3).copy()
+            action = np.flip(action, axis=1)
+            action = self.switch_action(action, Action.LEFT.value, Action.RIGHT.value)
+
+        # Rotate 90 degrees ↑→ (right->up, up->left left->down down->right)
+        if random.random() < self.p:
+            state = np.rot90(state, axes=(2, 3)).copy()
+            action = np.rot90(action, axes=(0, 1))
+            action = self.rotate_action(action)
+
+        inputs["state"] = state.transpose((0, 1, 3, 2))
+        inputs["action"] = action.T.copy()
+        return inputs
 
 
 class LaxDataset(Dataset):
@@ -26,16 +83,21 @@ class LaxDataset(Dataset):
             for step_idx in range(1, int(max_step)):  # step_idx=0は初期状態なのでスキップ
                 self.ids.append((str(episode_id), str(step_idx)))
         self.h5_file = h5py.File(self.cfg.feature_dir / "episodes.h5", "r")
+        self.transform = transforms.Compose([LuxAugment()])
 
     def __len__(self) -> int:
         return len(self.ids)
 
     def __getitem__(self, idx: int) -> dict[str, np.ndarray]:
         episode_id, step_idx = self.ids[idx]
-        return {
+        inputs = {
             "state": np.array(self.h5_file[episode_id]["states"][step_idx]).astype(np.float32),
             "action": np.array(self.h5_file[episode_id]["actions"][step_idx]).astype(np.float32),
         }
+        if self.phase == "train":
+            inputs = self.transform(inputs)
+
+        return inputs
 
 
 class LaxLitDataModule(LightningDataModule):

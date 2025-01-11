@@ -1,14 +1,11 @@
+import shutil
 import logging
 from pathlib import Path
 from dataclasses import dataclass
 
-import numpy as np
-import pandas as pd
 import seaborn as sns
-import matplotlib.pyplot as plt
 from lightning import Trainer, seed_everything
 from lux.models import LaxLitModel, LaxLitDataModule
-from sklearn.metrics import confusion_matrix
 from lightning.pytorch.callbacks import (
     ModelCheckpoint,
     RichProgressBar,
@@ -25,13 +22,13 @@ LOGGER = logging.getLogger(__name__)
 @dataclass
 class Config:
     exp_name: str = Path(__file__).parent.name
-    notes: str = "baseline"
+    notes: str = "augmentationを追加する"
     seed: int = 2025
     debug: bool = False
     n_splits: int = 5
     use_fold: int = 0
     root_dir: Path = Path("/home/user/work")
-    feature_version: str = exp_name
+    feature_version: str = "exp001"
     feature_dir: Path = root_dir / f"output/feature_store/{feature_version}"
     output_dir = root_dir / f"exp/{exp_name}/output"
 
@@ -47,20 +44,12 @@ class Config:
     warmup_step_rate: float = 0.1
 
 
-def get_confusion_matrix(y_true: np.ndarray, y_pred: np.ndarray, n: int) -> None:
-    data = confusion_matrix(y_true, y_pred, labels=np.arange(n), normalize="true")
-    df_cm = pd.DataFrame(data, columns=np.arange(n), index=np.arange(n))
-    df_cm.index.name = "Actual"
-    df_cm.columns.name = "Predicted"
-    plt.figure(figsize=(12, 12))
-    return sns.heatmap(df_cm, cmap="Blues", annot=True, fmt=".3f")
-
-
 class TrainPipeline:
     def __init__(self, cfg: Config) -> None:
         seed_everything(cfg.seed, workers=True)  # data loaderのworkerもseedする
         self.output_dir = cfg.output_dir
         self.output_dir.mkdir(exist_ok=True, parents=True)
+        shutil.rmtree(self.output_dir)
 
         self.cfg = cfg
         self.debug_config()
