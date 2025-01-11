@@ -29,3 +29,6 @@ make_subfile exp_name:
     cp -r /home/user/work/.venv/lib/python3.10/site-packages/lightning ./ && \
     tar -czf submission.tar.gz --exclude="*.tar.gz" *)
     uv run kaggle competitions submit -c lux-ai-season-3 -f /home/user/work/exp/{{exp_name}}/submission.tar.gz -m "{{exp_name}}"
+
+game exp_name:
+    uv run luxai-s3 /home/user/work/Lux-Design-S3/kits/python/main.py /home/user/work/exp/{{exp_name}}/main.py --output replay.json
