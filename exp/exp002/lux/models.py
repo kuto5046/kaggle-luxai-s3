@@ -94,7 +94,7 @@ class LaxDataset(Dataset):
             "state": np.array(self.h5_file[episode_id]["states"][step_idx]).astype(np.float32),
             "action": np.array(self.h5_file[episode_id]["actions"][step_idx]).astype(np.float32),
         }
-        if self.phase == "train":
+        if self.mode == "train":
             inputs = self.transform(inputs)
 
         return inputs
