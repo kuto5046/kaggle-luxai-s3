@@ -68,6 +68,10 @@ class LuxAugment:
             action = np.rot90(action, axes=(0, 1))
             action = self.rotate_action(action)
 
+        # TODO:
+        # mapをランダムにずらす
+        # 試合のindexを入れ替える
+
         inputs["state"] = state.transpose((0, 2, 1))
         inputs["action"] = action.T.copy()
         return inputs
