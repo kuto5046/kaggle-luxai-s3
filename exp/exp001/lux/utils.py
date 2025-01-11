@@ -107,11 +107,11 @@ def extract_action(actions: dict[str, Any], obs: dict[str, Any], target_team_id:
 def get_valid_policy_map(obs: dict[str, Any], team_id: int) -> np.ndarray:
     validate_policy_map = np.zeros((len(Action), EnvParams.map_width, EnvParams.map_height), dtype=np.float32)
     tile_type_map = np.array(obs["map_features"]["tile_type"])  # (24, 24)
-    for unit_idx in range(EnvParams.max_units):
-        pos = tuple(obs["units"]["position"][team_id][unit_idx])
-        energy = obs["units"]["energy"][team_id][unit_idx]
+    available_unit_ids = np.where(obs["units_mask"][team_id])[0]
+    for unit_id in available_unit_ids:
+        pos = tuple(obs["units"]["position"][team_id][unit_id])
+        energy = obs["units"]["energy"][team_id][unit_id]
         # mask = obs["units_mask"][team_id][unit_idx]  # Trueの場合見えない
-
         validate_policy_map[:5, pos[0], pos[1]] = 1  # 移動行動は一旦全て有効化
         for dir in range(1, 5):
             if not can_move(pos, energy, dir, tile_type_map):

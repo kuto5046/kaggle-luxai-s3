@@ -35,3 +35,8 @@ wandbのprojectをwebから作成
 wandb login
 ```
 authorizeすることでwandbが利用可能になる
+
+## luxai-s3の実行
+```sh
+uv run luxai-s3 Lux-Design-S3/kits/python/main.py exp/exp001/main.py --output replay.json
+```
