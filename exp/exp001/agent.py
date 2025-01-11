@@ -21,7 +21,7 @@ class Config:
 class ILAgent:
     def __init__(self, env_cfg: EnvParams, checkpoint_path: Path) -> None:
         self.model = LuxUNetModel(in_channels=len(State), out_channels=len(Action))
-        ckpt = torch.load(checkpoint_path, weights_only=True)
+        ckpt = torch.load(checkpoint_path, weights_only=True, map_location="cpu")
         state_dict = {k.replace("model.", ""): v for k, v in ckpt["state_dict"].items()}
         self.model.load_state_dict(state_dict)
         self.model.eval()
