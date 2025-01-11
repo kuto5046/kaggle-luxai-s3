@@ -47,28 +47,28 @@ class LuxAugment:
 
     def __call__(self, inputs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
         # x,yが実際のmapと行列で異なるので操作を直感的にするために転置後に処理する
-        state = inputs["state"].transpose((0, 1, 3, 2))
+        state = inputs["state"].transpose((0, 2, 1))
         action = inputs["action"].T.copy()
 
         # Flip vertically↑↓(# switch up(1) and down(3))
         if random.random() < self.p:
-            state = np.flip(state, axis=2).copy()
+            state = np.flip(state, axis=1).copy()
             action = np.flip(action, axis=0)
             action = self.switch_action(action, Action.UP.value, Action.DOWN.value)
 
         # Flip horizontally →← (switch left(2) and right(4))
         if random.random() < self.p:
-            state = np.flip(state, axis=3).copy()
+            state = np.flip(state, axis=2).copy()
             action = np.flip(action, axis=1)
             action = self.switch_action(action, Action.LEFT.value, Action.RIGHT.value)
 
         # Rotate 90 degrees ↑→ (right->up, up->left left->down down->right)
         if random.random() < self.p:
-            state = np.rot90(state, axes=(2, 3)).copy()
+            state = np.rot90(state, axes=(1, 2)).copy()
             action = np.rot90(action, axes=(0, 1))
             action = self.rotate_action(action)
 
-        inputs["state"] = state.transpose((0, 1, 3, 2))
+        inputs["state"] = state.transpose((0, 2, 1))
         inputs["action"] = action.T.copy()
         return inputs
 
