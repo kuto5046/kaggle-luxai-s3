@@ -22,3 +22,10 @@ upload:
 # run streamlit app
 streamlit:
 	uv run streamlit run visualizer.py --server.address 0.0.0.0
+
+make_subfile exp_name:
+    cd ~/work
+    cp -r /home/user/work/.venv/lib/python3.10/site-packages/lightning exp/{{exp_name}}
+    tar -czf submission.tar.gz exp/{{exp_name}}
+    mv submission.tar.gz exp/{{exp_name}}
+    # uv run kaggle competitions submit -c lux-ai-season-3 -f exp/{{exp_name}}/submission.tar.gz -m "{{exp_name}}"

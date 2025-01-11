@@ -1,13 +1,17 @@
 # custom
-*.html 
-*.png 
+*.html
+*.png
 *.csv
 output
 *.pkl
 *.pickle
 *.parquet
 wandb
+lightning
 
+*tar.gz
+*.json
+*.ipynb
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
