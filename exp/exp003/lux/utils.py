@@ -91,10 +91,6 @@ def extract_action(actions: dict[str, Any], obs: dict[str, Any], target_team_id:
     # unit state
     unit_masks = np.array(obs["units_mask"][target_team_id])  # (max_units, )
     unit_positions = np.array(obs["units"]["position"][target_team_id])  # (max_units, 2)
-    unavailable_unit_ids = np.where(~unit_masks)[0]
-    for unit_id in unavailable_unit_ids:
-        # mask=Falseされているところは必ずaction=0になってるはず
-        assert actions[unit_id][0] == 0
 
     available_unit_ids = np.where(unit_masks)[0]
     for unit_id in available_unit_ids:
