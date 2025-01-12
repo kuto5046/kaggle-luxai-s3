@@ -21,6 +21,14 @@ class State(Enum):
     TEAM_WINS = 10
 
 
+class HiddenState(Enum):
+    # 分類として扱いたいので全てbinaryで表現する
+    OWN_UNIT = 0
+    OPP_UNIT = 1
+    ENERGY_NODE = 2
+    RELIC_NODE = 3
+
+
 class Action(Enum):
     CENTER = 0
     UP = 1
@@ -39,6 +47,40 @@ class TileType(Enum):
 
 def to_np(x: torch.Tensor) -> np.ndarray:
     return x.detach().cpu().numpy()
+
+
+def extract_hidden_state(gt_obs: dict[str, Any], target_team_id: int) -> np.ndarray:
+    """
+    - 自/敵unitの位置
+    - energy_nodesの位置
+    - relic nodeの位置
+
+    以下は難しい or 意義が薄いので一旦やらない
+    - unitのエネルギー
+    - mapのエネルギー (energy_nodesが分かればとりあえずはいいかな)
+    - vision power map(これをboolにしたのが観測可能なsensor mask)
+    """
+    state_space_size: int = len(HiddenState)
+    state_map = np.zeros((state_space_size, EnvParams.map_width, EnvParams.map_height), dtype=np.float32)
+
+    # state
+    # unit state
+    for team_id in range(2):
+        unit_positions = np.array(gt_obs["units"]["position"][team_id])  # (max_units, 2)
+        for unit_id in range(EnvParams.max_units):
+            pos = unit_positions[unit_id]
+            if team_id == target_team_id:
+                state_map[HiddenState.OWN_UNIT.value, pos[0], pos[1]] = 1
+            else:
+                state_map[HiddenState.OPP_UNIT.value, pos[0], pos[1]] = 1
+
+    for i, j in gt_obs["energy_nodes"]:
+        state_map[HiddenState.ENERGY_NODE.value, i, j] = 1
+
+    for i, j in gt_obs["relic_nodes"]:
+        state_map[HiddenState.RELIC_NODE.value, i, j] = 1
+
+    return state_map
 
 
 def extract_state(obs: dict[str, Any], target_team_id: int) -> np.ndarray:
@@ -146,6 +188,7 @@ def can_move(pos: tuple[int, int], energy: int, dir: int, tile_type_map: np.ndar
     2.保持しているエネルギーより移動コストの方が大きい
     3.ASTEROID_TILEタイルが存在する
     自チームと重なるのは今回は問題ないらしい
+
     """
     next_pos = calc_next_pos(pos, dir)
     if not in_map(next_pos):

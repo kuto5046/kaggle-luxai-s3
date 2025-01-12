@@ -15,7 +15,7 @@ from transformers import get_cosine_schedule_with_warmup
 from torch.utils.data import Dataset, DataLoader
 
 import wandb
-from lux.utils import State, Action, to_np
+from lux.utils import State, Action, HiddenState, to_np
 
 
 class LuxAugment:
@@ -48,17 +48,20 @@ class LuxAugment:
     def __call__(self, inputs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
         # x,yが実際のmapと行列で異なるので操作を直感的にするために転置後に処理する
         state = inputs["state"].transpose((0, 2, 1))
+        hidden_state = inputs["hidden_state"].transpose((0, 2, 1))
         action = inputs["action"].T.copy()
 
         # Flip vertically↑↓(# switch up(1) and down(3))
         if random.random() < self.p:
             state = np.flip(state, axis=1).copy()
+            hidden_state = np.flip(hidden_state, axis=1).copy()
             action = np.flip(action, axis=0)
             action = self.switch_action(action, Action.UP.value, Action.DOWN.value)
 
         # Flip horizontally →← (switch left(2) and right(4))
         if random.random() < self.p:
             state = np.flip(state, axis=2).copy()
+            hidden_state = np.flip(hidden_state, axis=2).copy()
             action = np.flip(action, axis=1)
             action = self.switch_action(action, Action.LEFT.value, Action.RIGHT.value)
 
@@ -73,6 +76,7 @@ class LuxAugment:
         # 試合のindexを入れ替える
 
         inputs["state"] = state.transpose((0, 2, 1))
+        inputs["hidden_state"] = hidden_state.transpose((0, 2, 1))
         inputs["action"] = action.T.copy()
         return inputs
 
@@ -96,6 +100,7 @@ class LaxDataset(Dataset):
         episode_id, step_idx = self.ids[idx]
         inputs = {
             "state": np.array(self.h5_file[episode_id]["states"][step_idx]).astype(np.float32),
+            "hidden_state": np.array(self.h5_file[episode_id]["hidden_states"][step_idx]).astype(np.float32),
             "action": np.array(self.h5_file[episode_id]["actions"][step_idx]).astype(np.float32),
         }
         if self.mode == "train":
@@ -151,8 +156,11 @@ class LaxLitModel(LightningModule):
     def __init__(self, cfg: dataclass) -> None:
         super().__init__()
         self.cfg = cfg
-        self.model = LuxUNetModel(in_channels=len(State), out_channels=len(Action))
-        self.criterion = self.get_criterion()
+        self.model = LuxUNetModel(
+            state_space_size=len(State), action_space_size=len(Action), hidden_state_space_size=len(HiddenState)
+        )
+        self.criterion1 = DiceLoss(n_classes=len(Action))
+        self.criterion2 = DiceLoss(n_classes=2)
 
         metrics = self.get_metrics()
         self.train_metrics = metrics.clone(postfix="/train")
@@ -169,13 +177,38 @@ class LaxLitModel(LightningModule):
         return self._share_step(batch, mode="valid")
 
     def _share_step(self, batch: Any, mode: str = "train") -> torch.Tensor:
-        features = batch["state"]
-        targets = batch["action"]
-        outputs = self(features)
+        states = batch["state"]
+        hidden_states = batch["hidden_state"]
+        actions = batch["action"]
+        outputs = self(states)
         policy_logits = outputs["policy"]
+        state_logits = outputs["state"]
         _value_logits = outputs["value"]
-        loss = self.criterion(policy_logits, targets)
 
+        policy_preds = torch.softmax(policy_logits, dim=1)
+        policy_targets = one_hot_encoder(actions, n_classes=len(Action))
+        loss1 = self.criterion1(policy_preds, policy_targets)
+
+        state_preds = torch.sigmoid(state_logits)
+        loss2 = self.criterion2(state_preds, hidden_states)
+        loss = loss1 + loss2
+
+        self.log(
+            f"Loss1/{mode}",
+            loss1,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+        )
+        self.log(
+            f"Loss2/{mode}",
+            loss2,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+        )
         self.log(
             f"Loss/{mode}",
             loss,
@@ -186,8 +219,8 @@ class LaxLitModel(LightningModule):
         )
 
         preds = torch.softmax(policy_logits, dim=1).argmax(dim=1).flatten()
-        gts = targets.flatten()
-        unit_masks = (features[:, State.UNIT_COUNT.value] > 0).flatten()  # unitが存在するところだけで計算する
+        gts = actions.flatten()
+        unit_masks = (states[:, State.UNIT_COUNT.value] > 0).flatten()  # unitが存在するところだけで計算する
 
         preds = preds[unit_masks]
         gts = gts[unit_masks]
@@ -263,9 +296,6 @@ class LaxLitModel(LightningModule):
         }
         return scheduler
 
-    def get_criterion(self) -> torch.nn.Module:
-        return DiceLoss(n_classes=len(Action))
-
     def get_metrics(self) -> MetricCollection:
         return MetricCollection(
             [
@@ -274,8 +304,17 @@ class LaxLitModel(LightningModule):
         )
 
 
+def one_hot_encoder(input_tensor: torch.Tensor, n_classes: int) -> torch.Tensor:
+    tensor_list = []
+    for i in range(n_classes):
+        temp_prob = input_tensor == i
+        tensor_list.append(temp_prob.unsqueeze(1))
+    output_tensor = torch.cat(tensor_list, dim=1)
+    return output_tensor.float()
+
+
 class DiceLoss(nn.Module):
-    def __init__(self, n_classes, weights=None):
+    def __init__(self, n_classes: int, weights: None | list[float] = None) -> None:
         super().__init__()
         self.n_classes = n_classes
         if weights is None:
@@ -283,15 +322,7 @@ class DiceLoss(nn.Module):
         else:
             self.weights = torch.tensor(weights)
 
-    def _one_hot_encoder(self, input_tensor):
-        tensor_list = []
-        for i in range(self.n_classes):
-            temp_prob = input_tensor == i
-            tensor_list.append(temp_prob.unsqueeze(1))
-        output_tensor = torch.cat(tensor_list, dim=1)
-        return output_tensor.float()
-
-    def _dice_loss(self, score, target):
+    def _dice_loss(self, score: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         target = target.float()
         smooth = 1e-5
         intersect = torch.sum(score * target)
@@ -301,10 +332,8 @@ class DiceLoss(nn.Module):
         loss = 1 - loss
         return loss
 
-    def forward(self, inputs, target):
-        inputs = torch.softmax(inputs, dim=1)
-        target = self._one_hot_encoder(target)
-        assert inputs.size() == target.size(), f"predict {inputs.size()} & target {target.size()} shape do not match"
+    def forward(self, inputs: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        # assert inputs.size() == target.size(), f"predict {inputs.size()} & target {target.size()} shape do not match"
         class_wise_dice = []
         loss = 0.0
         for i in range(0, self.n_classes):
@@ -393,13 +422,13 @@ class OutConv(nn.Module):
 
 
 class LuxUNetModel(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, bilinear: bool = True) -> None:
+    def __init__(
+        self, state_space_size: int, action_space_size: int, hidden_state_space_size: int, bilinear: bool = True
+    ) -> None:
         super().__init__()
-        self.in_channels = in_channels
-        self.out_channels = out_channels
         self.bilinear = bilinear
 
-        self.inc = DoubleConv(self.in_channels, 64)
+        self.inc = DoubleConv(state_space_size, 64)
         self.down1 = Down(64, 128)
         self.down2 = Down(128, 256)
         self.down3 = Down(256, 256)
@@ -407,8 +436,8 @@ class LuxUNetModel(nn.Module):
         self.up1 = Up(256 * 2, 256 // factor, bilinear)
         self.up2 = Up(256, 128 // factor, bilinear)
         self.up3 = Up(128, 64, bilinear)
-        self.policy_net = OutConv(64, self.out_channels)
-
+        self.policy_net = OutConv(64, action_space_size)
+        self.state_net = OutConv(64, hidden_state_space_size)
         self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
         self.value_net = nn.Sequential(nn.Linear(256, 128), nn.ReLU(), nn.Linear(128, 64), nn.ReLU(), nn.Linear(64, 1))
 
@@ -425,6 +454,7 @@ class LuxUNetModel(nn.Module):
 
         x = x.view(_n, -1, _x, _y)
         policy_logits = self.policy_net(x)
+        state_logits = self.state_net(x)
         x = self.global_avg_pool(x4).view(_n, -1)
         value_logits = self.value_net(x)
-        return {"policy": policy_logits, "value": value_logits}
+        return {"policy": policy_logits, "state": state_logits, "value": value_logits}

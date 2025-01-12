@@ -9,7 +9,7 @@ import h5py
 import numpy as np
 import polars as pl
 from lightning import seed_everything
-from lux.utils import extract_state, extract_action
+from lux.utils import extract_state, extract_action, extract_hidden_state
 from tqdm.auto import tqdm
 from sklearn.model_selection import KFold
 
@@ -21,7 +21,6 @@ class Config:
     exp_name: str = Path(__file__).parent.name
     seed: int = 2025
     debug: bool = False
-    phase: str = "train"  # train, test
     n_splits: int = 5
     root_dir: Path = Path("/home/user/work")
     input_dir: Path = root_dir / "input"
@@ -100,16 +99,20 @@ class DataProcessor:
                 episode_group = out_f.create_group(f"{episode_id}")
                 episode_action_group = episode_group.create_group("actions")
                 episode_state_group = episode_group.create_group("states")
+                episode_hidden_state_group = episode_group.create_group("hidden_states")
                 target_team_id = np.argmax([r or 0 for r in json_load["rewards"]])  # win or tie
                 steps = json_load["steps"]
                 for step_idx in range(len(steps) - 1):
                     step_info = steps[step_idx]
                     next_step_info = steps[step_idx + 1]
 
-                    # gt_obs = step_info[0]["info"]["replay"]["observations"][0]
                     obs = json.loads(step_info[target_team_id]["observation"]["obs"])
                     state = extract_state(obs, target_team_id)
                     episode_state_group.create_dataset(f"{step_idx}", data=state)
+
+                    gt_obs = step_info[0]["info"]["replay"]["observations"][0]
+                    hidden_state = extract_hidden_state(gt_obs, target_team_id)
+                    episode_hidden_state_group.create_dataset(f"{step_idx}", data=hidden_state)
 
                     # stateの次のステップにおけるactionを予測したいのでnext_stepの行動を取得する
                     next_actions = next_step_info[target_team_id]["action"]
