@@ -35,7 +35,7 @@ class ILAgent:
             output = self.model(state)
             policy_map = output["policy"].squeeze().numpy()
 
-        legal_action_map = get_valid_policy_map(obs, team_id)
+        legal_action_map = get_valid_policy_map(obs, team_id, self.env_cfg)
         action_mask_map = np.ones_like(policy_map) * 1e32
         action_mask_map[legal_action_map > 0] = 0  # legal actionは0でそれ以外は1e32
         # 無効な行動は負の大きな値になるためsoftmax後は0になる。その上で再度無効な行動を0にする
@@ -77,7 +77,7 @@ class Agent:
             else:
                 action = policy.argmax()
 
-            if action == Action.SAP.value:
+            if action == Action.SAP:
                 # params.unit_sap_rangeの範囲内にいる敵ユニットをランダムに選択
                 opp_unit_ids = get_nearby_enemy_unit_ids(unit_pos, opp_unit_positions, self.env_cfg["unit_sap_range"])
                 # 敵のユニットがいる場合はランダムにサンプリングしてSAPする
@@ -86,9 +86,9 @@ class Agent:
                     opp_unit_pos = opp_unit_positions[opp_unit_id]
                     relative_pos = calc_relative_pos(unit_pos, opp_unit_pos)
                     # print(f"{unit_pos=}, {opp_unit_pos=}", file=sys.stderr)
-                    actions[unit_id] = [Action.SAP.value, relative_pos[0], relative_pos[1]]
+                    actions[unit_id] = [Action.SAP, relative_pos[0], relative_pos[1]]
                 else:
-                    actions[unit_id] = [Action.CENTER.value, 0, 0]
+                    actions[unit_id] = [Action.CENTER, 0, 0]
 
             else:
                 actions[unit_id] = [action, 0, 0]

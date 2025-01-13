@@ -22,7 +22,7 @@ LOGGER = logging.getLogger(__name__)
 @dataclass
 class Config:
     exp_name: str = Path(__file__).parent.name
-    notes: str = "隠れ状態をNNで推定する"
+    notes: str = "x,yの関係を修正する"
     seed: int = 2025
     debug: bool = False
     n_splits: int = 5

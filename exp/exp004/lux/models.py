@@ -47,23 +47,23 @@ class LuxAugment:
 
     def __call__(self, inputs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
         # x,yが実際のmapと行列で異なるので操作を直感的にするために転置後に処理する
-        state = inputs["state"].transpose((0, 2, 1))
-        hidden_state = inputs["hidden_state"].transpose((0, 2, 1))
-        action = inputs["action"].T.copy()
+        state = inputs["state"].copy()
+        # hidden_state = inputs["hidden_state"].copy()
+        action = inputs["action"].copy()
 
         # Flip vertically↑↓(# switch up(1) and down(3))
         if random.random() < self.p:
             state = np.flip(state, axis=1).copy()
-            hidden_state = np.flip(hidden_state, axis=1).copy()
+            # hidden_state = np.flip(hidden_state, axis=1).copy()
             action = np.flip(action, axis=0)
-            action = self.switch_action(action, Action.UP.value, Action.DOWN.value)
+            action = self.switch_action(action, Action.UP, Action.DOWN)
 
         # Flip horizontally →← (switch left(2) and right(4))
         if random.random() < self.p:
             state = np.flip(state, axis=2).copy()
-            hidden_state = np.flip(hidden_state, axis=2).copy()
+            # hidden_state = np.flip(hidden_state, axis=2).copy()
             action = np.flip(action, axis=1)
-            action = self.switch_action(action, Action.LEFT.value, Action.RIGHT.value)
+            action = self.switch_action(action, Action.LEFT, Action.RIGHT)
 
         # Rotate 90 degrees ↑→ (right->up, up->left left->down down->right)
         if random.random() < self.p:
@@ -75,9 +75,9 @@ class LuxAugment:
         # mapをランダムにずらす
         # 試合のindexを入れ替える
 
-        inputs["state"] = state.transpose((0, 2, 1))
-        inputs["hidden_state"] = hidden_state.transpose((0, 2, 1))
-        inputs["action"] = action.T.copy()
+        inputs["state"] = state
+        # inputs["hidden_state"] = hidden_state
+        inputs["action"] = action
         return inputs
 
 
@@ -100,7 +100,7 @@ class LaxDataset(Dataset):
         episode_id, step_idx = self.ids[idx]
         inputs = {
             "state": np.array(self.h5_file[episode_id]["states"][step_idx]).astype(np.float32),
-            "hidden_state": np.array(self.h5_file[episode_id]["hidden_states"][step_idx]).astype(np.float32),
+            # "hidden_state": np.array(self.h5_file[episode_id]["hidden_states"][step_idx]).astype(np.float32),
             "action": np.array(self.h5_file[episode_id]["actions"][step_idx]).astype(np.float32),
         }
         if self.mode == "train":
@@ -160,7 +160,7 @@ class LaxLitModel(LightningModule):
             state_space_size=len(State), action_space_size=len(Action), hidden_state_space_size=len(HiddenState)
         )
         self.criterion1 = DiceLoss(n_classes=len(Action))
-        self.criterion2 = DiceLoss(n_classes=2)
+        # self.criterion2 = DiceLoss(n_classes=2)
 
         metrics = self.get_metrics()
         self.train_metrics = metrics.clone(postfix="/train")
@@ -178,37 +178,37 @@ class LaxLitModel(LightningModule):
 
     def _share_step(self, batch: Any, mode: str = "train") -> torch.Tensor:
         states = batch["state"]
-        hidden_states = batch["hidden_state"]
+        # hidden_states = batch["hidden_state"]
         actions = batch["action"]
         outputs = self(states)
         policy_logits = outputs["policy"]
-        state_logits = outputs["state"]
-        _value_logits = outputs["value"]
+        # state_logits = outputs["state"]
+        # _value_logits = outputs["value"]
 
         policy_preds = torch.softmax(policy_logits, dim=1)
         policy_targets = one_hot_encoder(actions, n_classes=len(Action))
-        loss1 = self.criterion1(policy_preds, policy_targets)
+        loss = self.criterion1(policy_preds, policy_targets)
 
-        state_preds = torch.sigmoid(state_logits)
-        loss2 = self.criterion2(state_preds, hidden_states)
-        loss = loss1 + loss2
+        # state_preds = torch.sigmoid(state_logits)
+        # loss2 = self.criterion2(state_preds, hidden_states)
+        # loss = loss1 + loss2
 
-        self.log(
-            f"Loss1/{mode}",
-            loss1,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=False,
-            logger=True,
-        )
-        self.log(
-            f"Loss2/{mode}",
-            loss2,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=False,
-            logger=True,
-        )
+        # self.log(
+        #     f"Loss1/{mode}",
+        #     loss1,
+        #     on_step=False,
+        #     on_epoch=True,
+        #     prog_bar=False,
+        #     logger=True,
+        # )
+        # self.log(
+        #     f"Loss2/{mode}",
+        #     loss2,
+        #     on_step=False,
+        #     on_epoch=True,
+        #     prog_bar=False,
+        #     logger=True,
+        # )
         self.log(
             f"Loss/{mode}",
             loss,
@@ -220,7 +220,7 @@ class LaxLitModel(LightningModule):
 
         preds = torch.softmax(policy_logits, dim=1).argmax(dim=1).flatten()
         gts = actions.flatten()
-        unit_masks = (states[:, State.UNIT_COUNT.value] > 0).flatten()  # unitが存在するところだけで計算する
+        unit_masks = (states[:, State.UNIT_COUNT] > 0).flatten()  # unitが存在するところだけで計算する
 
         preds = preds[unit_masks]
         gts = gts[unit_masks]
@@ -437,7 +437,7 @@ class LuxUNetModel(nn.Module):
         self.up2 = Up(256, 128 // factor, bilinear)
         self.up3 = Up(128, 64, bilinear)
         self.policy_net = OutConv(64, action_space_size)
-        self.state_net = OutConv(64, hidden_state_space_size)
+        # self.state_net = OutConv(64, hidden_state_space_size)
         self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
         self.value_net = nn.Sequential(nn.Linear(256, 128), nn.ReLU(), nn.Linear(128, 64), nn.ReLU(), nn.Linear(64, 1))
 
@@ -454,7 +454,11 @@ class LuxUNetModel(nn.Module):
 
         x = x.view(_n, -1, _x, _y)
         policy_logits = self.policy_net(x)
-        state_logits = self.state_net(x)
+        # state_logits = self.state_net(x)
         x = self.global_avg_pool(x4).view(_n, -1)
         value_logits = self.value_net(x)
-        return {"policy": policy_logits, "state": state_logits, "value": value_logits}
+        return {
+            "policy": policy_logits,
+            # "state": state_logits,
+            "value": value_logits,
+        }
