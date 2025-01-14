@@ -11,8 +11,8 @@ class State(IntEnum):
     TILE_TYPE = 0
     ENERGY = 1
     SENSOR_MASK = 2
-    RELIC_NODE = 3
-    RELIC_NODE_MASK = 4
+    RELICS = 3
+    POINTS = 4  # relic nodes周辺のポイントを獲得できるノード
     UNIT_COUNT = 5
     UNIT_ENERGY = 6
     MATCH_STEPS = 7
@@ -47,6 +47,136 @@ class TileType(IntEnum):
 
 def to_np(x: torch.Tensor) -> np.ndarray:
     return x.detach().cpu().numpy()
+
+
+class EpisodeStore:
+    def __init__(self, target_team_id: int) -> None:
+        self._relic_map = np.zeros((EnvParams.map_height, EnvParams.map_width), dtype=np.float32)
+        self._point_map = np.ones((EnvParams.map_height, EnvParams.map_width), dtype=np.float32) * -1
+        self._target_team_id = target_team_id
+        self.reset()
+
+    def reset(self) -> None:
+        self._own_unit_positions = np.zeros((EnvParams.max_units, 2), dtype=np.int32)
+        self._own_unit_enrgies = np.zeros(EnvParams.max_units, dtype=np.int32)
+        self._prev_move_units = np.zeros(EnvParams.max_units)  # 前のstepで移動したユニット
+        self._prev_points = 0
+        self._current_points = 0
+
+    @property
+    def point(self) -> int:
+        # pointが減ることはないので必ず0以上を返す
+        return self._current_points - self._prev_points
+
+    @property
+    def relic_map(self) -> np.ndarray:
+        return self._relic_map.copy()
+
+    @property
+    def point_map(self) -> np.ndarray:
+        return self._point_map.copy()
+
+    @property
+    def own_unit_positions(self) -> np.ndarray:
+        return self._own_unit_positions.copy()
+
+    @property
+    def own_unit_energies(self) -> np.ndarray:
+        return self._own_unit_enrgies.copy()
+
+    def update(self, obs: dict[str, Any], prev_actions: list[list[int]]) -> None:
+        self._update_relic_map(obs)
+        self._update_actions(prev_actions)
+        self._update_own_units(obs)
+        self._update_points(obs)
+        self._update_point_map(obs)
+
+    def _update_relic_map(self, obs: dict[str, Any]) -> None:
+        # # relicの情報を記録する関数
+        relic_nodes = obs["relic_nodes"]
+        # relic_nodes_mask = obs['relic_nodes_mask']
+        for x, y in relic_nodes:
+            if x == -1 and y == -1:
+                continue
+            self._relic_map[y, x] = 1
+
+    def _update_actions(self, prev_actions: dict[str, Any]) -> None:
+        if len(prev_actions) == 0:
+            return
+
+        # すべてFalseで初期化
+        self._prev_move_units = np.zeros(EnvParams.max_units)
+
+        # actionの情報を記録する関数
+        for unit_id in range(EnvParams.max_units):
+            action = prev_actions[unit_id][0]
+            # TODO: 行動を選択してるがゲーム側の制約で移動していない場合が考慮されていないはず
+            if action in [Action.UP, Action.RIGHT, Action.DOWN, Action.LEFT]:
+                self._prev_move_units[unit_id] = action
+            else:
+                self._prev_move_units[unit_id] = 0
+
+    def _update_own_units(self, obs: dict[str, Any]) -> None:
+        # TODO: gtと一致しないため正確でない
+        # 自チームのunitの情報を記録する
+        own_unit_positions = np.array(obs["units"]["position"][self._target_team_id])
+        own_unit_energies = np.array(obs["units"]["energy"][self._target_team_id])
+        for unit_id in range(EnvParams.max_units):
+            pos = np.array(own_unit_positions[unit_id])
+            if pos[0] == -1 and pos[1] == -1:
+                prev_dir = self._prev_move_units[unit_id]
+                # 移動してる場合その前の位置は必ずわかっているはず
+                if prev_dir == 0:
+                    continue
+                else:
+                    # 現在の1つ前の時点でのposを参照する
+                    prev_pos = self._own_unit_positions[unit_id]
+                    # 現在の1つ前の時点での行動を元に現在のステップのposを計算する
+                    pos = calc_next_pos(prev_pos, prev_dir)
+            self._own_unit_positions[unit_id] = pos
+            self._own_unit_enrgies[unit_id] = own_unit_energies[unit_id]
+
+    def _update_points(self, obs: dict[str, Any]) -> None:
+        self._prev_points = self._current_points
+        self._current_points = obs["team_points"][self._target_team_id]
+
+    def _update_point_map(self, obs: dict[str, Any]) -> None:
+        """
+        移動したユニットがいるかをまず考える(いない場合はpointは変動しない)
+
+        """
+        # 必ず_update_points, _update_actionsを先に呼び出すこと
+        unit_positions = np.array(obs["units"]["position"][self._target_team_id])  # (max_units, 2)
+        # unit_positionsのうちpoint_mapが未知の位置のみ抽出する
+        unknown_positions = []
+        for x, y in unit_positions:
+            if self._point_map[y, x] not in (0, 1):
+                unknown_positions.append((x, y))
+
+        # ポイントが変わらない場合そのユニット位置はpointが発生していない
+        if self.point == 0:
+            for x, y in unknown_positions:
+                self._point_map[y, x] = 0
+        elif 0 < self.point < EnvParams.max_units:
+            # ユニット位置の発生確率
+            # N件のunitが新規で動いたことでK件のpointが発生する場合、K/Nの確率で
+            move_unit_count = np.sum(self._prev_move_units)
+
+            # mapが移動する場合あり得る
+            if move_unit_count == 0:
+                return
+
+            prob = self.point / move_unit_count
+            for x, y in unknown_positions:
+                # 過去にも確率値として計算されている場合もあるため最大値をその地点のポイント発生確率とする
+                self._point_map[y, x] = max(self._point_map[y, x], prob)
+
+        # ポイントがmax_unitsに達した場合そのユニット位置はすべてpointが発生している
+        elif self.point == EnvParams.max_units:
+            for x, y in unknown_positions:
+                self._point_map[y, x] = 1
+        else:
+            raise ValueError(f"invalid point: {self.point}")
 
 
 def extract_hidden_state(gt_obs: dict[str, Any], target_team_id: int) -> np.ndarray:
@@ -84,7 +214,7 @@ def extract_hidden_state(gt_obs: dict[str, Any], target_team_id: int) -> np.ndar
     return state_map
 
 
-def extract_state(obs: dict[str, Any], target_team_id: int) -> np.ndarray:
+def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: EpisodeStore) -> np.ndarray:
     state_space_size: int = len(State)
     enemy_team_id = 1 - target_team_id
     state_map = np.zeros((state_space_size, EnvParams.map_width, EnvParams.map_height), dtype=np.float32)
@@ -96,19 +226,20 @@ def extract_state(obs: dict[str, Any], target_team_id: int) -> np.ndarray:
     state_map[State.ENERGY] = np.array(obs["map_features"]["energy"]).T / 10  # (24, 24)
     state_map[State.SENSOR_MASK] = np.array(obs["sensor_mask"][target_team_id]).T
 
-    for k, (x, y) in enumerate(obs["relic_nodes"]):
-        state_map[State.RELIC_NODE, y, x] = 1
-        state_map[State.RELIC_NODE_MASK, y, x] = obs["relic_nodes_mask"][k]
+    state_map[State.RELICS] = episode_store.relic_map
+    state_map[State.POINTS] = episode_store.point_map
 
     # unit state
     for team_id in range(2):
         # 敵チームの情報はvision内にいない限り見れない
-        unit_energys = np.array(obs["units"]["energy"][team_id])  # (max_units, 1)
-        unit_positions = np.array(obs["units"]["position"][team_id])  # (max_units, 2)
+        # unit_energies = np.array(obs["units"]["energy"][team_id])  # (max_units, 1)
+        # unit_positions = np.array(obs["units"]["position"][team_id])  # (max_units, 2)
+        unit_positions = episode_store.own_unit_positions
+        unit_energies = episode_store.own_unit_energies
         unit_masks = np.array(obs["units_mask"][team_id])  # (max_units, )
         available_unit_ids = np.where(unit_masks)[0]
         for unit_id in available_unit_ids:
-            unit_energy = unit_energys[unit_id]
+            unit_energy = unit_energies[unit_id]
             x, y = unit_positions[unit_id]
             # 味方同士は重複可能なのでincrementする（敵との重複はないため打ち消し合うことはないはず）
             if team_id == target_team_id:

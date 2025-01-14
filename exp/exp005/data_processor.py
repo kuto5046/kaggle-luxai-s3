@@ -9,7 +9,7 @@ import h5py
 import numpy as np
 import polars as pl
 from lightning import seed_everything
-from lux.utils import extract_state, extract_action
+from lux.utils import EpisodeStore, extract_state, extract_action
 from tqdm.auto import tqdm
 from sklearn.model_selection import KFold
 
@@ -99,18 +99,39 @@ class DataProcessor:
                 episode_group = out_f.create_group(f"{episode_id}")
                 episode_action_group = episode_group.create_group("actions")
                 episode_state_group = episode_group.create_group("states")
+
                 # episode_hidden_state_group = episode_group.create_group("hidden_states")
                 target_team_id = np.argmax([r or 0 for r in json_load["rewards"]])  # win or tie
+
+                # episode内で獲得する情報
+                episode_store = EpisodeStore(target_team_id)
                 steps = json_load["steps"]
                 for step_idx in range(len(steps) - 1):
+                    prev_step_info = steps[step_idx - 1] if step_idx > 0 else None
                     step_info = steps[step_idx]
                     next_step_info = steps[step_idx + 1]
-
                     obs = json.loads(step_info[target_team_id]["observation"]["obs"])
-                    state = extract_state(obs, target_team_id)
+
+                    # マッチごとにリセットされる要素をリセット
+                    if obs["match_steps"] == 0:
+                        episode_store.reset()
+
+                    # prev_actions = step_info[target_team_id]["action"]
+                    if prev_step_info is not None:
+                        prev_actions = prev_step_info[target_team_id]["action"]
+                    else:
+                        prev_actions = {}
+                    episode_store.update(obs, prev_actions)
+
+                    state = extract_state(obs, target_team_id, episode_store)
                     episode_state_group.create_dataset(f"{step_idx}", data=state)
 
                     # gt_obs = step_info[0]["info"]["replay"]["observations"][0]
+                    # gt_unit_positions = np.array(gt_obs["units"]["position"][target_team_id])  # (max_units, 2)
+                    # gt_unit_energies = np.array(gt_obs["units"]["energy"][target_team_id]).flatten()  # (max_units,)
+                    # assert np.all(gt_unit_positions == episode_store.own_unit_positions)
+                    # assert np.all(gt_unit_energies == episode_store.own_unit_energies)  # gtの値が負の大きい値が出る
+
                     # hidden_state = extract_hidden_state(gt_obs, target_team_id)
                     # episode_hidden_state_group.create_dataset(f"{step_idx}", data=hidden_state)
 
