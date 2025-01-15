@@ -7,6 +7,7 @@ from dataclasses import field, dataclass
 
 import h5py
 import numpy as np
+import joblib
 import polars as pl
 from lightning import seed_everything
 from lux.utils import EpisodeStore, extract_action, extract_gt_state
@@ -79,71 +80,73 @@ class DataProcessor:
             episode_df = episode_df.sample(n=10, seed=self.cfg.seed)
         return episode_df
 
+    def _process_episode(self, row) -> tuple[str, int]:
+        sub_id = row["SubmissionId"]
+        episode_id = row["EpisodeId"]
+        episode_path = self.episode_dir / f"{sub_id}/{episode_id}.json"
+
+        with open(episode_path) as f:
+            json_load = json.load(f)
+
+        # 無効なepisodeはスキップ
+        if not valid_episode(json_load, self.cfg.target_team_name):
+            return None
+
+        with h5py.File(self.feature_dir / f"temp_{episode_id}.h5", "w") as out_f:
+            episode_group = out_f.create_group(f"{episode_id}")
+            episode_action_group = episode_group.create_group("actions")
+            episode_state_group = episode_group.create_group("states")
+
+            target_team_id = np.argmax([r or 0 for r in json_load["rewards"]])  # win or tie
+
+            # episode内で獲得する情報
+            episode_store = EpisodeStore(target_team_id)
+            episode_store.load_env_cfg(json_load["configuration"]["env_cfg"])
+            steps = json_load["steps"]
+            for step_idx in range(len(steps) - 1):
+                prev_step_info = steps[step_idx - 1] if step_idx > 0 else None
+                step_info = steps[step_idx]
+                next_step_info = steps[step_idx + 1]
+                obs = json.loads(step_info[target_team_id]["observation"]["obs"])
+                gt_obs = step_info[0]["info"]["replay"]["observations"][0]
+
+                # マッチごとにリセットされる要素をリセット
+                if obs["match_steps"] == 0:
+                    episode_store.reset()
+
+                if prev_step_info is not None:
+                    prev_actions = prev_step_info[target_team_id]["action"]
+                else:
+                    prev_actions = {}
+                episode_store.update(obs, prev_actions)
+
+                state = extract_gt_state(gt_obs, target_team_id)
+                episode_state_group.create_dataset(f"{step_idx}", data=state)
+
+                next_actions = next_step_info[target_team_id]["action"]
+                action = extract_action(next_actions, obs, target_team_id)
+                episode_action_group.create_dataset(f"{step_idx}", data=action)
+
+        return str(episode_id), len(steps) - 1
+
     def preprocess(self, df: pl.DataFrame) -> pl.DataFrame:
-        valid_ids = []
-        max_steps = []
+        # 並列処理の実行
+        results = joblib.Parallel(n_jobs=-1)(
+            joblib.delayed(self._process_episode)(row) for row in tqdm(df.iter_rows(named=True), total=len(df))
+        )
+
+        # 有効なエピソードのみを抽出
+        valid_results = [r for r in results if r is not None]
+        valid_ids, max_steps = zip(*valid_results)
+
+        # 一時ファイルを1つのh5ファイルにマージ
         with h5py.File(self.feature_dir / "episodes.h5", "w") as out_f:
-            for row in tqdm(df.iter_rows(named=True), total=len(df)):
-                sub_id = row["SubmissionId"]
-                episode_id = row["EpisodeId"]
-                episode_path = self.episode_dir / f"{sub_id}/{episode_id}.json"
+            for episode_id in valid_ids:
+                temp_path = self.feature_dir / f"temp_{episode_id}.h5"
+                with h5py.File(temp_path, "r") as temp_f:
+                    temp_f.copy(f"{episode_id}", out_f)
+                temp_path.unlink()  # 一時ファイルの削除
 
-                with open(episode_path) as f:
-                    json_load = json.load(f)
-
-                # 無効なepisodeはスキップ
-                if not valid_episode(json_load, self.cfg.target_team_name):
-                    continue
-                valid_ids.append(str(episode_id))
-
-                episode_group = out_f.create_group(f"{episode_id}")
-                episode_action_group = episode_group.create_group("actions")
-                episode_state_group = episode_group.create_group("states")
-
-                # episode_hidden_state_group = episode_group.create_group("hidden_states")
-                target_team_id = np.argmax([r or 0 for r in json_load["rewards"]])  # win or tie
-
-                # episode内で獲得する情報
-                episode_store = EpisodeStore(target_team_id)
-                episode_store.load_env_cfg(json_load["configuration"]["env_cfg"])
-                steps = json_load["steps"]
-                for step_idx in range(len(steps) - 1):
-                    prev_step_info = steps[step_idx - 1] if step_idx > 0 else None
-                    step_info = steps[step_idx]
-                    next_step_info = steps[step_idx + 1]
-                    obs = json.loads(step_info[target_team_id]["observation"]["obs"])
-                    gt_obs = step_info[0]["info"]["replay"]["observations"][0]
-
-                    # マッチごとにリセットされる要素をリセット
-                    if obs["match_steps"] == 0:
-                        episode_store.reset()
-
-                    # prev_actions = step_info[target_team_id]["action"]
-                    if prev_step_info is not None:
-                        prev_actions = prev_step_info[target_team_id]["action"]
-                    else:
-                        prev_actions = {}
-                    episode_store.update(obs, prev_actions)
-
-                    # state = extract_state(obs, target_team_id, episode_store)
-                    state = extract_gt_state(gt_obs, target_team_id)
-                    episode_state_group.create_dataset(f"{step_idx}", data=state)
-
-                    # gt_obs = step_info[0]["info"]["replay"]["observations"][0]
-                    # gt_unit_positions = np.array(gt_obs["units"]["position"][target_team_id])  # (max_units, 2)
-                    # gt_unit_energies = np.array(gt_obs["units"]["energy"][target_team_id]).flatten()  # (max_units,)
-                    # assert np.all(gt_unit_positions == episode_store.own_unit_positions)
-                    # assert np.all(gt_unit_energies == episode_store.own_unit_energies)  # gtの値が負の大きい値が出る
-
-                    # hidden_state = extract_hidden_state(gt_obs, target_team_id)
-                    # episode_hidden_state_group.create_dataset(f"{step_idx}", data=hidden_state)
-
-                    # stateの次のステップにおけるactionを予測したいのでnext_stepの行動を取得する
-                    next_actions = next_step_info[target_team_id]["action"]
-                    action = extract_action(next_actions, obs, target_team_id)
-                    episode_action_group.create_dataset(f"{step_idx}", data=action)
-
-                max_steps.append(len(steps) - 1)
         return pl.DataFrame(
             {"EpisodeId": valid_ids, "MaxStep": max_steps},
         )

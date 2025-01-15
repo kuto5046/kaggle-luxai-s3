@@ -220,7 +220,7 @@ class LaxLitModel(LightningModule):
 
         preds = torch.softmax(policy_logits, dim=1).argmax(dim=1).flatten()
         gts = actions.flatten()
-        unit_masks = (states[:, State.UNIT_COUNT] > 0).flatten()  # unitが存在するところだけで計算する
+        unit_masks = (states[:, State.OWN_UNIT_COUNT] > 0).flatten()  # unitが存在するところだけで計算する
 
         preds = preds[unit_masks]
         gts = gts[unit_masks]

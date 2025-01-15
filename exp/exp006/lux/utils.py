@@ -1,4 +1,4 @@
-from enum import IntEnum
+from enum import IntEnum, auto
 from typing import Any
 
 import numpy as np
@@ -8,25 +8,29 @@ from lux.params import EnvParams
 
 
 class State(IntEnum):
-    TILE_TYPE = 0
-    ENERGY = 1
-    SENSOR_MASK = 2
-    RELICS = 3
-    POINTS = 4  # relic nodes周辺のポイントを獲得できるノード
-    UNIT_COUNT = 5
-    UNIT_ENERGY = 6
-    MATCH_STEPS = 7
-    MATCH_COUNT = 8
-    TEAM_POINTS = 9
-    TEAM_WINS = 10
+    TILE_TYPE = 0  # 0スタート
+    ENERGY = auto()
+    SENSOR_MASK = auto()
+    RELICS = auto()
+    POINTS = auto()  # relic nodes周辺のポイントを獲得できるノード
+    OWN_UNIT_COUNT = auto()
+    OWN_UNIT_ENERGY = auto()
+    OWN_UNIT_MASK = auto()
+    OPP_UNIT_COUNT = auto()
+    OPP_UNIT_ENERGY = auto()
+    OPP_UNIT_MASK = auto()
+    MATCH_STEPS = auto()
+    MATCH_COUNT = auto()
+    TEAM_POINTS = auto()
+    TEAM_WINS = auto()
 
 
 class HiddenState(IntEnum):
     # 分類として扱いたいので全てbinaryで表現する
     OWN_UNIT = 0
-    OPP_UNIT = 1
-    ENERGY_NODE = 2
-    RELIC_NODE = 3
+    OPP_UNIT = auto()
+    ENERGY_NODE = auto()
+    RELIC_NODE = auto()
 
 
 class Action(IntEnum):
@@ -283,11 +287,13 @@ def extract_gt_state(obs: dict[str, Any], target_team_id: int) -> np.ndarray:
             # 味方同士は重複可能なのでincrementする（敵との重複はないため打ち消し合うことはないはず）
             if team_id == target_team_id:
                 # 重複はそんなに発生しないだろうということで正規化はしない
-                state_map[State.UNIT_COUNT, y, x] += 1
-                state_map[State.UNIT_ENERGY, y, x] += unit_energy / EnvParams.max_unit_energy
+                state_map[State.OWN_UNIT_COUNT, y, x] += 1
+                state_map[State.OWN_UNIT_ENERGY, y, x] += unit_energy / EnvParams.max_unit_energy
+                state_map[State.OWN_UNIT_MASK, y, x] = 1
             else:
-                state_map[State.UNIT_COUNT, y, x] -= 1
-                state_map[State.UNIT_ENERGY, y, x] -= unit_energy / EnvParams.max_unit_energy
+                state_map[State.OPP_UNIT_COUNT, y, x] += 1
+                state_map[State.OPP_UNIT_ENERGY, y, x] += unit_energy / EnvParams.max_unit_energy
+                state_map[State.OPP_UNIT_MASK, y, x] = 1
 
     # game state
     state_map[State.MATCH_STEPS] = obs["match_steps"] / EnvParams.max_steps_in_match  # そのマッチの進行度
