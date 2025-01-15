@@ -91,6 +91,9 @@ class EpisodeStore:
         self._update_points(obs)
         self._update_point_map(obs)
 
+    def load_env_cfg(self, env_cfg: dict[str, Any]) -> None:
+        self.env_cfg = env_cfg
+
     def _update_relic_map(self, obs: dict[str, Any]) -> None:
         # # relicの情報を記録する関数
         relic_nodes = obs["relic_nodes"]
@@ -131,8 +134,19 @@ class EpisodeStore:
                 else:
                     # 現在の1つ前の時点でのposを参照する
                     prev_pos = self._own_unit_positions[unit_id]
+                    prev_energy = self._own_unit_enrgies[unit_id]
                     # 現在の1つ前の時点での行動を元に現在のステップのposを計算する
-                    pos = calc_next_pos(prev_pos, prev_dir)
+                    if can_move(
+                        prev_pos,
+                        prev_energy,
+                        prev_dir,
+                        # 1つ前のstepと変わらないという仮定を置いて現stepのtile_typeを使う
+                        np.array(obs["map_features"]["tile_type"]).T,
+                        self.env_cfg["unit_move_cost"],
+                    ):
+                        pos = calc_next_pos(prev_pos, prev_dir)
+                    else:
+                        pos = prev_pos
             self._own_unit_positions[unit_id] = pos
             self._own_unit_enrgies[unit_id] = own_unit_energies[unit_id]
 
@@ -276,7 +290,7 @@ def extract_action(actions: dict[str, Any], obs: dict[str, Any], target_team_id:
 
 def get_valid_policy_map(obs: dict[str, Any], team_id: int, env_cfg: EnvParams) -> np.ndarray:
     validate_policy_map = np.zeros((len(Action), EnvParams.map_width, EnvParams.map_height), dtype=np.float32)
-    tile_type_map = np.array(obs["map_features"]["tile_type"])  # (24, 24)
+    tile_type_map = np.array(obs["map_features"]["tile_type"]).T  # (24, 24)
     available_unit_ids = np.where(obs["units_mask"][team_id])[0]
     for unit_id in available_unit_ids:
         pos = tuple(obs["units"]["position"][team_id][unit_id])
@@ -284,7 +298,7 @@ def get_valid_policy_map(obs: dict[str, Any], team_id: int, env_cfg: EnvParams) 
         energy = obs["units"]["energy"][team_id][unit_id]
 
         validate_policy_map[:6, y, x] = 1  # 行動は一旦全て有効化
-        for dir in range(1, 5):
+        for dir in [Action.UP, Action.RIGHT, Action.DOWN, Action.LEFT]:
             if not can_move(pos, energy, dir, tile_type_map, env_cfg.unit_move_cost):
                 validate_policy_map[dir, y, x] = 0
 
@@ -334,7 +348,5 @@ def can_move(pos: tuple[int, int], energy: int, dir: int, tile_type_map: np.ndar
     return True
 
 
-def can_sap(energy: int):
-    # 行動にはcostがかからない
-    return True
-    # return energy >= EnvParams.unit_sap_cost
+def can_sap(energy: int, unit_sap_cost: int):
+    return energy >= unit_sap_cost

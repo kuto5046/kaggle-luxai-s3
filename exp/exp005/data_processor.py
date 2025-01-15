@@ -105,6 +105,7 @@ class DataProcessor:
 
                 # episode内で獲得する情報
                 episode_store = EpisodeStore(target_team_id)
+                episode_store.load_env_cfg(json_load["configuration"]["env_cfg"])
                 steps = json_load["steps"]
                 for step_idx in range(len(steps) - 1):
                     prev_step_info = steps[step_idx - 1] if step_idx > 0 else None
