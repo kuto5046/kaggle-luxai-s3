@@ -22,7 +22,7 @@ LOGGER = logging.getLogger(__name__)
 @dataclass
 class Config:
     exp_name: str = Path(__file__).parent.name
-    notes: str = "relic特徴量追加"
+    notes: str = "真値を使う"
     seed: int = 2025
     debug: bool = False
     n_splits: int = 5
