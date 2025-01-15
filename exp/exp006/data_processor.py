@@ -9,7 +9,7 @@ import h5py
 import numpy as np
 import polars as pl
 from lightning import seed_everything
-from lux.utils import EpisodeStore, extract_state, extract_action
+from lux.utils import EpisodeStore, extract_action, extract_gt_state
 from tqdm.auto import tqdm
 from sklearn.model_selection import KFold
 
@@ -112,6 +112,7 @@ class DataProcessor:
                     step_info = steps[step_idx]
                     next_step_info = steps[step_idx + 1]
                     obs = json.loads(step_info[target_team_id]["observation"]["obs"])
+                    gt_obs = step_info[0]["info"]["replay"]["observations"][0]
 
                     # マッチごとにリセットされる要素をリセット
                     if obs["match_steps"] == 0:
@@ -124,7 +125,8 @@ class DataProcessor:
                         prev_actions = {}
                     episode_store.update(obs, prev_actions)
 
-                    state = extract_state(obs, target_team_id, episode_store)
+                    # state = extract_state(obs, target_team_id, episode_store)
+                    state = extract_gt_state(gt_obs, target_team_id)
                     episode_state_group.create_dataset(f"{step_idx}", data=state)
 
                     # gt_obs = step_info[0]["info"]["replay"]["observations"][0]

@@ -228,6 +228,77 @@ def extract_hidden_state(gt_obs: dict[str, Any], target_team_id: int) -> np.ndar
     return state_map
 
 
+def get_gt_point_map(gt_obs: dict[str, Any]) -> np.ndarray:
+    relic_map = np.zeros((24, 24))
+    for node_pos, _reward_map in zip(gt_obs["relic_nodes"], gt_obs["relic_node_configs"]):
+        x, y = node_pos
+        reward_map = np.array(_reward_map, dtype=bool)
+        h, w = reward_map.shape
+
+        # reward_mapの中心座標を計算
+        center_y, center_x = h // 2, w // 2
+
+        # mapに挿入する領域の開始・終了座標を計算
+        start_y = max(0, y - center_y)
+        end_y = min(24, y + (h - center_y))
+        start_x = max(0, x - center_x)
+        end_x = min(24, x + (w - center_x))
+
+        # reward_mapの対応する部分を切り出す
+        map_start_y = center_y - (y - start_y)
+        map_end_y = center_y + (end_y - y)
+        map_start_x = center_x - (x - start_x)
+        map_end_x = center_x + (end_x - x)
+
+        relic_map[start_y:end_y, start_x:end_x] = reward_map[map_start_y:map_end_y, map_start_x:map_end_x]
+        return relic_map
+
+
+def extract_gt_state(obs: dict[str, Any], target_team_id: int) -> np.ndarray:
+    state_space_size: int = len(State)
+    enemy_team_id = 1 - target_team_id
+    state_map = np.zeros((state_space_size, EnvParams.map_width, EnvParams.map_height), dtype=np.float32)
+
+    # state
+    # map state
+    state_map[State.TILE_TYPE] = np.array(obs["map_features"]["tile_type"]).T  # (24, 24)
+    # energy nodesの位置は未知(tileのenergyはvisionで観測可能)
+    state_map[State.ENERGY] = np.array(obs["map_features"]["energy"]).T / 10  # (24, 24)
+    state_map[State.SENSOR_MASK] = np.array(obs["vision_power_map"][target_team_id]).T
+
+    for x, y in obs["relic_nodes"]:
+        state_map[State.RELICS, y, x] = 1
+    state_map[State.POINTS] = get_gt_point_map(obs)
+
+    # unit state
+    for team_id in range(2):
+        # 敵チームの情報はvision内にいない限り見れない
+        unit_energies = np.array(obs["units"]["energy"][team_id])  # (max_units, 1)
+        unit_positions = np.array(obs["units"]["position"][team_id])  # (max_units, 2)
+        unit_masks = np.array(obs["units_mask"][team_id])  # (max_units, )
+        available_unit_ids = np.where(unit_masks)[0]
+        for unit_id in available_unit_ids:
+            unit_energy = unit_energies[unit_id]
+            x, y = unit_positions[unit_id]
+            # 味方同士は重複可能なのでincrementする（敵との重複はないため打ち消し合うことはないはず）
+            if team_id == target_team_id:
+                # 重複はそんなに発生しないだろうということで正規化はしない
+                state_map[State.UNIT_COUNT, y, x] += 1
+                state_map[State.UNIT_ENERGY, y, x] += unit_energy / EnvParams.max_unit_energy
+            else:
+                state_map[State.UNIT_COUNT, y, x] -= 1
+                state_map[State.UNIT_ENERGY, y, x] -= unit_energy / EnvParams.max_unit_energy
+
+    # game state
+    state_map[State.MATCH_STEPS] = obs["match_steps"] / EnvParams.max_steps_in_match  # そのマッチの進行度
+    state_map[State.MATCH_COUNT] = obs["steps"] // EnvParams.max_steps_in_match  # 何試合目か
+    state_map[State.TEAM_POINTS] = (obs["team_points"][target_team_id] - obs["team_points"][enemy_team_id]) / 100
+    state_map[State.TEAM_WINS] = (
+        obs["team_wins"][target_team_id] - obs["team_wins"][enemy_team_id]
+    ) / EnvParams.match_count_per_episode
+    return state_map
+
+
 def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: EpisodeStore) -> np.ndarray:
     state_space_size: int = len(State)
     enemy_team_id = 1 - target_team_id
