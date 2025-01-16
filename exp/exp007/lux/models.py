@@ -15,7 +15,8 @@ from transformers import get_cosine_schedule_with_warmup
 from torch.utils.data import Dataset, DataLoader
 
 import wandb
-from lux.utils import State, Action, HiddenState, to_np
+
+from .utils import State, Action, HiddenState, to_np
 
 
 class LuxAugment:
@@ -102,6 +103,7 @@ class LaxDataset(Dataset):
             "state": np.array(self.h5_file[episode_id]["states"][step_idx]).astype(np.float32),
             # "hidden_state": np.array(self.h5_file[episode_id]["hidden_states"][step_idx]).astype(np.float32),
             "action": np.array(self.h5_file[episode_id]["actions"][step_idx]).astype(np.float32),
+            "win": np.array(self.h5_file[episode_id]["win"][step_idx]).astype(np.float32),
         }
         if self.mode == "train":
             inputs = self.transform(inputs)
@@ -160,6 +162,7 @@ class LaxLitModel(LightningModule):
             state_space_size=len(State), action_space_size=len(Action), hidden_state_space_size=len(HiddenState)
         )
         self.criterion1 = DiceLoss(n_classes=len(Action))
+        self.criterion2 = nn.BCEWithLogitsLoss()
         # self.criterion2 = DiceLoss(n_classes=2)
 
         metrics = self.get_metrics()
@@ -183,32 +186,34 @@ class LaxLitModel(LightningModule):
         outputs = self(states)
         policy_logits = outputs["policy"]
         # state_logits = outputs["state"]
-        # _value_logits = outputs["value"]
+        value_logits = outputs["value"]
 
         policy_preds = torch.softmax(policy_logits, dim=1)
         policy_targets = one_hot_encoder(actions, n_classes=len(Action))
-        loss = self.criterion1(policy_preds, policy_targets)
+        policy_loss = self.criterion1(policy_preds, policy_targets)
+
+        value_loss = self.criterion2(value_logits.flatten(), batch["win"])
 
         # state_preds = torch.sigmoid(state_logits)
         # loss2 = self.criterion2(state_preds, hidden_states)
-        # loss = loss1 + loss2
+        loss = policy_loss + value_loss
 
-        # self.log(
-        #     f"Loss1/{mode}",
-        #     loss1,
-        #     on_step=False,
-        #     on_epoch=True,
-        #     prog_bar=False,
-        #     logger=True,
-        # )
-        # self.log(
-        #     f"Loss2/{mode}",
-        #     loss2,
-        #     on_step=False,
-        #     on_epoch=True,
-        #     prog_bar=False,
-        #     logger=True,
-        # )
+        self.log(
+            f"PolicyLoss/{mode}",
+            policy_loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+        )
+        self.log(
+            f"ValueLoss/{mode}",
+            value_loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+        )
         self.log(
             f"Loss/{mode}",
             loss,

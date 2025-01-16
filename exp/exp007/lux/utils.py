@@ -4,7 +4,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from lux.params import EnvParams
+from .params import EnvParams
 
 
 class State(IntEnum):
@@ -328,22 +328,28 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
         unit_positions = episode_store.own_unit_positions
         unit_energies = episode_store.own_unit_energies
         unit_masks = np.array(obs["units_mask"][team_id])  # (max_units, )
-        available_unit_ids = np.where(unit_masks)[0]
-        for unit_id in available_unit_ids:
+        # available_unit_ids = np.where(unit_masks)[0]
+        for unit_id in range(EnvParams.max_units):
             unit_energy = unit_energies[unit_id]
             x, y = unit_positions[unit_id]
+            unit_mask = unit_masks[unit_id] * 1
+            if x == -1 and y == -1:
+                continue
             # 味方同士は重複可能なのでincrementする（敵との重複はないため打ち消し合うことはないはず）
             if team_id == target_team_id:
                 # 重複はそんなに発生しないだろうということで正規化はしない
-                state_map[State.UNIT_COUNT, y, x] += 1
-                state_map[State.UNIT_ENERGY, y, x] += unit_energy / EnvParams.max_unit_energy
+                state_map[State.OWN_UNIT_COUNT, y, x] += 1
+                state_map[State.OWN_UNIT_ENERGY, y, x] += unit_energy / EnvParams.max_unit_energy
+                state_map[State.OWN_UNIT_MASK, y, x] = unit_mask
             else:
-                state_map[State.UNIT_COUNT, y, x] -= 1
-                state_map[State.UNIT_ENERGY, y, x] -= unit_energy / EnvParams.max_unit_energy
+                state_map[State.OPP_UNIT_COUNT, y, x] += 1
+                state_map[State.OPP_UNIT_ENERGY, y, x] += unit_energy / EnvParams.max_unit_energy
+                state_map[State.OPP_UNIT_MASK, y, x] = unit_mask
 
     # game state
     state_map[State.MATCH_STEPS] = obs["match_steps"] / EnvParams.max_steps_in_match  # そのマッチの進行度
-    state_map[State.MATCH_COUNT] = obs["steps"] // EnvParams.max_steps_in_match  # 何試合目か
+    # 0-100は0, 101-201は1, ... としたい
+    state_map[State.MATCH_COUNT] = obs["steps"] // (EnvParams.max_steps_in_match + 1)  # 何試合目か
     state_map[State.TEAM_POINTS] = (obs["team_points"][target_team_id] - obs["team_points"][enemy_team_id]) / 100
     state_map[State.TEAM_WINS] = (
         obs["team_wins"][target_team_id] - obs["team_wins"][enemy_team_id]
@@ -379,7 +385,7 @@ def get_valid_policy_map(obs: dict[str, Any], team_id: int, env_cfg: EnvParams) 
             if not can_move(pos, energy, dir, tile_type_map, env_cfg.unit_move_cost):
                 validate_policy_map[dir, y, x] = 0
 
-        if not can_sap(energy):
+        if not can_sap(energy, env_cfg.unit_sap_cost):
             validate_policy_map[Action.SAP, y, x] = 0
     return validate_policy_map
 

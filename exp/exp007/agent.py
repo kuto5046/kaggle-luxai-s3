@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from lightning import seed_everything
-from lux.utils import State, Action, extract_state, get_valid_policy_map
+from lux.utils import State, Action, HiddenState, EpisodeStore, extract_state, get_valid_policy_map
 from lux.models import LuxUNetModel
 from lux.params import EnvParams
 from scipy.special import softmax
@@ -13,14 +13,16 @@ from scipy.special import softmax
 class Config:
     seed: int = 2025
     # 確率的な行動を取るかどうか
-    stochastic: bool = True  # Falseにするとargmaxで行動を選択する
+    stochastic: bool = False  # Falseにするとargmaxで行動を選択する
 
     checkpoint_path: Path = Path(__file__).parent / "output/best_model.ckpt"
 
 
 class ILAgent:
     def __init__(self, env_cfg: EnvParams, checkpoint_path: Path) -> None:
-        self.model = LuxUNetModel(in_channels=len(State), out_channels=len(Action))
+        self.model = LuxUNetModel(
+            state_space_size=len(State), action_space_size=len(Action), hidden_state_space_size=len(HiddenState)
+        )
         ckpt = torch.load(checkpoint_path, weights_only=True, map_location="cpu")
         state_dict = {k.replace("model.", ""): v for k, v in ckpt["state_dict"].items()}
         self.model.load_state_dict(state_dict)
@@ -28,8 +30,8 @@ class ILAgent:
         self.player = None
         self.env_cfg = env_cfg
 
-    def predict(self, obs: dict[str, Any], team_id: int):
-        state = extract_state(obs, team_id)
+    def predict(self, obs: dict[str, Any], team_id: int, episode_store: EpisodeStore):
+        state = extract_state(obs, team_id, episode_store)
         state = torch.from_numpy(state).unsqueeze(0).float()
         with torch.no_grad():
             output = self.model(state)
@@ -57,9 +59,12 @@ class Agent:
         self.opp_team_id = 1 if self.team_id == 0 else 0
         np.random.seed(self.cfg.seed)
         self.env_cfg = env_cfg
+        self.episode_store = EpisodeStore(self.team_id)
+        self.prev_actions = {}
 
     def act(self, step: int, obs, remainingOverageTime: int = 60):
-        policy_map = imitation_model.predict(obs, self.team_id)
+        self.episode_store.update(obs, self.prev_actions)
+        policy_map = imitation_model.predict(obs, self.team_id, self.episode_store)
 
         unit_mask = np.array(obs["units_mask"][self.team_id])  # shape (max_units, )
         unit_positions = np.array(obs["units"]["position"][self.team_id])  # shape (max_units, 2)
@@ -92,6 +97,7 @@ class Agent:
 
             else:
                 actions[unit_id] = [action, 0, 0]
+        self.prev_actions = actions.copy()
         return actions
 
 

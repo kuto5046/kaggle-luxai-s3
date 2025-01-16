@@ -10,8 +10,9 @@ import numpy as np
 import joblib
 import polars as pl
 from lightning import seed_everything
-from lux.utils import EpisodeStore, extract_action, extract_gt_state
+from lux.utils import EpisodeStore, extract_state, extract_action
 from tqdm.auto import tqdm
+from lux.params import EnvParams
 from sklearn.model_selection import KFold
 
 LOGGER = logging.getLogger(__name__)
@@ -96,19 +97,21 @@ class DataProcessor:
             episode_group = out_f.create_group(f"{episode_id}")
             episode_action_group = episode_group.create_group("actions")
             episode_state_group = episode_group.create_group("states")
+            episode_win_group = episode_group.create_group("win")
 
-            target_team_id = np.argmax([r or 0 for r in json_load["rewards"]])  # win or tie
+            target_team_id = np.argmax(json_load["rewards"])  # win or tie
+            match_results = get_match_results(json_load, target_team_id)
 
             # episode内で獲得する情報
             episode_store = EpisodeStore(target_team_id)
             episode_store.load_env_cfg(json_load["configuration"]["env_cfg"])
             steps = json_load["steps"]
-            for step_idx in range(len(steps) - 1):
+            for step_idx in range(len(steps) - 1):  # 505でdoneとなるため-1
                 prev_step_info = steps[step_idx - 1] if step_idx > 0 else None
                 step_info = steps[step_idx]
                 next_step_info = steps[step_idx + 1]
                 obs = json.loads(step_info[target_team_id]["observation"]["obs"])
-                gt_obs = step_info[0]["info"]["replay"]["observations"][0]
+                # gt_obs = step_info[0]["info"]["replay"]["observations"][0]
 
                 # マッチごとにリセットされる要素をリセット
                 if obs["match_steps"] == 0:
@@ -120,18 +123,24 @@ class DataProcessor:
                     prev_actions = {}
                 episode_store.update(obs, prev_actions)
 
-                state = extract_gt_state(gt_obs, target_team_id)
+                # state = extract_gt_state(gt_obs, target_team_id)
+                state = extract_state(obs, target_team_id, episode_store)
                 episode_state_group.create_dataset(f"{step_idx}", data=state)
 
                 next_actions = next_step_info[target_team_id]["action"]
                 action = extract_action(next_actions, obs, target_team_id)
                 episode_action_group.create_dataset(f"{step_idx}", data=action)
 
+                match_idx = obs["steps"] // (EnvParams.max_steps_in_match + 1)
+                is_win = match_results[match_idx]
+                episode_win_group.create_dataset(f"{step_idx}", data=is_win)
+
         return str(episode_id), len(steps) - 1
 
     def preprocess(self, df: pl.DataFrame) -> pl.DataFrame:
         # 並列処理の実行
-        results = joblib.Parallel(n_jobs=-1)(
+        n_jobs = joblib.cpu_count() if not self.cfg.debug else 1
+        results = joblib.Parallel(n_jobs=n_jobs)(
             joblib.delayed(self._process_episode)(row) for row in tqdm(df.iter_rows(named=True), total=len(df))
         )
 
@@ -159,6 +168,18 @@ class DataProcessor:
         df = self.preprocess(episode_paths)
         df = self.add_fold(df)
         df.write_csv(self.feature_dir / "train.csv")
+
+
+def get_match_results(json_load: dict[str, Any], target_team_id: int) -> list[bool]:
+    match_results = []
+    for i_match in range(EnvParams.match_count_per_episode):
+        final_step_in_match = (i_match + 1) * 100 + i_match  # 100, 201, 302, 403, 504
+        win_team = np.argmax(
+            json_load["steps"][final_step_in_match][0]["info"]["replay"]["observations"][0]["team_points"]
+        )
+        is_win = win_team == target_team_id
+        match_results.append(is_win)
+    return match_results
 
 
 def main() -> None:
