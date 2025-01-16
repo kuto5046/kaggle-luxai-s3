@@ -1,5 +1,9 @@
+import importlib.util
+from pathlib import Path
+
 import h5py
 import numpy as np
+import polars as pl
 import streamlit as st
 import matplotlib.pyplot as plt
 
@@ -7,28 +11,42 @@ import matplotlib.pyplot as plt
 st.set_page_config(layout="wide")
 
 
-def load_episode_data(file_path):
-    """HDF5ファイルからエピソードデータを読み込む"""
-    with h5py.File(file_path, "r") as f:
-        episode_ids = list(f.keys())
-        return episode_ids, f
+def load_state_enum(exp_name):
+    """exp_nameに対応するState enumをロードする"""
+    utils_path = Path(f"exp/{exp_name}/lux/utils.py")
+    if not utils_path.exists():
+        raise FileNotFoundError(f"utils.py not found at {utils_path}")
+
+    spec = importlib.util.spec_from_file_location("utils", str(utils_path))
+    utils = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(utils)
+    return utils.State
 
 
 def main():
     st.title("Episode Data Visualizer")
 
-    # ファイル選択
-    file_path = st.text_input("HDF5ファイルパス", "output/feature_store/exp001/episodes.h5")
+    # exp選択
+    exp_name = st.selectbox(
+        "実験を選択", options=["exp001", "exp002", "exp003", "exp004", "exp005", "exp006", "exp007"]
+    )
+
+    # ファイルパス生成
+    input_dir = Path(f"output/feature_store/{exp_name}")
+    h5_file_path = input_dir / "episodes.h5"
+    df_path = input_dir / "train.csv"
 
     # データ読み込み
-    episode_ids, h5_file = load_episode_data(file_path)
-
+    h5_file = h5py.File(h5_file_path, "r")
+    df = pl.read_csv(df_path)
+    episode_ids = df["EpisodeId"].to_list()
     # エピソード選択
-    selected_episode = st.selectbox("エピソードを選択", episode_ids)
+    selected_episode = str(st.selectbox("エピソードを選択", episode_ids))
 
     if selected_episode:
+        episode_data = h5_file[selected_episode]
         # ステップ数取得
-        steps = list(h5_file[selected_episode]["states"].keys())
+        steps = list(episode_data["states"].keys())
         st.write(f"Total Steps: {len(steps)}")
 
         # ステップ選択
