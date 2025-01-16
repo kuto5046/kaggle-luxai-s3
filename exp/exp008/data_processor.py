@@ -81,7 +81,7 @@ class DataProcessor:
             episode_df = episode_df.sample(n=10, seed=self.cfg.seed)
         return episode_df
 
-    def _process_episode(self, row) -> tuple[str, int]:
+    def _process_episode(self, row) -> tuple[str, int, int]:
         sub_id = row["SubmissionId"]
         episode_id = row["EpisodeId"]
         episode_path = self.episode_dir / f"{sub_id}/{episode_id}.json"
@@ -135,7 +135,7 @@ class DataProcessor:
                 is_win = match_results[match_idx]
                 episode_win_group.create_dataset(f"{step_idx}", data=is_win)
 
-        return str(episode_id), len(steps) - 1
+        return str(episode_id), len(steps) - 1, target_team_id
 
     def preprocess(self, df: pl.DataFrame) -> pl.DataFrame:
         # 並列処理の実行
@@ -146,7 +146,7 @@ class DataProcessor:
 
         # 有効なエピソードのみを抽出
         valid_results = [r for r in results if r is not None]
-        valid_ids, max_steps = zip(*valid_results)
+        valid_ids, max_steps, target_team_ids = zip(*valid_results)
 
         # 一時ファイルを1つのh5ファイルにマージ
         with h5py.File(self.feature_dir / "episodes.h5", "w") as out_f:
@@ -157,7 +157,7 @@ class DataProcessor:
                 temp_path.unlink()  # 一時ファイルの削除
 
         return pl.DataFrame(
-            {"EpisodeId": valid_ids, "MaxStep": max_steps},
+            {"EpisodeId": valid_ids, "MaxStep": max_steps, "TargetTeamId": target_team_ids},
         )
 
     def add_fold(self, df: pl.DataFrame) -> pl.DataFrame:

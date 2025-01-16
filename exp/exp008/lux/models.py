@@ -196,7 +196,7 @@ class LaxLitModel(LightningModule):
 
         # state_preds = torch.sigmoid(state_logits)
         # loss2 = self.criterion2(state_preds, hidden_states)
-        loss = policy_loss + value_loss
+        loss = policy_loss  # + value_loss
 
         self.log(
             f"PolicyLoss/{mode}",

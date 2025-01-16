@@ -45,8 +45,11 @@ def visualize_action(action):
 
 
 @st.cache_data()
-def load_model(exp_name: str) -> LuxUNetModel:
+def load_model(exp_name: str) -> LuxUNetModel | None:
     checkpoint_path = Path(f"/home/user/work/exp/{exp_name}/output/best_model.ckpt")
+    if not checkpoint_path.exists():
+        return None
+
     model = LuxUNetModel(
         state_space_size=len(State), action_space_size=len(Action), hidden_state_space_size=len(HiddenState)
     )
@@ -87,16 +90,18 @@ def main():
             # データ取得
             action = np.array(h5_file[selected_episode]["actions"][selected_step])
             state = np.array(h5_file[selected_episode]["states"][selected_step])
-            torch_state = torch.tensor(state).unsqueeze(0).float()
-            with torch.no_grad():
-                output = model(torch_state)
-                pred_action = to_np(output["policy"].argmax(dim=1).cpu().squeeze())
-
             col1, col2 = st.columns(2)
             with col1:
                 visualize_action(action)
-            with col2:
-                visualizer_pred_action(pred_action)
+
+            if model is not None:
+                torch_state = torch.tensor(state).unsqueeze(0).float()
+                with torch.no_grad():
+                    output = model(torch_state)
+                    pred_action = to_np(output["policy"].argmax(dim=1).cpu().squeeze())
+                with col2:
+                    visualizer_pred_action(pred_action)
+
             visualize_state(state)
 
     # h5_file.close()

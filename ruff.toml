@@ -45,6 +45,7 @@ ignore = [
 	"E501",   # allow comment line length
 	"PLR2004",
 	"S311",
+	"C901",  # allow too complex
 ]
 
 [lint.flake8-annotations]

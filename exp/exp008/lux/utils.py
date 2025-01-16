@@ -106,6 +106,8 @@ class EpisodeStore:
             if x == -1 and y == -1:
                 continue
             self._relic_map[y, x] = 1
+            ox, oy = get_opposite(x, y)
+            self._relic_map[oy, ox] = 1
 
     def _update_actions(self, prev_actions: dict[str, Any]) -> None:
         if len(prev_actions) == 0:
@@ -168,6 +170,8 @@ class EpisodeStore:
         # unit_positionsのうちpoint_mapが未知の位置のみ抽出する
         unknown_positions = []
         for x, y in unit_positions:
+            if x == -1 and y == -1:
+                continue
             if self._point_map[y, x] not in (0, 1):
                 unknown_positions.append((x, y))
 
@@ -175,6 +179,8 @@ class EpisodeStore:
         if self.point == 0:
             for x, y in unknown_positions:
                 self._point_map[y, x] = 0
+                ox, oy = get_opposite(x, y)
+                self._point_map[oy, ox] = 0
         elif 0 < self.point < EnvParams.max_units:
             # ユニット位置の発生確率
             # N件のunitが新規で動いたことでK件のpointが発生する場合、K/Nの確率で
@@ -188,11 +194,15 @@ class EpisodeStore:
             for x, y in unknown_positions:
                 # 過去にも確率値として計算されている場合もあるため最大値をその地点のポイント発生確率とする
                 self._point_map[y, x] = max(self._point_map[y, x], prob)
+                ox, oy = get_opposite(x, y)
+                self._point_map[oy, ox] = max(self._point_map[oy, ox], prob)
 
         # ポイントがmax_unitsに達した場合そのユニット位置はすべてpointが発生している
         elif self.point == EnvParams.max_units:
             for x, y in unknown_positions:
                 self._point_map[y, x] = 1
+                ox, oy = get_opposite(x, y)
+                self._point_map[oy, ox] = 1
         else:
             raise ValueError(f"invalid point: {self.point}")
 
@@ -258,6 +268,24 @@ def get_gt_point_map(gt_obs: dict[str, Any]) -> np.ndarray:
         return relic_map
 
 
+def get_opposite(x: int, y: int) -> tuple[int, int]:
+    # Returns the mirrored point across the diagonal
+    return EnvParams.map_height - y - 1, EnvParams.map_width - x - 1
+
+
+def mirroring(map2d: np.ndarray, null_value: float = -1.0) -> np.ndarray:
+    """
+    (24,24)のマップを想定
+    -1以外で埋められている部分を反転結果で埋める
+    """
+    for y in range(EnvParams.map_height):
+        for x in range(EnvParams.map_width):
+            if map2d[y, x] != null_value:
+                ox, oy = get_opposite(x, y)
+                map2d[y, x] = map2d[oy, ox]
+    return map2d
+
+
 def extract_gt_state(obs: dict[str, Any], target_team_id: int) -> np.ndarray:
     state_space_size: int = len(State)
     enemy_team_id = 1 - target_team_id
@@ -266,8 +294,10 @@ def extract_gt_state(obs: dict[str, Any], target_team_id: int) -> np.ndarray:
     # state
     # map state
     state_map[State.TILE_TYPE] = np.array(obs["map_features"]["tile_type"]).T  # (24, 24)
+
     # energy nodesの位置は未知(tileのenergyはvisionで観測可能)
     state_map[State.ENERGY] = np.array(obs["map_features"]["energy"]).T / 10  # (24, 24)
+
     state_map[State.SENSOR_MASK] = np.array(obs["vision_power_map"][target_team_id]).T
 
     for x, y in obs["relic_nodes"]:
@@ -313,8 +343,10 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
     # state
     # map state
     state_map[State.TILE_TYPE] = np.array(obs["map_features"]["tile_type"]).T  # (24, 24)
+    state_map[State.TILE_TYPE] = mirroring(state_map[State.TILE_TYPE], null_value=-1)
     # energy nodesの位置は未知(tileのenergyはvisionで観測可能)
     state_map[State.ENERGY] = np.array(obs["map_features"]["energy"]).T / 10  # (24, 24)
+    state_map[State.ENERGY] = mirroring(state_map[State.ENERGY], null_value=-0.1)
     state_map[State.SENSOR_MASK] = np.array(obs["sensor_mask"][target_team_id]).T
 
     state_map[State.RELICS] = episode_store.relic_map
@@ -322,11 +354,13 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
 
     # unit state
     for team_id in range(2):
-        # 敵チームの情報はvision内にいない限り見れない
-        # unit_energies = np.array(obs["units"]["energy"][team_id])  # (max_units, 1)
-        # unit_positions = np.array(obs["units"]["position"][team_id])  # (max_units, 2)
-        unit_positions = episode_store.own_unit_positions
-        unit_energies = episode_store.own_unit_energies
+        if team_id == target_team_id:
+            unit_positions = episode_store.own_unit_positions
+            unit_energies = episode_store.own_unit_energies
+        else:
+            # 敵チームの情報はvision内にいない限り見れない
+            unit_energies = np.array(obs["units"]["energy"][team_id])  # (max_units, 1)
+            unit_positions = np.array(obs["units"]["position"][team_id])  # (max_units, 2)
         unit_masks = np.array(obs["units_mask"][team_id])  # (max_units, )
         # available_unit_ids = np.where(unit_masks)[0]
         for unit_id in range(EnvParams.max_units):
