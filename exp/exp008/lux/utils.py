@@ -414,7 +414,8 @@ def get_valid_policy_map(obs: dict[str, Any], team_id: int, env_cfg: EnvParams) 
         x, y = pos
         energy = obs["units"]["energy"][team_id][unit_id]
 
-        validate_policy_map[:6, y, x] = 1  # 行動は一旦全て有効化
+        validate_policy_map[:, y, x] = 1  # 行動は一旦全て有効化
+
         for dir in [Action.UP, Action.RIGHT, Action.DOWN, Action.LEFT]:
             if not can_move(pos, energy, dir, tile_type_map, env_cfg.unit_move_cost):
                 validate_policy_map[dir, y, x] = 0

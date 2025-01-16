@@ -60,9 +60,13 @@ class Agent:
         np.random.seed(self.cfg.seed)
         self.env_cfg = env_cfg
         self.episode_store = EpisodeStore(self.team_id)
+        self.episode_store.load_env_cfg(env_cfg)
         self.prev_actions = {}
 
     def act(self, step: int, obs, remainingOverageTime: int = 60):
+        # マッチごとにリセットされる要素をリセット
+        if obs["match_steps"] == 0:
+            self.episode_store.reset()
         self.episode_store.update(obs, self.prev_actions)
         policy_map = imitation_model.predict(obs, self.team_id, self.episode_store)
 
@@ -75,7 +79,9 @@ class Agent:
         # unit ids range from 0 to max_units - 1
         for unit_id in available_unit_ids:
             unit_pos = unit_positions[unit_id]
-            policy = policy_map[:, unit_pos[0], unit_pos[1]]
+            x, y = unit_pos
+            policy = policy_map[:, y, x]
+            # print(policy, file=sys.stderr)
 
             if cfg.stochastic:
                 action = np.random.choice(range(6), p=policy)
