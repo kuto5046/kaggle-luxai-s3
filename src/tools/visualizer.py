@@ -1,26 +1,12 @@
-import importlib.util
 from pathlib import Path
 
 import h5py
-import numpy as np
 import polars as pl
 import streamlit as st
-import matplotlib.pyplot as plt
+import plotly.graph_objects as go
 
 # ページ設定
 st.set_page_config(layout="wide")
-
-
-def load_state_enum(exp_name):
-    """exp_nameに対応するState enumをロードする"""
-    utils_path = Path(f"exp/{exp_name}/lux/utils.py")
-    if not utils_path.exists():
-        raise FileNotFoundError(f"utils.py not found at {utils_path}")
-
-    spec = importlib.util.spec_from_file_location("utils", str(utils_path))
-    utils = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(utils)
-    return utils.State
 
 
 def main():
@@ -55,63 +41,22 @@ def main():
         if selected_step:
             # データ取得
             state = h5_file[selected_episode]["states"][selected_step][:]
-            action = h5_file[selected_episode]["actions"][selected_step][:]
+            # action = h5_file[selected_episode]["actions"][selected_step][:]
 
             # データ表示
-            col1, col2 = st.columns(2)
-            with col1:
-                st.subheader("State")
+            st.subheader("State")
+            # 全てのチャンネルを可視化する
 
-                # チャンネル情報
-                channel_names = [
-                    "OWN_UNIT_COUNT",
-                    "OPPONENT_UNIT_COUNT",
-                    "RESOURCE_COUNT",
-                    "FACTORY_COUNT",
-                    "UNIT_HEALTH",
-                    "FACTORY_HEALTH",
-                    "UNIT_ENERGY",
-                    "FACTORY_ENERGY",
-                ]
+            # ヒートマップ表示
+            num_channels = state.shape[0]
+            cols = st.columns(6)
+            for i in range(num_channels):
+                with cols[i % 6]:
+                    fig = go.Figure(data=go.Heatmap(z=state[i], zmid=0))
+                    fig.update_layout(title=f"Channel {i}", width=400, height=400)
+                    st.plotly_chart(fig)
 
-                # チャンネル選択
-                selected_channels = st.multiselect(
-                    "表示するチャンネルを選択(最大4つ)", options=channel_names, default=[channel_names[0]]
-                )
-
-                # カラーマップ選択
-                cmap = st.selectbox(
-                    "カラーマップを選択", options=["viridis", "plasma", "inferno", "magma", "cividis"], index=0
-                )
-
-                # ヒートマップ表示
-                num_channels = min(4, len(selected_channels))  # 最大4チャンネルまで表示
-                fig, axes = plt.subplots(1, num_channels, figsize=(6 * num_channels, 6))
-                if num_channels == 1:
-                    axes = [axes]
-
-                for i, channel in enumerate(selected_channels[:4]):
-                    channel_idx = channel_names.index(channel)
-                    im = axes[i].imshow(state[channel_idx], cmap=cmap)
-                    plt.colorbar(im, ax=axes[i])
-                    axes[i].set_title(f"{channel} at Step {selected_step}")
-
-                plt.tight_layout()
-                st.pyplot(fig)
-
-            with col2:
-                st.subheader("Action")
-                st.write(action)
-
-                # Actionの分布
-                st.subheader("Action Distribution")
-                all_actions = np.array([h5_file[selected_episode]["actions"][step][:] for step in steps]).flatten()
-
-                fig, ax = plt.subplots(figsize=(8, 4))
-                ax.hist(all_actions, bins=20)
-                ax.set_xlabel("Action")
-                ax.set_ylabel("Count")
-                st.pyplot(fig)
+            st.subheader("Action")
 
 
 if __name__ == "__main__":
