@@ -1,5 +1,6 @@
 from typing import Any
 from pathlib import Path
+from collections import deque
 
 import numpy as np
 import torch
@@ -14,12 +15,13 @@ class Config:
     seed: int = 2025
     # 確率的な行動を取るかどうか
     stochastic: bool = False  # Falseにするとargmaxで行動を選択する
+    n_stack: int = 4
 
     checkpoint_path: Path = Path(__file__).parent / "output/best_model.ckpt"
 
 
 class ILAgent:
-    def __init__(self, env_cfg: EnvParams, checkpoint_path: Path) -> None:
+    def __init__(self, env_cfg: EnvParams, checkpoint_path: Path, n_stack: int) -> None:
         self.model = LuxUNetModel(
             state_space_size=len(State), action_space_size=len(Action), hidden_state_space_size=len(HiddenState)
         )
@@ -29,12 +31,19 @@ class ILAgent:
         self.model.eval()
         self.player = None
         self.env_cfg = env_cfg
+        # n_stack分のstateを保持するqueue
+        self.stack_states = deque(maxlen=n_stack)
+        for i in range(n_stack):
+            self.stack_states.append(np.zeros((len(State), 24, 24)))
 
     def predict(self, obs: dict[str, Any], team_id: int, episode_store: EpisodeStore):
         state = extract_state(obs, team_id, episode_store)
-        state = torch.from_numpy(state).unsqueeze(0).float()
+        self.stack_states.append(state)
+        stacked_state = np.stack(list(self.stack_states), axis=0)
+        stacked_state = torch.from_numpy(stacked_state).unsqueeze(0).float()
+
         with torch.no_grad():
-            output = self.model(state)
+            output = self.model(stacked_state)
             policy_map = output["policy"].squeeze().numpy()
 
         legal_action_map = get_valid_policy_map(obs, team_id, self.env_cfg)
@@ -47,7 +56,7 @@ class ILAgent:
 
 cfg = Config()
 seed_everything(cfg.seed, workers=True)
-imitation_model = ILAgent(EnvParams, cfg.checkpoint_path)
+imitation_model = ILAgent(EnvParams, cfg.checkpoint_path, cfg.n_stack)
 
 
 class Agent:
