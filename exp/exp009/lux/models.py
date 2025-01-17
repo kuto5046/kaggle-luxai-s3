@@ -17,6 +17,7 @@ from torch.utils.data import Dataset, DataLoader
 import wandb
 
 from .utils import State, Action, HiddenState, to_np
+from .params import EnvParams
 
 
 class LuxAugment:
@@ -98,15 +99,26 @@ class LaxDataset(Dataset):
         return len(self.ids)
 
     def __getitem__(self, idx: int) -> dict[str, np.ndarray]:
-        episode_id, step_idx = self.ids[idx]
+        states = []
+        for i in range(self.cfg.n_stack - 1, -1, -1):
+            if idx - i >= 0:
+                episode_id, step_idx = self.ids[idx - i]
+                state = np.array(self.h5_file[episode_id]["states"][step_idx]).astype(np.float32)
+            else:
+                state = np.zeros((len(State), EnvParams.map_height, EnvParams.map_width), dtype=np.float32)
+            states.append(state)
+
+        state = np.stack(states, axis=0)  # (n_stack, channel, x, y)
+        action = np.array(self.h5_file[episode_id]["actions"][step_idx]).astype(np.float32)
+        win = np.array(self.h5_file[episode_id]["win"][step_idx]).astype(np.float32)
         inputs = {
-            "state": np.array(self.h5_file[episode_id]["states"][step_idx]).astype(np.float32),
-            # "hidden_state": np.array(self.h5_file[episode_id]["hidden_states"][step_idx]).astype(np.float32),
-            "action": np.array(self.h5_file[episode_id]["actions"][step_idx]).astype(np.float32),
-            "win": np.array(self.h5_file[episode_id]["win"][step_idx]).astype(np.float32),
+            "state": state,
+            "action": action,
+            "win": win,
         }
-        if self.mode == "train":
-            inputs = self.transform(inputs)
+        # TODO: 次元が増えてるので修正が必要
+        # if self.mode == "train":
+        #     inputs = self.transform(inputs)
 
         return inputs
 
@@ -225,7 +237,7 @@ class LaxLitModel(LightningModule):
 
         preds = torch.softmax(policy_logits, dim=1).argmax(dim=1).flatten()
         gts = actions.flatten()
-        unit_masks = (states[:, State.OWN_UNIT_COUNT] > 0).flatten()  # unitが存在するところだけで計算する
+        unit_masks = (states[:, -1, State.OWN_UNIT_COUNT] > 0).flatten()  # unitが存在するところだけで計算する
 
         preds = preds[unit_masks]
         gts = gts[unit_masks]
@@ -428,7 +440,12 @@ class OutConv(nn.Module):
 
 class LuxUNetModel(nn.Module):
     def __init__(
-        self, state_space_size: int, action_space_size: int, hidden_state_space_size: int, bilinear: bool = True
+        self,
+        state_space_size: int,
+        action_space_size: int,
+        hidden_state_space_size: int,
+        bilinear: bool = True,
+        n_stack: int = 4,
     ) -> None:
         super().__init__()
         self.bilinear = bilinear
@@ -441,13 +458,15 @@ class LuxUNetModel(nn.Module):
         self.up1 = Up(256 * 2, 256 // factor, bilinear)
         self.up2 = Up(256, 128 // factor, bilinear)
         self.up3 = Up(128, 64, bilinear)
-        self.policy_net = OutConv(64, action_space_size)
+        self.policy_net = OutConv(64 * n_stack, action_space_size)
         # self.state_net = OutConv(64, hidden_state_space_size)
         self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
-        self.value_net = nn.Sequential(nn.Linear(256, 128), nn.ReLU(), nn.Linear(128, 64), nn.ReLU(), nn.Linear(64, 1))
+        self.value_net = nn.Sequential(
+            nn.Linear(256 * n_stack, 128), nn.ReLU(), nn.Linear(128, 64), nn.ReLU(), nn.Linear(64, 1)
+        )
 
     def forward(self, state: torch.Tensor) -> dict[str, torch.Tensor]:
-        _n, _c, _x, _y = state.shape
+        _n, _t, _c, _x, _y = state.shape
         x = state.view(-1, _c, _x, _y)
         x1 = self.inc(x)
         x2 = self.down1(x1)
