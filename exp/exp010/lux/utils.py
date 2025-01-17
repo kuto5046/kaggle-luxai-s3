@@ -29,8 +29,7 @@ class HiddenState(IntEnum):
     # 分類として扱いたいので全てbinaryで表現する
     OWN_UNIT = 0
     OPP_UNIT = auto()
-    ENERGY_NODE = auto()
-    RELIC_NODE = auto()
+    POINTS = auto()
 
 
 class Action(IntEnum):
@@ -56,6 +55,7 @@ def to_np(x: torch.Tensor) -> np.ndarray:
 class EpisodeStore:
     def __init__(self, target_team_id: int) -> None:
         self._relic_map = np.zeros((EnvParams.map_height, EnvParams.map_width), dtype=np.float32)
+        # self._relic_nodes = None # TODO: relic_nodesを全て発見したらその情報を使ってpoint_mapを更新する(ポイントが絶対に存在しないところがわかる)
         self._point_map = np.ones((EnvParams.map_height, EnvParams.map_width), dtype=np.float32) * -1
         self._target_team_id = target_team_id
         self.reset()
@@ -169,11 +169,21 @@ class EpisodeStore:
         unit_positions = np.array(obs["units"]["position"][self._target_team_id])  # (max_units, 2)
         # unit_positionsのうちpoint_mapが未知の位置のみ抽出する
         unknown_positions = []
+        known_point = 0
         for x, y in unit_positions:
             if x == -1 and y == -1:
                 continue
-            if self._point_map[y, x] not in (0, 1):
-                unknown_positions.append((x, y))
+            # 非ポイントと確定してる場合ポイント計算はしない
+            if self._point_map[y, x] == 0:
+                continue
+            # ポイントセルとして確定している場合は既知ポイントとしてカウント
+            if self._point_map[y, x] == 1:
+                known_point += 1
+                continue
+            unknown_positions.append((x, y))
+
+        if len(unknown_positions) == 0:
+            return
 
         # ポイントが変わらない場合そのユニット位置はpointが発生していない
         if self.point == 0:
@@ -182,20 +192,13 @@ class EpisodeStore:
                 ox, oy = get_opposite(x, y)
                 self._point_map[oy, ox] = 0
         elif 0 < self.point < EnvParams.max_units:
-            # ユニット位置の発生確率
-            # N件のunitが新規で動いたことでK件のpointが発生する場合、K/Nの確率で
-            move_unit_count = np.sum(self._prev_move_units)
-
-            # mapが移動する場合あり得る
-            if move_unit_count == 0:
-                return
-
-            prob = self.point / move_unit_count
+            # 確定しないところを抽出して按分した場合のmaxをみる
+            prob = (self.point - known_point) / len(unknown_positions)
             for x, y in unknown_positions:
-                # 過去にも確率値として計算されている場合もあるため最大値をその地点のポイント発生確率とする
-                self._point_map[y, x] = max(self._point_map[y, x], prob)
                 ox, oy = get_opposite(x, y)
-                self._point_map[oy, ox] = max(self._point_map[oy, ox], prob)
+                # 過去にも確率値として計算されている場合もあるため最大値をその地点のポイント発生確率とする
+                self._point_map[y, x] = max(self._point_map[y, x], prob, self._point_map[oy, ox])
+                self._point_map[oy, ox] = self._point_map[y, x]
 
         # ポイントがmax_unitsに達した場合そのユニット位置はすべてpointが発生している
         elif self.point == EnvParams.max_units:
@@ -222,7 +225,6 @@ def extract_hidden_state(gt_obs: dict[str, Any], target_team_id: int) -> np.ndar
     state_map = np.zeros((state_space_size, EnvParams.map_width, EnvParams.map_height), dtype=np.float32)
 
     # state
-    # unit state
     for team_id in range(2):
         unit_positions = np.array(gt_obs["units"]["position"][team_id])  # (max_units, 2)
         for unit_id in range(EnvParams.max_units):
@@ -233,11 +235,7 @@ def extract_hidden_state(gt_obs: dict[str, Any], target_team_id: int) -> np.ndar
             else:
                 state_map[HiddenState.OPP_UNIT, y, x] = 1
 
-    for x, y in gt_obs["energy_nodes"]:
-        state_map[HiddenState.ENERGY_NODE, y, x] = 1
-
-    for x, y in gt_obs["relic_nodes"]:
-        state_map[HiddenState.RELIC_NODE, y, x] = 1
+    state_map[HiddenState.POINTS] = get_gt_point_map(gt_obs)
 
     return state_map
 
@@ -265,7 +263,7 @@ def get_gt_point_map(gt_obs: dict[str, Any]) -> np.ndarray:
         map_end_x = center_x + (end_x - x)
 
         relic_map[start_y:end_y, start_x:end_x] = reward_map[map_start_y:map_end_y, map_start_x:map_end_x]
-        return relic_map
+    return relic_map
 
 
 def get_opposite(x: int, y: int) -> tuple[int, int]:
@@ -310,20 +308,23 @@ def extract_gt_state(obs: dict[str, Any], target_team_id: int) -> np.ndarray:
         unit_energies = np.array(obs["units"]["energy"][team_id])  # (max_units, 1)
         unit_positions = np.array(obs["units"]["position"][team_id])  # (max_units, 2)
         unit_masks = np.array(obs["units_mask"][team_id])  # (max_units, )
-        available_unit_ids = np.where(unit_masks)[0]
-        for unit_id in available_unit_ids:
+        for unit_id in range(EnvParams.max_units):
             unit_energy = unit_energies[unit_id]
             x, y = unit_positions[unit_id]
+            unit_mask = unit_masks[unit_id] * 1
+            if x == -1 and y == -1:
+                continue
+
             # 味方同士は重複可能なのでincrementする（敵との重複はないため打ち消し合うことはないはず）
             if team_id == target_team_id:
                 # 重複はそんなに発生しないだろうということで正規化はしない
                 state_map[State.OWN_UNIT_COUNT, y, x] += 1
                 state_map[State.OWN_UNIT_ENERGY, y, x] += unit_energy / EnvParams.max_unit_energy
-                state_map[State.OWN_UNIT_MASK, y, x] = 1
+                state_map[State.OWN_UNIT_MASK, y, x] = unit_mask
             else:
                 state_map[State.OPP_UNIT_COUNT, y, x] += 1
                 state_map[State.OPP_UNIT_ENERGY, y, x] += unit_energy / EnvParams.max_unit_energy
-                state_map[State.OPP_UNIT_MASK, y, x] = 1
+                state_map[State.OPP_UNIT_MASK, y, x] = unit_mask
 
     # game state
     state_map[State.MATCH_STEPS] = obs["match_steps"] / EnvParams.max_steps_in_match  # そのマッチの進行度

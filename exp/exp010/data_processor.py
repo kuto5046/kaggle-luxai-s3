@@ -10,7 +10,7 @@ import numpy as np
 import joblib
 import polars as pl
 from lightning import seed_everything
-from lux.utils import EpisodeStore, extract_state, extract_action
+from lux.utils import EpisodeStore, extract_state, extract_action, extract_gt_state, extract_hidden_state
 from tqdm.auto import tqdm
 from lux.params import EnvParams
 from sklearn.model_selection import KFold
@@ -23,6 +23,7 @@ class Config:
     exp_name: str = Path(__file__).parent.name
     seed: int = 2025
     debug: bool = False
+    use_gt: bool = False
     n_splits: int = 5
     root_dir: Path = Path("/home/user/work")
     input_dir: Path = root_dir / "input"
@@ -97,6 +98,7 @@ class DataProcessor:
             episode_group = out_f.create_group(f"{episode_id}")
             episode_action_group = episode_group.create_group("actions")
             episode_state_group = episode_group.create_group("states")
+            episode_hidden_state_group = episode_group.create_group("hidden_states")
             episode_win_group = episode_group.create_group("win")
 
             target_team_id = np.argmax(json_load["rewards"])  # win or tie
@@ -111,7 +113,7 @@ class DataProcessor:
                 step_info = steps[step_idx]
                 next_step_info = steps[step_idx + 1]
                 obs = json.loads(step_info[target_team_id]["observation"]["obs"])
-                # gt_obs = step_info[0]["info"]["replay"]["observations"][0]
+                gt_obs = step_info[0]["info"]["replay"]["observations"][0]
 
                 # マッチごとにリセットされる要素をリセット
                 if obs["match_steps"] == 0:
@@ -123,9 +125,14 @@ class DataProcessor:
                     prev_actions = {}
                 episode_store.update(obs, prev_actions)
 
-                # state = extract_gt_state(gt_obs, target_team_id)
-                state = extract_state(obs, target_team_id, episode_store)
+                if self.cfg.use_gt:
+                    state = extract_gt_state(gt_obs, target_team_id)
+                else:
+                    state = extract_state(obs, target_team_id, episode_store)
                 episode_state_group.create_dataset(f"{step_idx}", data=state)
+
+                hidden_state = extract_hidden_state(gt_obs, target_team_id)
+                episode_hidden_state_group.create_dataset(f"{step_idx}", data=hidden_state)
 
                 next_actions = next_step_info[target_team_id]["action"]
                 action = extract_action(next_actions, obs, target_team_id)
