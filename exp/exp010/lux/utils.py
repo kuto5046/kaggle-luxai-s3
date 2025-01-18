@@ -53,17 +53,19 @@ def to_np(x: torch.Tensor) -> np.ndarray:
 
 
 class EpisodeStore:
-    def __init__(self, target_team_id: int) -> None:
+    def __init__(self, target_team_id: int, env_cfg: dict) -> None:
         self._relic_map = np.zeros((EnvParams.map_height, EnvParams.map_width), dtype=np.float32)
         # self._relic_nodes = None # TODO: relic_nodesを全て発見したらその情報を使ってpoint_mapを更新する(ポイントが絶対に存在しないところがわかる)
         self._point_map = np.ones((EnvParams.map_height, EnvParams.map_width), dtype=np.float32) * -1
         self._target_team_id = target_team_id
+        self.unit_move_cost = env_cfg["unit_move_cost"]
+        self.unit_sap_cost = env_cfg["unit_sap_cost"]
         self.reset()
 
     def reset(self) -> None:
         self._own_unit_positions = np.zeros((EnvParams.max_units, 2), dtype=np.int32)
         self._own_unit_enrgies = np.zeros(EnvParams.max_units, dtype=np.int32)
-        self._prev_move_units = np.zeros(EnvParams.max_units)  # 前のstepで移動したユニット
+        self._prev_unit_actions = np.zeros(EnvParams.max_units)  # 前のstepで移動したユニット
         self._prev_points = 0
         self._current_points = 0
 
@@ -95,9 +97,6 @@ class EpisodeStore:
         self._update_points(obs)
         self._update_point_map(obs)
 
-    def load_env_cfg(self, env_cfg: dict[str, Any]) -> None:
-        self.env_cfg = env_cfg
-
     def _update_relic_map(self, obs: dict[str, Any]) -> None:
         # # relicの情報を記録する関数
         relic_nodes = obs["relic_nodes"]
@@ -113,48 +112,53 @@ class EpisodeStore:
         if len(prev_actions) == 0:
             return
 
-        # すべてFalseで初期化
-        self._prev_move_units = np.zeros(EnvParams.max_units)
-
+        self._prev_unit_actions = np.zeros(EnvParams.max_units)
         # actionの情報を記録する関数
         for unit_id in range(EnvParams.max_units):
-            action = prev_actions[unit_id][0]
-            # TODO: 行動を選択してるがゲーム側の制約で移動していない場合が考慮されていないはず
-            if action in [Action.UP, Action.RIGHT, Action.DOWN, Action.LEFT]:
-                self._prev_move_units[unit_id] = action
-            else:
-                self._prev_move_units[unit_id] = 0
+            self._prev_unit_actions[unit_id] = prev_actions[unit_id][0]
 
     def _update_own_units(self, obs: dict[str, Any]) -> None:
         # TODO: gtと一致しないため正確でない
         # 自チームのunitの情報を記録する
         own_unit_positions = np.array(obs["units"]["position"][self._target_team_id])
         own_unit_energies = np.array(obs["units"]["energy"][self._target_team_id])
+        own_unit_masks = np.array(obs["units_mask"][self._target_team_id])
         for unit_id in range(EnvParams.max_units):
-            pos = np.array(own_unit_positions[unit_id])
-            if pos[0] == -1 and pos[1] == -1:
-                prev_dir = self._prev_move_units[unit_id]
-                # 移動してる場合その前の位置は必ずわかっているはず
-                if prev_dir == 0:
-                    continue
-                else:
-                    # 現在の1つ前の時点でのposを参照する
-                    prev_pos = self._own_unit_positions[unit_id]
-                    prev_energy = self._own_unit_enrgies[unit_id]
-                    # 現在の1つ前の時点での行動を元に現在のステップのposを計算する
-                    if can_move(
-                        prev_pos,
-                        prev_energy,
-                        prev_dir,
-                        # 1つ前のstepと変わらないという仮定を置いて現stepのtile_typeを使う
-                        np.array(obs["map_features"]["tile_type"]).T,
-                        self.env_cfg["unit_move_cost"],
-                    ):
-                        pos = calc_next_pos(prev_pos, prev_dir)
-                    else:
-                        pos = prev_pos
-            self._own_unit_positions[unit_id] = pos
-            self._own_unit_enrgies[unit_id] = own_unit_energies[unit_id]
+            pos = own_unit_positions[unit_id]
+            unit_energy = own_unit_energies[unit_id]
+            mask = own_unit_masks[unit_id]
+            map_energy = obs["map_features"]["energy"][pos[1], pos[0]]
+            # 観測可能な場合は観測値をそのままの値を使う
+            if mask:
+                self._own_unit_positions[unit_id] = pos
+                self._own_unit_enrgies[unit_id] = unit_energy
+                continue
+
+            # ここからは現在のステップでは未観測のユニットを扱う
+
+            prev_action = self._prev_unit_actions[unit_id]
+            if prev_action == Action.CENTER:
+                # 位置は変わらないので何もしない
+                # エネルギーはマップのエネルギーで可変する
+                self._own_unit_enrgies[unit_id] += map_energy
+            elif prev_action == Action.SAP:
+                # 位置は変わらない
+                # エネルギーはマップのエネルギーで可変する
+                if self._own_unit_enrgies[unit_id] >= self.unit_sap_cost:  # TODO: ちゃんと判定すべき
+                    self._own_unit_enrgies[unit_id] -= self.unit_sap_cost
+                self._own_unit_enrgies[unit_id] += map_energy
+            # 現在の位置が不明で、前のステップで移動してるユニットは位置推定を行う
+            else:
+                # 現在の1つ前の時点でのposを参照する
+                prev_pos = self._own_unit_positions[unit_id]
+                prev_unit_energy = self._own_unit_enrgies[unit_id]
+                # 前のステップでも未観測の場合は分からないため何もしない
+                if prev_pos[0] != -1 and can_move(
+                    prev_pos, prev_unit_energy, prev_action, obs["map_features"]["tile_type"], self.unit_move_cost
+                ):
+                    self._own_unit_positions[unit_id] = calc_next_pos(prev_pos, prev_action)
+                    self._own_unit_enrgies[unit_id] -= self.unit_move_cost
+                    self._own_unit_enrgies[unit_id] += map_energy
 
     def _update_points(self, obs: dict[str, Any]) -> None:
         self._prev_points = self._current_points
