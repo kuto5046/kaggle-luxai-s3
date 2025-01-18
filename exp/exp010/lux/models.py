@@ -99,11 +99,11 @@ class LaxDataset(Dataset):
         return len(self.ids)
 
     def __getitem__(self, idx: int) -> dict[str, np.ndarray]:
+        episode_id, step_idx = self.ids[idx]
         states = []
         for i in range(self.cfg.n_stack - 1, -1, -1):
-            if idx - i >= 0:
-                episode_id, step_idx = self.ids[idx - i]
-                state = np.array(self.h5_file[episode_id]["states"][step_idx]).astype(np.float32)
+            if step_idx - i >= 0:
+                state = np.array(self.h5_file[episode_id]["states"][step_idx - i]).astype(np.float32)
             else:
                 state = np.zeros((len(State), EnvParams.map_height, EnvParams.map_width), dtype=np.float32)
             states.append(state)

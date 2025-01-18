@@ -8,6 +8,7 @@ import streamlit as st
 import plotly.graph_objects as go
 from lux.utils import State, Action, HiddenState, to_np
 from lux.models import LuxUNetModel
+from lux.params import EnvParams
 
 # ページ設定
 st.set_page_config(layout="wide")
@@ -74,22 +75,30 @@ def main():
     df = pl.read_csv(df_path)
     episode_ids = df["EpisodeId"].to_list()
     # エピソード選択
-    selected_episode = str(st.selectbox("エピソードを選択", episode_ids))
+    episode_id = str(st.selectbox("エピソードを選択", episode_ids))
 
     model = load_model(exp_name)
-    if selected_episode:
-        link = f"https://s3vis.lux-ai.org/#/visualizer?input={selected_episode}"
+    n_stack = 4
+    if episode_id:
+        link = f"https://s3vis.lux-ai.org/#/visualizer?input={episode_id}"
         st.info(f"[Lux AI Visualizer]({link})")
 
-        episode_data = h5_file[selected_episode]
+        episode_data = h5_file[episode_id]
         # ステップ数取得
         steps = sorted([int(step) for step in episode_data["states"].keys()])
         # ステップ選択
-        selected_step = str(st.select_slider("ステップを選択", options=steps))
-        if selected_step:
+        step_idx = st.select_slider("ステップを選択", options=steps)
+        if step_idx is not None:
             # データ取得
-            action = np.array(h5_file[selected_episode]["actions"][selected_step])
-            state = np.array(h5_file[selected_episode]["states"][selected_step])
+            action = np.array(h5_file[episode_id]["actions"][str(step_idx)])
+            states = []
+            for i in range(n_stack - 1, -1, -1):
+                if step_idx - i >= 0:
+                    state = np.array(h5_file[episode_id]["states"][str(step_idx - i)]).astype(np.float32)
+                else:
+                    state = np.zeros((len(State), EnvParams.map_height, EnvParams.map_width), dtype=np.float32)
+                states.append(state)
+            state = np.stack(states, axis=0)
             col1, col2 = st.columns(2)
             with col1:
                 visualize_action(action)
@@ -102,7 +111,8 @@ def main():
                 with col2:
                     visualizer_pred_action(pred_action)
 
-            visualize_state(state)
+            last_state = states[-1]
+            visualize_state(last_state)
 
     # h5_file.close()
 
