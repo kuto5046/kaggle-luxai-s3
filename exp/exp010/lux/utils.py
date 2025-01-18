@@ -64,7 +64,7 @@ class EpisodeStore:
 
     def reset(self) -> None:
         self._own_unit_positions = np.zeros((EnvParams.max_units, 2), dtype=np.int32)
-        self._own_unit_enrgies = np.zeros(EnvParams.max_units, dtype=np.int32)
+        self._own_unit_energies = np.zeros(EnvParams.max_units, dtype=np.int32)
         self._prev_unit_actions = np.zeros(EnvParams.max_units)  # 前のstepで移動したユニット
         self._prev_points = 0
         self._current_points = 0
@@ -88,7 +88,7 @@ class EpisodeStore:
 
     @property
     def own_unit_energies(self) -> np.ndarray:
-        return self._own_unit_enrgies.copy()
+        return self._own_unit_energies.copy()
 
     def update(self, obs: dict[str, Any], prev_actions: list[list[int]]) -> None:
         self._update_relic_map(obs)
@@ -123,42 +123,45 @@ class EpisodeStore:
         own_unit_positions = np.array(obs["units"]["position"][self._target_team_id])
         own_unit_energies = np.array(obs["units"]["energy"][self._target_team_id])
         own_unit_masks = np.array(obs["units_mask"][self._target_team_id])
+        tile_type_map = np.array(obs["map_features"]["tile_type"])
+        energy_map = np.array(obs["map_features"]["energy"])
         for unit_id in range(EnvParams.max_units):
             pos = own_unit_positions[unit_id]
             unit_energy = own_unit_energies[unit_id]
-            mask = own_unit_masks[unit_id]
-            map_energy = obs["map_features"]["energy"][pos[1], pos[0]]
+            unit_mask = own_unit_masks[unit_id]
+            map_energy = energy_map[pos[1], pos[0]]
             # 観測可能な場合は観測値をそのままの値を使う
-            if mask:
+            if unit_mask:
                 self._own_unit_positions[unit_id] = pos
-                self._own_unit_enrgies[unit_id] = unit_energy
+                self._own_unit_energies[unit_id] = unit_energy
                 continue
 
             # ここからは現在のステップでは未観測のユニットを扱う
-
             prev_action = self._prev_unit_actions[unit_id]
             if prev_action == Action.CENTER:
                 # 位置は変わらないので何もしない
-                # エネルギーはマップのエネルギーで可変する
-                self._own_unit_enrgies[unit_id] += map_energy
+                self._own_unit_energies[unit_id] += map_energy
             elif prev_action == Action.SAP:
-                # 位置は変わらない
-                # エネルギーはマップのエネルギーで可変する
-                if self._own_unit_enrgies[unit_id] >= self.unit_sap_cost:  # TODO: ちゃんと判定すべき
-                    self._own_unit_enrgies[unit_id] -= self.unit_sap_cost
-                self._own_unit_enrgies[unit_id] += map_energy
+                # 位置は変わらないので何もしない
+                if self._own_unit_energies[unit_id] >= self.unit_sap_cost:  # TODO: ちゃんと判定すべき
+                    self._own_unit_energies[unit_id] -= self.unit_sap_cost
+                self._own_unit_energies[unit_id] += map_energy
             # 現在の位置が不明で、前のステップで移動してるユニットは位置推定を行う
             else:
                 # 現在の1つ前の時点でのposを参照する
                 prev_pos = self._own_unit_positions[unit_id]
-                prev_unit_energy = self._own_unit_enrgies[unit_id]
+                prev_unit_energy = self._own_unit_energies[unit_id]
                 # 前のステップでも未観測の場合は分からないため何もしない
                 if prev_pos[0] != -1 and can_move(
-                    prev_pos, prev_unit_energy, prev_action, obs["map_features"]["tile_type"], self.unit_move_cost
+                    prev_pos, prev_unit_energy, prev_action, tile_type_map, self.unit_move_cost
                 ):
                     self._own_unit_positions[unit_id] = calc_next_pos(prev_pos, prev_action)
-                    self._own_unit_enrgies[unit_id] -= self.unit_move_cost
-                    self._own_unit_enrgies[unit_id] += map_energy
+                    self._own_unit_energies[unit_id] -= self.unit_move_cost
+                    self._own_unit_energies[unit_id] += map_energy
+
+            # マップのエネルギーが未知の場合ユニットのエネルギーも未知なので上書きする
+            if map_energy == -1:
+                self._own_unit_energies[unit_id] = -1
 
     def _update_points(self, obs: dict[str, Any]) -> None:
         self._prev_points = self._current_points

@@ -68,8 +68,7 @@ class Agent:
         self.opp_team_id = 1 if self.team_id == 0 else 0
         np.random.seed(self.cfg.seed)
         self.env_cfg = env_cfg
-        self.episode_store = EpisodeStore(self.team_id)
-        self.episode_store.load_env_cfg(env_cfg)
+        self.episode_store = EpisodeStore(self.team_id, env_cfg)
         self.prev_actions = {}
 
     def act(self, step: int, obs, remainingOverageTime: int = 60):
