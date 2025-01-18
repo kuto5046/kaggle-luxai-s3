@@ -22,7 +22,7 @@ LOGGER = logging.getLogger(__name__)
 @dataclass
 class Config:
     exp_name: str = Path(__file__).parent.name
-    notes: str = "真値の状態を修正して学習"
+    notes: str = "episode storeとdatasetのstack順にミスがあったので修正"
     seed: int = 2025
     debug: bool = False
     n_splits: int = 5

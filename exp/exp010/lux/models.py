@@ -91,7 +91,7 @@ class LaxDataset(Dataset):
         self.ids = []
         for episode_id, max_step in df[["EpisodeId", "MaxStep"]].to_numpy():
             for step_idx in range(1, int(max_step)):  # step_idx=0は初期状態なのでスキップ
-                self.ids.append((str(episode_id), str(step_idx)))
+                self.ids.append((episode_id, step_idx))
         self.h5_file = h5py.File(self.cfg.feature_dir / "episodes.h5", "r")
         self.transform = transforms.Compose([LuxAugment()])
 
@@ -103,14 +103,14 @@ class LaxDataset(Dataset):
         states = []
         for i in range(self.cfg.n_stack - 1, -1, -1):
             if step_idx - i >= 0:
-                state = np.array(self.h5_file[episode_id]["states"][step_idx - i]).astype(np.float32)
+                state = np.array(self.h5_file[str(episode_id)]["states"][str(step_idx - i)]).astype(np.float32)
             else:
                 state = np.zeros((len(State), EnvParams.map_height, EnvParams.map_width), dtype=np.float32)
             states.append(state)
 
         state = np.stack(states, axis=0)  # (n_stack, channel, x, y)
-        action = np.array(self.h5_file[episode_id]["actions"][step_idx]).astype(np.float32)
-        win = np.array(self.h5_file[episode_id]["win"][step_idx]).astype(np.float32)
+        action = np.array(self.h5_file[str(episode_id)]["actions"][str(step_idx)]).astype(np.float32)
+        win = np.array(self.h5_file[str(episode_id)]["win"][str(step_idx)]).astype(np.float32)
         inputs = {
             "state": state,
             "action": action,
