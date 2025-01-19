@@ -22,7 +22,7 @@ LOGGER = logging.getLogger(__name__)
 @dataclass
 class Config:
     exp_name: str = Path(__file__).parent.name
-    notes: str = "episode storeとdatasetのstack順にミスがあったので修正"
+    notes: str = "mirroringによってmap_tileとsensor_maskがおかしいバグを修正した"
     seed: int = 2025
     debug: bool = False
     n_splits: int = 5
@@ -43,7 +43,7 @@ class Config:
     weight_decay: float = 0.01
     warmup_step_rate: float = 0.1
 
-    n_stack: int = 4
+    n_stack: int = 1
 
 
 class TrainPipeline:

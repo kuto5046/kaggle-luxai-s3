@@ -63,8 +63,8 @@ class EpisodeStore:
         self.reset()
 
     def reset(self) -> None:
-        self._own_unit_positions = np.zeros((EnvParams.max_units, 2), dtype=np.int32)
-        self._own_unit_energies = np.zeros(EnvParams.max_units, dtype=np.int32)
+        self._own_unit_positions = np.ones((EnvParams.max_units, 2), dtype=np.int32) * -1
+        self._own_unit_energies = np.ones(EnvParams.max_units, dtype=np.int32) * -1
         self._prev_unit_actions = np.zeros(EnvParams.max_units)  # 前のstepで移動したユニット
         self._prev_points = 0
         self._current_points = 0
@@ -287,7 +287,7 @@ def mirroring(map2d: np.ndarray, null_value: float = -1.0) -> np.ndarray:
         for x in range(EnvParams.map_width):
             if map2d[y, x] != null_value:
                 ox, oy = get_opposite(x, y)
-                map2d[y, x] = map2d[oy, ox]
+                map2d[oy, ox] = map2d[y, x]
     return map2d
 
 
@@ -380,18 +380,20 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
             # 味方同士は重複可能なのでincrementする（敵との重複はないため打ち消し合うことはないはず）
             if team_id == target_team_id:
                 # 重複はそんなに発生しないだろうということで正規化はしない
-                state_map[State.OWN_UNIT_COUNT, y, x] += 1
+                state_map[State.OWN_UNIT_COUNT, y, x] += 1 / EnvParams.max_units
                 state_map[State.OWN_UNIT_ENERGY, y, x] += unit_energy / EnvParams.max_unit_energy
                 state_map[State.OWN_UNIT_MASK, y, x] = unit_mask
             else:
-                state_map[State.OPP_UNIT_COUNT, y, x] += 1
+                state_map[State.OPP_UNIT_COUNT, y, x] += 1 / EnvParams.max_units
                 state_map[State.OPP_UNIT_ENERGY, y, x] += unit_energy / EnvParams.max_unit_energy
                 state_map[State.OPP_UNIT_MASK, y, x] = unit_mask
 
     # game state
     state_map[State.MATCH_STEPS] = obs["match_steps"] / EnvParams.max_steps_in_match  # そのマッチの進行度
     # 0-100は0, 101-201は1, ... としたい
-    state_map[State.MATCH_COUNT] = obs["steps"] // (EnvParams.max_steps_in_match + 1)  # 何試合目か
+    state_map[State.MATCH_COUNT] = (
+        obs["steps"] // (EnvParams.max_steps_in_match + 1)
+    ) / EnvParams.match_count_per_episode  # 何試合目か
     state_map[State.TEAM_POINTS] = (obs["team_points"][target_team_id] - obs["team_points"][enemy_team_id]) / 100
     state_map[State.TEAM_WINS] = (
         obs["team_wins"][target_team_id] - obs["team_wins"][enemy_team_id]

@@ -171,7 +171,10 @@ class LaxLitModel(LightningModule):
         super().__init__()
         self.cfg = cfg
         self.model = LuxUNetModel(
-            state_space_size=len(State), action_space_size=len(Action), hidden_state_space_size=len(HiddenState)
+            state_space_size=len(State),
+            action_space_size=len(Action),
+            hidden_state_space_size=len(HiddenState),
+            n_stack=cfg.n_stack,
         )
         self.criterion1 = DiceLoss(n_classes=len(Action))
         self.criterion2 = nn.BCEWithLogitsLoss()
@@ -444,8 +447,8 @@ class LuxUNetModel(nn.Module):
         state_space_size: int,
         action_space_size: int,
         hidden_state_space_size: int,
+        n_stack: int,
         bilinear: bool = True,
-        n_stack: int = 4,
     ) -> None:
         super().__init__()
         self.bilinear = bilinear

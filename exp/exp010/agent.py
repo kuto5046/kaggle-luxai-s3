@@ -14,8 +14,8 @@ from scipy.special import softmax
 class Config:
     seed: int = 2025
     # 確率的な行動を取るかどうか
-    stochastic: bool = False  # Falseにするとargmaxで行動を選択する
-    n_stack: int = 4
+    stochastic: bool = True  # Falseにするとargmaxで行動を選択する
+    n_stack: int = 1
 
     checkpoint_path: Path = Path(__file__).parent / "output/best_model.ckpt"
 
@@ -23,7 +23,10 @@ class Config:
 class ILAgent:
     def __init__(self, env_cfg: EnvParams, checkpoint_path: Path, n_stack: int) -> None:
         self.model = LuxUNetModel(
-            state_space_size=len(State), action_space_size=len(Action), hidden_state_space_size=len(HiddenState)
+            state_space_size=len(State),
+            action_space_size=len(Action),
+            hidden_state_space_size=len(HiddenState),
+            n_stack=n_stack,
         )
         ckpt = torch.load(checkpoint_path, weights_only=True, map_location="cpu")
         state_dict = {k.replace("model.", ""): v for k, v in ckpt["state_dict"].items()}
