@@ -55,21 +55,21 @@ class LuxAugment:
 
         # Flip vertically↑↓(# switch up(1) and down(3))
         if random.random() < self.p:
-            state = np.flip(state, axis=1).copy()
+            state = np.flip(state, axis=2).copy()
             # hidden_state = np.flip(hidden_state, axis=1).copy()
             action = np.flip(action, axis=0)
             action = self.switch_action(action, Action.UP, Action.DOWN)
 
         # Flip horizontally →← (switch left(2) and right(4))
         if random.random() < self.p:
-            state = np.flip(state, axis=2).copy()
+            state = np.flip(state, axis=3).copy()
             # hidden_state = np.flip(hidden_state, axis=2).copy()
             action = np.flip(action, axis=1)
             action = self.switch_action(action, Action.LEFT, Action.RIGHT)
 
         # Rotate 90 degrees ↑→ (right->up, up->left left->down down->right)
         if random.random() < self.p:
-            state = np.rot90(state, axes=(1, 2)).copy()
+            state = np.rot90(state, axes=(2, 3)).copy()
             action = np.rot90(action, axes=(0, 1))
             action = self.rotate_action(action)
 
@@ -116,9 +116,8 @@ class LaxDataset(Dataset):
             "action": action,
             "win": win,
         }
-        # TODO: 次元が増えてるので修正が必要
-        # if self.mode == "train":
-        #     inputs = self.transform(inputs)
+        if self.mode == "train":
+            inputs = self.transform(inputs)
 
         return inputs
 

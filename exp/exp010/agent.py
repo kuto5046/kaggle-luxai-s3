@@ -15,7 +15,7 @@ class Config:
     seed: int = 2025
     # 確率的な行動を取るかどうか
     stochastic: bool = True  # Falseにするとargmaxで行動を選択する
-    n_stack: int = 1
+    n_stack: int = 4
 
     checkpoint_path: Path = Path(__file__).parent / "output/best_model.ckpt"
 
