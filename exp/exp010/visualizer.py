@@ -46,13 +46,16 @@ def visualize_action(action):
 
 
 @st.cache_data()
-def load_model(exp_name: str) -> LuxUNetModel | None:
+def load_model(exp_name: str, n_stack: int) -> LuxUNetModel | None:
     checkpoint_path = Path(f"/home/user/work/exp/{exp_name}/output/best_model.ckpt")
     if not checkpoint_path.exists():
         return None
 
     model = LuxUNetModel(
-        state_space_size=len(State), action_space_size=len(Action), hidden_state_space_size=len(HiddenState)
+        state_space_size=len(State),
+        action_space_size=len(Action),
+        hidden_state_space_size=len(HiddenState),
+        n_stack=n_stack,
     )
     ckpt = torch.load(checkpoint_path, weights_only=True, map_location="cpu")
     state_dict = {k.replace("model.", ""): v for k, v in ckpt["state_dict"].items()}
@@ -77,8 +80,8 @@ def main():
     # エピソード選択
     episode_id = str(st.selectbox("エピソードを選択", episode_ids))
 
-    model = load_model(exp_name)
     n_stack = 4
+    model = load_model(exp_name, n_stack=n_stack)
     if episode_id:
         link = f"https://s3vis.lux-ai.org/#/visualizer?input={episode_id}"
         st.info(f"[Lux AI Visualizer]({link})")
@@ -99,20 +102,20 @@ def main():
                     state = np.zeros((len(State), EnvParams.map_height, EnvParams.map_width), dtype=np.float32)
                 states.append(state)
             state = np.stack(states, axis=0)
-            col1, col2 = st.columns(2)
+            col1, col2 = st.columns([1, 3])
             with col1:
                 visualize_action(action)
 
-            if model is not None:
-                torch_state = torch.tensor(state).unsqueeze(0).float()
-                with torch.no_grad():
-                    output = model(torch_state)
-                    pred_action = to_np(output["policy"].argmax(dim=1).cpu().squeeze())
-                with col2:
+                if model is not None:
+                    torch_state = torch.tensor(state).unsqueeze(0).float()
+                    with torch.no_grad():
+                        output = model(torch_state)
+                        pred_action = to_np(output["policy"].argmax(dim=1).cpu().squeeze())
                     visualizer_pred_action(pred_action)
 
-            last_state = states[-1]
-            visualize_state(last_state)
+            with col2:
+                last_state = states[-1]
+                visualize_state(last_state)
 
     # h5_file.close()
 
