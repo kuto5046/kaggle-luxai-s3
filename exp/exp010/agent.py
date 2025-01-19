@@ -14,7 +14,7 @@ from scipy.special import softmax
 class Config:
     seed: int = 2025
     # 確率的な行動を取るかどうか
-    stochastic: bool = True  # Falseにするとargmaxで行動を選択する
+    stochastic: bool = False  # Falseにするとargmaxで行動を選択する
     n_stack: int = 4
 
     checkpoint_path: Path = Path(__file__).parent / "output/best_model.ckpt"
@@ -69,7 +69,7 @@ class Agent:
         self.opp_player = "player_1" if self.player == "player_0" else "player_0"
         self.team_id = 0 if self.player == "player_0" else 1
         self.opp_team_id = 1 if self.team_id == 0 else 0
-        np.random.seed(self.cfg.seed)
+        # np.random.seed(self.cfg.seed)
         self.env_cfg = env_cfg
         self.episode_store = EpisodeStore(self.team_id, env_cfg)
         self.prev_actions = {}
@@ -92,13 +92,13 @@ class Agent:
             unit_pos = unit_positions[unit_id]
             x, y = unit_pos
             policy = policy_map[:, y, x]
-            # print(policy, file=sys.stderr)
 
             if cfg.stochastic:
                 action = np.random.choice(range(6), p=policy)
             else:
                 action = policy.argmax()
 
+            # print(policy, file=sys.stderr)
             if action == Action.SAP:
                 # params.unit_sap_rangeの範囲内にいる敵ユニットをランダムに選択
                 opp_unit_ids = get_nearby_enemy_unit_ids(unit_pos, opp_unit_positions, self.env_cfg["unit_sap_range"])
