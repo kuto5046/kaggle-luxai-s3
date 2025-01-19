@@ -355,7 +355,7 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
     # energy nodesの位置は未知(tileのenergyはvisionで観測可能)
     state_map[State.ENERGY] = np.array(obs["map_features"]["energy"]).T / 10  # (24, 24)
     state_map[State.ENERGY] = mirroring(state_map[State.ENERGY], null_value=-0.1)
-    state_map[State.SENSOR_MASK] = np.array(obs["sensor_mask"][target_team_id]).T
+    state_map[State.SENSOR_MASK] = np.array(obs["sensor_mask"]).T
 
     state_map[State.RELICS] = episode_store.relic_map
     state_map[State.POINTS] = episode_store.point_map

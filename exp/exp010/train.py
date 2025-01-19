@@ -22,7 +22,7 @@ LOGGER = logging.getLogger(__name__)
 @dataclass
 class Config:
     exp_name: str = Path(__file__).parent.name
-    notes: str = "stackに対応したaugmentationを入れる"
+    notes: str = "sensor maskのミスを修正"
     seed: int = 2025
     debug: bool = False
     n_splits: int = 5
