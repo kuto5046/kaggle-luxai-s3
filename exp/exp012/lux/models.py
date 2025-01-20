@@ -50,26 +50,27 @@ class LuxAugment:
     def __call__(self, inputs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
         # x,yが実際のmapと行列で異なるので操作を直感的にするために転置後に処理する
         state = inputs["state"].copy()
-        # hidden_state = inputs["hidden_state"].copy()
+        hidden_state = inputs["hidden_state"].copy()
         action = inputs["action"].copy()
 
         # Flip vertically↑↓(# switch up(1) and down(3))
         if random.random() < self.p:
-            state = np.flip(state, axis=2).copy()
-            # hidden_state = np.flip(hidden_state, axis=1).copy()
+            state = np.flip(state, axis=2)
+            hidden_state = np.flip(hidden_state, axis=1)
             action = np.flip(action, axis=0)
             action = self.switch_action(action, Action.UP, Action.DOWN)
 
         # Flip horizontally →← (switch left(2) and right(4))
         if random.random() < self.p:
-            state = np.flip(state, axis=3).copy()
-            # hidden_state = np.flip(hidden_state, axis=2).copy()
+            state = np.flip(state, axis=3)
+            hidden_state = np.flip(hidden_state, axis=2)
             action = np.flip(action, axis=1)
             action = self.switch_action(action, Action.LEFT, Action.RIGHT)
 
         # Rotate 90 degrees ↑→ (right->up, up->left left->down down->right)
         if random.random() < self.p:
-            state = np.rot90(state, axes=(2, 3)).copy()
+            state = np.rot90(state, axes=(2, 3))
+            hidden_state = np.rot90(hidden_state, axes=(1, 2))
             action = np.rot90(action, axes=(0, 1))
             action = self.rotate_action(action)
 
@@ -78,7 +79,7 @@ class LuxAugment:
         # 試合のindexを入れ替える
 
         inputs["state"] = state
-        # inputs["hidden_state"] = hidden_state
+        inputs["hidden_state"] = hidden_state
         inputs["action"] = action
         return inputs
 
@@ -109,10 +110,12 @@ class LaxDataset(Dataset):
             states.append(state)
 
         state = np.stack(states, axis=0)  # (n_stack, channel, x, y)
+        hidden_state = np.array(self.h5_file[str(episode_id)]["hidden_states"][str(step_idx)]).astype(np.float32)
         action = np.array(self.h5_file[str(episode_id)]["actions"][str(step_idx)]).astype(np.float32)
         win = np.array(self.h5_file[str(episode_id)]["win"][str(step_idx)]).astype(np.float32)
         inputs = {
             "state": state,
+            "hidden_state": hidden_state,
             "action": action,
             "win": win,
         }
@@ -177,7 +180,7 @@ class LaxLitModel(LightningModule):
         )
         self.criterion1 = DiceLoss(n_classes=len(Action))
         self.criterion2 = nn.BCEWithLogitsLoss()
-        # self.criterion2 = DiceLoss(n_classes=2)
+        self.criterion3 = DiceLoss(n_classes=len(HiddenState))
 
         metrics = self.get_metrics()
         self.train_metrics = metrics.clone(postfix="/train")
@@ -195,11 +198,11 @@ class LaxLitModel(LightningModule):
 
     def _share_step(self, batch: Any, mode: str = "train") -> torch.Tensor:
         states = batch["state"]
-        # hidden_states = batch["hidden_state"]
+        hidden_states = batch["hidden_state"]
         actions = batch["action"]
         outputs = self(states)
         policy_logits = outputs["policy"]
-        # state_logits = outputs["state"]
+        state_logits = outputs["state"]
         value_logits = outputs["value"]
 
         policy_preds = torch.softmax(policy_logits, dim=1)
@@ -208,9 +211,9 @@ class LaxLitModel(LightningModule):
 
         value_loss = self.criterion2(value_logits.flatten(), batch["win"])
 
-        # state_preds = torch.sigmoid(state_logits)
-        # loss2 = self.criterion2(state_preds, hidden_states)
-        loss = policy_loss  # + value_loss
+        state_preds = torch.sigmoid(state_logits)
+        state_loss = self.criterion3(state_preds, hidden_states)
+        loss = policy_loss + state_loss  # + value_loss
 
         self.log(
             f"PolicyLoss/{mode}",
@@ -223,6 +226,14 @@ class LaxLitModel(LightningModule):
         self.log(
             f"ValueLoss/{mode}",
             value_loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+        )
+        self.log(
+            f"StateLoss/{mode}",
+            state_loss,
             on_step=False,
             on_epoch=True,
             prog_bar=False,
@@ -461,7 +472,7 @@ class LuxUNetModel(nn.Module):
         self.up2 = Up(256, 128 // factor, bilinear)
         self.up3 = Up(128, 64, bilinear)
         self.policy_net = OutConv(64 * n_stack, action_space_size)
-        # self.state_net = OutConv(64, hidden_state_space_size)
+        self.state_net = OutConv(64, hidden_state_space_size)
         self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
         self.value_net = nn.Sequential(
             nn.Linear(256 * n_stack, 128), nn.ReLU(), nn.Linear(128, 64), nn.ReLU(), nn.Linear(64, 1)
@@ -480,11 +491,11 @@ class LuxUNetModel(nn.Module):
 
         x = x.view(_n, -1, _x, _y)
         policy_logits = self.policy_net(x)
-        # state_logits = self.state_net(x)
+        state_logits = self.state_net(x)
         x = self.global_avg_pool(x4).view(_n, -1)
         value_logits = self.value_net(x)
         return {
             "policy": policy_logits,
-            # "state": state_logits,
+            "state": state_logits,
             "value": value_logits,
         }
