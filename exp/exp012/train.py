@@ -22,7 +22,7 @@ LOGGER = logging.getLogger(__name__)
 @dataclass
 class Config:
     exp_name: str = Path(__file__).parent.name
-    notes: str = "sensor maskのミスを修正"
+    notes: str = "10%データでベースライン評価"
     seed: int = 2025
     debug: bool = False
     n_splits: int = 5
@@ -33,7 +33,7 @@ class Config:
     output_dir = root_dir / f"exp/{exp_name}/output"
 
     epoch: int = 10
-    limit_train_batches: float = 1.0
+    limit_train_batches: float = 0.1
     limit_val_batches: float = 1.0
     use_amp: bool = False
     batch_size: int = 512
@@ -88,7 +88,7 @@ class TrainPipeline:
         self.pl_logger = WandbLogger(
             project="kaggle-luxai-s3",
             entity="kuto5046",
-            name=f"{self.cfg.exp_name}",
+            # name=f"{self.cfg.exp_name}",
             group=self.cfg.exp_name,
             mode="disabled" if self.cfg.debug else "online",
             notes=self.cfg.notes,
