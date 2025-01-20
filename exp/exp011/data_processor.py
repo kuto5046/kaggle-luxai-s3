@@ -27,10 +27,11 @@ class Config:
     n_splits: int = 5
     root_dir: Path = Path("/home/user/work")
     input_dir: Path = root_dir / "input"
-    episode_dir: Path = input_dir / "kuto-luxai-s3-episodes-20250104"
+    episode_dir: Path = root_dir / "output/feature_store/episodes"
+    episode_path: Path = episode_dir / "episodes0119.csv"
     feature_dir: Path = root_dir / f"output/feature_store/{exp_name}"
-    target_team_name: str = "ry_andy_"
-    target_sub_ids: list[int] = field(default_factory=lambda: [42165330])
+    target_team_name: str = "Frog Parade"
+    target_sub_ids: list[int] = field(default_factory=lambda: [42340565])
 
 
 def get_fold(_train: pl.DataFrame, cv: list[tuple[np.ndarray, np.ndarray]]) -> pl.DataFrame:
@@ -55,6 +56,10 @@ def get_kfold(train: pl.DataFrame, n_splits: int, seed: int = 0) -> pl.DataFrame
 
 def valid_episode(json_load: dict[str, Any], target_team_name: str) -> bool:
     """対象のチームが勝利してるepisodeのみ有効"""
+    for r in json_load["rewards"]:
+        if r is None:
+            print(f"rewards include None -> {json_load['rewards']}")
+            return False
     win_idx = np.argmax([r or 0 for r in json_load["rewards"]])  # win or tie
     win_team = json_load["info"]["TeamNames"][win_idx]
     return win_team == target_team_name
@@ -64,6 +69,7 @@ class DataProcessor:
     def __init__(self, cfg: Config) -> None:
         seed_everything(cfg.seed, workers=True)  # data loaderのworkerもseedする
         self.cfg = cfg
+        self.episode_path = cfg.episode_path
         self.episode_dir = cfg.episode_dir
         self.feature_dir = cfg.feature_dir
         if self.feature_dir.exists():
@@ -72,7 +78,7 @@ class DataProcessor:
         self.feature_dir.mkdir(parents=True, exist_ok=True)
 
     def read_data(self) -> pl.DataFrame:
-        episode_df = pl.read_csv(self.episode_dir / "episodes.csv")
+        episode_df = pl.read_csv(self.episode_path)
         episode_df = episode_df.filter(pl.col("SubmissionId").is_in(self.cfg.target_sub_ids))
         print(f"episode_df: {len(episode_df)}")
         # なぜかepisodeに重複があるため除去
