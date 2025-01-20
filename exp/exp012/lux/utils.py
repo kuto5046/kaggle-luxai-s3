@@ -26,10 +26,10 @@ class State(IntEnum):
 
 
 class HiddenState(IntEnum):
-    # 分類として扱いたいので全てbinaryで表現する
     OWN_UNIT = 0
     OPP_UNIT = auto()
     POINTS = auto()
+    ENERGY = auto()
 
 
 class Action(IntEnum):
@@ -219,14 +219,9 @@ class EpisodeStore:
 
 def extract_hidden_state(gt_obs: dict[str, Any], target_team_id: int) -> np.ndarray:
     """
-    - 自/敵unitの位置
-    - energy_nodesの位置
-    - relic nodeの位置
-
-    以下は難しい or 意義が薄いので一旦やらない
-    - unitのエネルギー
-    - mapのエネルギー (energy_nodesが分かればとりあえずはいいかな)
-    - vision power map(これをboolにしたのが観測可能なsensor mask)
+    - 自/敵unitの位置と数
+    - relic pointの位置
+    - energy分布
     """
     state_space_size: int = len(HiddenState)
     state_map = np.zeros((state_space_size, EnvParams.map_width, EnvParams.map_height), dtype=np.float32)
@@ -238,12 +233,13 @@ def extract_hidden_state(gt_obs: dict[str, Any], target_team_id: int) -> np.ndar
             x, y = unit_positions[unit_id]
 
             if team_id == target_team_id:
-                state_map[HiddenState.OWN_UNIT, y, x] = 1
+                state_map[HiddenState.OWN_UNIT, y, x] += 1 / EnvParams.max_units
             else:
-                state_map[HiddenState.OPP_UNIT, y, x] = 1
+                state_map[HiddenState.OPP_UNIT, y, x] += 1 / EnvParams.max_units
 
     state_map[HiddenState.POINTS] = get_gt_point_map(gt_obs)
 
+    state_map[HiddenState.ENERGY] = np.array(gt_obs["map_features"]["energy"]).T / 10  # (24, 24)
     return state_map
 
 

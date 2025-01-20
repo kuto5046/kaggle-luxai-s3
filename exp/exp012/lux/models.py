@@ -180,7 +180,7 @@ class LaxLitModel(LightningModule):
         )
         self.criterion1 = DiceLoss(n_classes=len(Action))
         self.criterion2 = nn.BCEWithLogitsLoss()
-        self.criterion3 = DiceLoss(n_classes=len(HiddenState))
+        self.criterion3 = nn.MSELoss()
 
         metrics = self.get_metrics()
         self.train_metrics = metrics.clone(postfix="/train")
@@ -211,8 +211,7 @@ class LaxLitModel(LightningModule):
 
         value_loss = self.criterion2(value_logits.flatten(), batch["win"])
 
-        state_preds = torch.sigmoid(state_logits)
-        state_loss = self.criterion3(state_preds, hidden_states)
+        state_loss = self.criterion3(state_logits.flatten(), hidden_states.flatten())
         loss = policy_loss + state_loss  # + value_loss
 
         self.log(

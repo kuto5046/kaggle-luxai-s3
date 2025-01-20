@@ -22,13 +22,13 @@ LOGGER = logging.getLogger(__name__)
 @dataclass
 class Config:
     exp_name: str = Path(__file__).parent.name
-    notes: str = "10%データでベースライン評価"
+    notes: str = "hidden stateを補助lossに使う"
     seed: int = 2025
     debug: bool = False
     n_splits: int = 5
     use_fold: int = 0
     root_dir: Path = Path("/home/user/work")
-    feature_version: str = "exp011"
+    feature_version: str = "exp012"
     feature_dir: Path = root_dir / f"output/feature_store/{feature_version}"
     output_dir = root_dir / f"exp/{exp_name}/output"
 
