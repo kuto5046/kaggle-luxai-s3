@@ -55,22 +55,22 @@ class LuxAugment:
 
         # Flip vertically↑↓(# switch up(1) and down(3))
         if random.random() < self.p:
-            state = np.flip(state, axis=2)
-            hidden_state = np.flip(hidden_state, axis=1)
+            state = np.flip(state, axis=2).copy()
+            hidden_state = np.flip(hidden_state, axis=1).copy()
             action = np.flip(action, axis=0)
             action = self.switch_action(action, Action.UP, Action.DOWN)
 
         # Flip horizontally →← (switch left(2) and right(4))
         if random.random() < self.p:
-            state = np.flip(state, axis=3)
-            hidden_state = np.flip(hidden_state, axis=2)
+            state = np.flip(state, axis=3).copy()
+            hidden_state = np.flip(hidden_state, axis=2).copy()
             action = np.flip(action, axis=1)
             action = self.switch_action(action, Action.LEFT, Action.RIGHT)
 
         # Rotate 90 degrees ↑→ (right->up, up->left left->down down->right)
         if random.random() < self.p:
-            state = np.rot90(state, axes=(2, 3))
-            hidden_state = np.rot90(hidden_state, axes=(1, 2))
+            state = np.rot90(state, axes=(2, 3)).copy()
+            hidden_state = np.rot90(hidden_state, axes=(1, 2)).copy()
             action = np.rot90(action, axes=(0, 1))
             action = self.rotate_action(action)
 
@@ -472,7 +472,7 @@ class LuxUNetModel(nn.Module):
         self.up2 = Up(256, 128 // factor, bilinear)
         self.up3 = Up(128, 64, bilinear)
         self.policy_net = OutConv(64 * n_stack, action_space_size)
-        self.state_net = OutConv(64, hidden_state_space_size)
+        self.state_net = OutConv(64 * n_stack, hidden_state_space_size)
         self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
         self.value_net = nn.Sequential(
             nn.Linear(256 * n_stack, 128), nn.ReLU(), nn.Linear(128, 64), nn.ReLU(), nn.Linear(64, 1)
