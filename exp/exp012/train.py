@@ -22,7 +22,7 @@ LOGGER = logging.getLogger(__name__)
 @dataclass
 class Config:
     exp_name: str = Path(__file__).parent.name
-    notes: str = "hidden stateを補助lossに使う"
+    notes: str = "hidden stateを補助lossに使う all data"
     seed: int = 2025
     debug: bool = False
     n_splits: int = 5
@@ -33,7 +33,7 @@ class Config:
     output_dir = root_dir / f"exp/{exp_name}/output"
 
     epoch: int = 10
-    limit_train_batches: float = 0.1
+    limit_train_batches: float = 1.0
     limit_val_batches: float = 1.0
     use_amp: bool = False
     batch_size: int = 512
