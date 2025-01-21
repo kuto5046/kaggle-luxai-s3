@@ -140,7 +140,9 @@ class DataProcessor:
                 episode_hidden_state_group.create_dataset(f"{step_idx}", data=hidden_state)
 
                 next_actions = next_step_info[target_team_id]["action"]
-                action = extract_action(next_actions, obs, target_team_id)
+                own_action = extract_action(next_actions, obs, target_team_id)
+                opp_action = extract_action(next_actions, obs, 1 - target_team_id)
+                action = np.stack([own_action, opp_action], axis=0)  # (2, 24, 24)
                 episode_action_group.create_dataset(f"{step_idx}", data=action)
 
                 match_idx = obs["steps"] // (EnvParams.max_steps_in_match + 1)

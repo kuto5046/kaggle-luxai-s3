@@ -51,28 +51,35 @@ class LuxAugment:
         # x,yが実際のmapと行列で異なるので操作を直感的にするために転置後に処理する
         state = inputs["state"].copy()
         hidden_state = inputs["hidden_state"].copy()
-        action = inputs["action"].copy()
+        own_action = inputs["own_action"].copy()
+        opp_action = inputs["opp_action"].copy()
 
         # Flip vertically↑↓(# switch up(1) and down(3))
         if random.random() < self.p:
             state = np.flip(state, axis=2).copy()
             hidden_state = np.flip(hidden_state, axis=1).copy()
-            action = np.flip(action, axis=0)
-            action = self.switch_action(action, Action.UP, Action.DOWN)
+            own_action = np.flip(own_action, axis=0)
+            own_action = self.switch_action(own_action, Action.UP, Action.DOWN)
+            opp_action = np.flip(opp_action, axis=0)
+            opp_action = self.switch_action(opp_action, Action.UP, Action.DOWN)
 
         # Flip horizontally →← (switch left(2) and right(4))
         if random.random() < self.p:
             state = np.flip(state, axis=3).copy()
             hidden_state = np.flip(hidden_state, axis=2).copy()
-            action = np.flip(action, axis=1)
-            action = self.switch_action(action, Action.LEFT, Action.RIGHT)
+            own_action = np.flip(own_action, axis=1)
+            own_action = self.switch_action(own_action, Action.LEFT, Action.RIGHT)
+            opp_action = np.flip(opp_action, axis=1)
+            opp_action = self.switch_action(opp_action, Action.LEFT, Action.RIGHT)
 
         # Rotate 90 degrees ↑→ (right->up, up->left left->down down->right)
         if random.random() < self.p:
             state = np.rot90(state, axes=(2, 3)).copy()
             hidden_state = np.rot90(hidden_state, axes=(1, 2)).copy()
-            action = np.rot90(action, axes=(0, 1))
-            action = self.rotate_action(action)
+            own_action = np.rot90(own_action, axes=(0, 1))
+            own_action = self.rotate_action(own_action)
+            opp_action = np.rot90(opp_action, axes=(0, 1))
+            opp_action = self.rotate_action(opp_action)
 
         # TODO:
         # mapをランダムにずらす
@@ -80,7 +87,8 @@ class LuxAugment:
 
         inputs["state"] = state
         inputs["hidden_state"] = hidden_state
-        inputs["action"] = action
+        inputs["own_action"] = own_action
+        inputs["opp_action"] = opp_action
         return inputs
 
 
@@ -111,12 +119,15 @@ class LaxDataset(Dataset):
 
         state = np.stack(states, axis=0)  # (n_stack, channel, x, y)
         hidden_state = np.array(self.h5_file[str(episode_id)]["hidden_states"][str(step_idx)]).astype(np.float32)
-        action = np.array(self.h5_file[str(episode_id)]["actions"][str(step_idx)]).astype(np.float32)
+        actions = np.array(self.h5_file[str(episode_id)]["actions"][str(step_idx)]).astype(np.float32)
+        own_action = actions[0]
+        opp_action = actions[1]
         win = np.array(self.h5_file[str(episode_id)]["win"][str(step_idx)]).astype(np.float32)
         inputs = {
             "state": state,
             "hidden_state": hidden_state,
-            "action": action,
+            "own_action": own_action,
+            "opp_action": opp_action,
             "win": win,
         }
         if self.mode == "train":
@@ -199,24 +210,31 @@ class LaxLitModel(LightningModule):
     def _share_step(self, batch: Any, mode: str = "train") -> torch.Tensor:
         states = batch["state"]
         hidden_states = batch["hidden_state"]
-        actions = batch["action"]
+        own_actions = batch["own_action"]
+        opp_actions = batch["opp_action"]
         outputs = self(states)
-        policy_logits = outputs["policy"]
+        own_policy_logits = outputs["own_policy"]
+        opp_policy_logits = outputs["opp_policy"]
         state_logits = outputs["state"]
         value_logits = outputs["value"]
 
-        policy_preds = torch.softmax(policy_logits, dim=1)
-        policy_targets = one_hot_encoder(actions, n_classes=len(Action))
-        policy_loss = self.criterion1(policy_preds, policy_targets)
+        own_policy_preds = torch.softmax(own_policy_logits, dim=1)
+        opp_policy_preds = torch.softmax(opp_policy_logits, dim=1)
+
+        own_policy_targets = one_hot_encoder(own_actions, n_classes=len(Action))
+        opp_policy_targets = one_hot_encoder(opp_actions, n_classes=len(Action))
+
+        own_policy_loss = self.criterion1(own_policy_preds, own_policy_targets)
+        opp_policy_loss = self.criterion1(opp_policy_preds, opp_policy_targets)
 
         value_loss = self.criterion2(value_logits.flatten(), batch["win"])
 
         state_loss = self.criterion3(state_logits.flatten(), hidden_states.flatten())
-        loss = policy_loss + state_loss  # + value_loss
+        loss = own_policy_loss + opp_policy_loss + state_loss  # + value_loss
 
         self.log(
             f"PolicyLoss/{mode}",
-            policy_loss,
+            own_policy_loss,
             on_step=False,
             on_epoch=True,
             prog_bar=False,
@@ -239,6 +257,14 @@ class LaxLitModel(LightningModule):
             logger=True,
         )
         self.log(
+            f"OppPolicyLoss/{mode}",
+            opp_policy_loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+        )
+        self.log(
             f"Loss/{mode}",
             loss,
             on_step=False,
@@ -247,8 +273,8 @@ class LaxLitModel(LightningModule):
             logger=True,
         )
 
-        preds = torch.softmax(policy_logits, dim=1).argmax(dim=1).flatten()
-        gts = actions.flatten()
+        preds = torch.softmax(own_policy_logits, dim=1).argmax(dim=1).flatten()
+        gts = own_actions.flatten()
         unit_masks = (states[:, -1, State.OWN_UNIT_COUNT] > 0).flatten()  # unitが存在するところだけで計算する
 
         preds = preds[unit_masks]
@@ -470,7 +496,8 @@ class LuxUNetModel(nn.Module):
         self.up1 = Up(256 * 2, 256 // factor, bilinear)
         self.up2 = Up(256, 128 // factor, bilinear)
         self.up3 = Up(128, 64, bilinear)
-        self.policy_net = OutConv(64 * n_stack, action_space_size)
+        self.own_policy_net = OutConv(64 * n_stack, action_space_size)
+        self.opp_policy_net = OutConv(64 * n_stack, action_space_size)
         self.state_net = OutConv(64 * n_stack, hidden_state_space_size)
         self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
         self.value_net = nn.Sequential(
@@ -489,12 +516,14 @@ class LuxUNetModel(nn.Module):
         x = self.up3(x, x1)
 
         x = x.view(_n, -1, _x, _y)
-        policy_logits = self.policy_net(x)
+        own_policy_logits = self.own_policy_net(x)
+        opp_policy_logits = self.opp_policy_net(x)
         state_logits = self.state_net(x)
         x = self.global_avg_pool(x4).view(_n, -1)
         value_logits = self.value_net(x)
         return {
-            "policy": policy_logits,
+            "own_policy": own_policy_logits,
+            "opp_policy": opp_policy_logits,
             "state": state_logits,
             "value": value_logits,
         }
