@@ -39,7 +39,7 @@ class ILAgent:
         for i in range(n_stack):
             self.stack_states.append(np.zeros((len(State), 24, 24)))
 
-    def predict(self, obs: dict[str, Any], team_id: int, episode_store: EpisodeStore):
+    def predict(self, obs: dict[str, Any], team_id: int, episode_store: EpisodeStore) -> tuple[np.ndarray, np.ndarray]:
         state = extract_state(obs, team_id, episode_store)
         self.stack_states.append(state)
         stacked_state = np.stack(list(self.stack_states), axis=0)
@@ -47,8 +47,14 @@ class ILAgent:
 
         with torch.no_grad():
             output = self.model(stacked_state)
-            policy_map = output["policy"].squeeze().numpy()
+            own_policy_map = output["own_policy"].squeeze().numpy()
+            opp_policy_map = output["opp_policy"].squeeze().numpy()
 
+        own_policy_map = self.get_legal_policy(obs, own_policy_map, team_id)
+        opp_policy_map = self.get_legal_policy(obs, opp_policy_map, 1 - team_id)
+        return own_policy_map, opp_policy_map
+
+    def get_legal_policy(self, obs: dict[str, Any], policy_map: np.ndarray, team_id: int) -> np.ndarray:
         legal_action_map = get_valid_policy_map(obs, team_id, self.env_cfg)
         action_mask_map = np.ones_like(policy_map) * 1e32
         action_mask_map[legal_action_map > 0] = 0  # legal actionは0でそれ以外は1e32
@@ -79,7 +85,7 @@ class Agent:
         if obs["match_steps"] == 0:
             self.episode_store.reset()
         self.episode_store.update(obs, self.prev_actions)
-        policy_map = imitation_model.predict(obs, self.team_id, self.episode_store)
+        own_policy_map, opp_policy_map = imitation_model.predict(obs, self.team_id, self.episode_store)
 
         unit_mask = np.array(obs["units_mask"][self.team_id])  # shape (max_units, )
         unit_positions = np.array(obs["units"]["position"][self.team_id])  # shape (max_units, 2)
@@ -91,29 +97,34 @@ class Agent:
         for unit_id in available_unit_ids:
             unit_pos = unit_positions[unit_id]
             x, y = unit_pos
-            policy = policy_map[:, y, x]
+            own_policy = own_policy_map[:, y, x]
 
-            if cfg.stochastic:
-                action = np.random.choice(range(6), p=policy)
-            else:
-                action = policy.argmax()
-
-            # print(policy, file=sys.stderr)
-            if action == Action.SAP:
-                # params.unit_sap_rangeの範囲内にいる敵ユニットをランダムに選択
-                opp_unit_ids = get_nearby_enemy_unit_ids(unit_pos, opp_unit_positions, self.env_cfg["unit_sap_range"])
-                # 敵のユニットがいる場合はランダムにサンプリングしてSAPする
-                if len(opp_unit_ids) > 0:
-                    opp_unit_id = np.random.choice(opp_unit_ids)
-                    opp_unit_pos = opp_unit_positions[opp_unit_id]
-                    relative_pos = calc_relative_pos(unit_pos, opp_unit_pos)
-                    # print(f"{unit_pos=}, {opp_unit_pos=}", file=sys.stderr)
-                    actions[unit_id] = [Action.SAP, relative_pos[0], relative_pos[1]]
+            while True:
+                if cfg.stochastic:
+                    action = np.random.choice(range(6), p=own_policy)
                 else:
-                    actions[unit_id] = [Action.CENTER, 0, 0]
+                    action = own_policy.argmax()
 
-            else:
-                actions[unit_id] = [action, 0, 0]
+                # print(policy, file=sys.stderr)
+                if action == Action.SAP:
+                    # params.unit_sap_rangeの範囲内にいる敵ユニットをランダムに選択
+                    opp_unit_ids = get_nearby_enemy_unit_ids(
+                        unit_pos, opp_unit_positions, self.env_cfg["unit_sap_range"]
+                    )
+                    # 敵のユニットがいる場合はランダムにサンプリングしてSAPする
+                    if len(opp_unit_ids) > 0:
+                        opp_unit_id = np.random.choice(opp_unit_ids)
+                        opp_unit_pos = opp_unit_positions[opp_unit_id]
+                        opp_action = opp_policy_map[:, opp_unit_pos[1], opp_unit_pos[0]].argmax()
+                        if opp_action in [Action.SAP, Action.CENTER]:
+                            # opp_unit_next_pos = calc_next_pos(opp_unit_pos, opp_action)
+                            relative_pos = calc_relative_pos(unit_pos, opp_unit_pos)
+                            actions[unit_id] = [Action.SAP, relative_pos[0], relative_pos[1]]
+                            break
+                    own_policy[Action.SAP] = 0
+                else:
+                    actions[unit_id] = [action, 0, 0]
+                    break
         self.prev_actions = actions.copy()
         return actions
 

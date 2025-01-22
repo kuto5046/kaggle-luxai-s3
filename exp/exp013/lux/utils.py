@@ -53,13 +53,15 @@ def to_np(x: torch.Tensor) -> np.ndarray:
 
 
 class EpisodeStore:
-    def __init__(self, target_team_id: int, env_cfg: dict) -> None:
+    def __init__(self, target_team_id: int, env_cfg: dict, version: str = "v1") -> None:
         self._relic_map = np.zeros((EnvParams.map_height, EnvParams.map_width), dtype=np.float32)
         # self._relic_nodes = None # TODO: relic_nodesを全て発見したらその情報を使ってpoint_mapを更新する(ポイントが絶対に存在しないところがわかる)
         self._point_map = np.ones((EnvParams.map_height, EnvParams.map_width), dtype=np.float32) * -1
         self._target_team_id = target_team_id
         self.unit_move_cost = env_cfg["unit_move_cost"]
         self.unit_sap_cost = env_cfg["unit_sap_cost"]
+        assert version in ["v1", "v2"]
+        self.version = version
         self.reset()
 
     def reset(self) -> None:
@@ -68,6 +70,10 @@ class EpisodeStore:
         self._prev_unit_actions = np.zeros(EnvParams.max_units)  # 前のstepで移動したユニット
         self._prev_points = 0
         self._current_points = 0
+        if self.version == "v2":
+            # 1/21のパッチでマッチごとにrelic　　nodesの情報がリセットされるため
+            self._relic_map = np.zeros((EnvParams.map_height, EnvParams.map_width), dtype=np.float32)
+            self._point_map = np.ones((EnvParams.map_height, EnvParams.map_width), dtype=np.float32) * -1
 
     @property
     def point(self) -> int:
@@ -431,20 +437,22 @@ def get_valid_policy_map(obs: dict[str, Any], team_id: int, env_cfg: EnvParams) 
     return validate_policy_map
 
 
-def calc_next_pos(pos: tuple[int, int], dir: int) -> tuple[int, int]:
+def calc_next_pos(pos: tuple[int, int], action: Action) -> tuple[int, int]:
     x, y = pos
-    if dir == Action.CENTER:
+    if action == Action.CENTER:
         return x, y
-    elif dir == Action.UP:
+    elif action == Action.UP:
         return x, y - 1
-    elif dir == Action.RIGHT:
+    elif action == Action.RIGHT:
         return x + 1, y
-    elif dir == Action.DOWN:
+    elif action == Action.DOWN:
         return x, y + 1
-    elif dir == Action.LEFT:
+    elif action == Action.LEFT:
         return x - 1, y
+    elif action == Action.SAP:
+        return x, y
     else:
-        raise ValueError(f"Invalid direction: {dir}")
+        raise ValueError(f"Invalid action: {action}")
 
 
 def in_map(pos: tuple[int, int]) -> bool:

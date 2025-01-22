@@ -29,10 +29,10 @@ def visualize_state(state, n_cols: int = 5):
             st.plotly_chart(fig)
 
 
-def visualizer_pred_action(action):
-    st.subheader("Predict Action")
+def visualize_pred_action(action, title="Predict Action", color="blues"):
+    st.subheader(title)
     # ヒートマップ表示 sequentialではないdeiscreteな色を使う
-    fig = go.Figure(data=go.Heatmap(z=action, zmax=len(Action) - 1, zmin=0, colorscale="blues"))
+    fig = go.Figure(data=go.Heatmap(z=action, zmax=len(Action) - 1, zmin=0, colorscale=color))
     fig.update_layout(width=400, height=400)
     st.plotly_chart(fig)
 
@@ -93,7 +93,9 @@ def main():
         step_idx = st.select_slider("ステップを選択", options=steps)
         if step_idx is not None:
             # データ取得
-            action = np.array(h5_file[episode_id]["actions"][str(step_idx)])
+            actions = np.array(h5_file[episode_id]["actions"][str(step_idx)])
+            own_action = actions[0]
+            opp_action = actions[1]
             states = []
             for i in range(n_stack - 1, -1, -1):
                 if step_idx - i >= 0:
@@ -104,14 +106,17 @@ def main():
             state = np.stack(states, axis=0)
             col1, col2 = st.columns([1, 3])
             with col1:
-                visualize_action(action)
+                visualize_action(own_action)
 
                 if model is not None:
                     torch_state = torch.tensor(state).unsqueeze(0).float()
                     with torch.no_grad():
                         output = model(torch_state)
-                        pred_action = to_np(output["policy"].argmax(dim=1).cpu().squeeze())
-                    visualizer_pred_action(pred_action)
+                        pred_own_action = to_np(output["own_policy"].argmax(dim=1).cpu().squeeze())
+                        pred_opp_action = to_np(output["opp_policy"].argmax(dim=1).cpu().squeeze())
+                        st.write(pred_own_action.shape, pred_opp_action.shape)
+                    visualize_pred_action(pred_own_action)
+                    visualize_pred_action(pred_opp_action)
 
             with col2:
                 last_state = states[-1]

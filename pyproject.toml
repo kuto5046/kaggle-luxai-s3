@@ -57,3 +57,6 @@ extend-include = ["*.ipynb"]
 [tool.uv]
 extra-index-url = ["https://download.pytorch.org/whl/cu121"]
 index-strategy = "unsafe-best-match"
+
+[tool.uv.sources]
+luxai-s3 = { path = "Lux-Design-S3/src" }

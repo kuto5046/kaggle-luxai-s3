@@ -1362,7 +1362,7 @@ requires-dist = [
     { name = "kagglehub", specifier = ">=0.3.3" },
     { name = "lightgbm", specifier = ">=4.5" },
     { name = "lightning", specifier = ">=2.3.3" },
-    { name = "luxai-s3", specifier = ">=0.1.1" },
+    { name = "luxai-s3", directory = "Lux-Design-S3/src" },
     { name = "markupsafe", specifier = "==3" },
     { name = "mypy", specifier = ">=1.11.2" },
     { name = "nbformat", specifier = ">=5.10.4" },
@@ -1541,16 +1541,19 @@ wheels = [
 
 [[package]]
 name = "luxai-s3"
-version = "0.1.1"
-source = { registry = "https://pypi.org/simple" }
+version = "0.2.0"
+source = { directory = "Lux-Design-S3/src" }
 dependencies = [
     { name = "gymnax" },
     { name = "jax" },
     { name = "tyro" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/da/90/61da9ceff5b06d922d50e2ecec6030b9846a1d9f7a829e572cb9ac90bd82/luxai_s3-0.1.1.tar.gz", hash = "sha256:493ec0de63292821a65247c34588af4b6c160cb22b72f87daf5d87043986ac4b", size = 30182 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/d4/e0/a36388ff259b292eadfce131b605d693edff4da8537e5f7d2c53579005be/luxai_s3-0.1.1-py3-none-any.whl", hash = "sha256:41f4f78284e7f812f3e2296e0c99e453d493397e1b8735b0ced799b8c143e445", size = 35191 },
+
+[package.metadata]
+requires-dist = [
+    { name = "gymnax", specifier = "==0.0.8" },
+    { name = "jax" },
+    { name = "tyro" },
 ]
 
 [[package]]
