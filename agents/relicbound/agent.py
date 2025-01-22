@@ -64,11 +64,11 @@ class Node:
         return self._explored_for_reward
 
     def update_relic_status(self, status: bool):
-        if self._explored_for_relic and self._relic != status:
-            raise ValueError(
-                f"Can't change the relic status {self._relic}->{status} for {self}"
-                ", the tile has already been explored"
-            )
+        # if self._explored_for_relic and self._relic != status:
+        #     raise ValueError(
+        #         f"Can't change the relic status {self._relic}->{status} for {self}"
+        #         ", the tile has already been explored"
+        #     )
 
         self._relic = status
         self._explored_for_relic = True
