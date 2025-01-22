@@ -35,6 +35,7 @@ dependencies = [
   "pyarrow>=17",
   "pydantic>=2.7.4",
   "pytest>=8.3.3",
+  "ray[rllib]>=2.38",
   "rich>=13.8.1",
   "ruff>=0.6.5",
   "scikit-learn>=1.5.2",
