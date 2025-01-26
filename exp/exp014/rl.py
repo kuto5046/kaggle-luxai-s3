@@ -1,34 +1,37 @@
-import os
-import copy
-from typing import Any
-from dataclasses import dataclass
-
-import jax
-import ray
-import flax
+from typing import Dict, Optional, Union, Any
 import numpy as np
-import torch
 import gymnasium as gym
+import copy
+import jax
+import os
 import jax.numpy as jnp
-import flax.serialization
-from lux.utils import State, Action, HiddenState
-from lux.models import LuxUNetModel
 from luxai_s3.env import LuxAIS3Env
-from ray.rllib.env import MultiAgentEnv
-from luxai_s3.utils import to_numpy
-
 # from luxai_s3.wrappers import LuxAIS3GymEnv
 from luxai_s3.params import EnvParams, env_params_ranges
+from luxai_s3.utils import to_numpy
+import flax
+import flax.serialization
+import ray
 from ray.rllib.models import ModelCatalog
-from ray.tune.registry import register_env
-from ray.rllib.core.columns import Columns
-from ray.rllib.algorithms.ppo import PPOConfig
+from ray.rllib.models.torch.torch_distributions import TorchDistribution, TorchMultiCategorical
 from ray.rllib.utils.annotations import override
-from ray.rllib.core.rl_module.apis import ValueFunctionAPI
-from ray.rllib.core.rl_module.rl_module import RLModuleSpec
 from ray.rllib.algorithms.algorithm_config import AlgorithmConfig
-from ray.rllib.core.rl_module.multi_rl_module import MultiRLModuleSpec
+from ray.rllib.env import MultiAgentEnv
+from ray.rllib.algorithms.ppo import PPOConfig
 from ray.rllib.core.rl_module.torch.torch_rl_module import TorchRLModule
+from ray.rllib.core.rl_module.apis import ValueFunctionAPI
+from ray.rllib.core.columns import Columns
+from ray.rllib.core.rl_module.rl_module import RLModuleSpec
+from ray.rllib.core.rl_module.multi_rl_module import MultiRLModuleSpec
+import torch
+from torch import nn
+from ray.tune.registry import register_env
+from lux.utils import Action, State, HiddenState, extract_state, TileType
+from lux.models import LuxUNetModel
+from dataclasses import dataclass
+import dataclasses
+from pathlib import Path
+from jax.tree_util import tree_map
 
 
 @dataclass
@@ -37,7 +40,7 @@ class Config:
     model_name: str = "lux_unet"
     env_name: str = "lux-s3-v0"
     n_stack: int = 1
-    pretrained_path: str | None = None  # Path("/home/user/work/exp/exp013/best_model.ckpt")
+    pretrained_path: str | None = None # Path("/home/user/work/exp/exp013/best_model.ckpt")
     debug: bool = True
 
 
@@ -64,11 +67,14 @@ class RLLibLuxEnv(MultiAgentEnv):
         self.fixed_env_params = config.get("fixed_env_params", EnvParams())
 
         # 基本環境の初期化
-        self.env = LuxAIS3Env(auto_reset=self.auto_reset, fixed_env_params=self.fixed_env_params)
+        self.env = LuxAIS3Env(
+            auto_reset=self.auto_reset,
+            fixed_env_params=self.fixed_env_params
+        )
 
         # シードの設定
         # self.seed(config.get("seed", None))
-
+    
         # 現在の状態の保持
         self.state = None
 
@@ -87,112 +93,112 @@ class RLLibLuxEnv(MultiAgentEnv):
     def _create_action_space(self):
         num_actions = len(Action)
         num_units = EnvParams.max_units
-        unit_sap_range = env_params_ranges["unit_sap_range"][-1]  # 最大値で設定しておく
+        unit_sap_range = env_params_ranges["unit_sap_range"][-1] # 最大値で設定しておく
         low = np.zeros((num_units, 3))
         low[:, 1:] = -unit_sap_range
         high = np.ones((num_units, 3)) * num_actions
         high[:, 1:] = unit_sap_range
-        return gym.spaces.Dict(
-            dict(
-                player_0=gym.spaces.Box(low=low, high=high, dtype=np.int16),
-                player_1=gym.spaces.Box(low=low, high=high, dtype=np.int16),
-            )
-        )
+        return {
+            "player_0": gym.spaces.MultiDiscrete([num_actions] * num_units),
+            "player_1": gym.spaces.MultiDiscrete([num_actions] * num_units),
+        }
 
     def _create_obs_space(self) -> gym.spaces.Dict:
         """
         EnvObsクラスに対応する観測空間をDictで定義し、返す例。
         """
-        observation_space = gym.spaces.Dict(
-            {
-                "units": gym.spaces.Dict(
-                    {
-                        "position": gym.spaces.Box(
-                            low=-1,
-                            high=EnvParams.map_height,
-                            shape=(EnvParams.max_units, 2),  # N max units, 2 for x, y
-                            dtype=np.int32,
-                        ),
-                        "energy": gym.spaces.Box(
-                            low=-1,
-                            high=EnvParams.max_unit_energy,
-                            shape=(EnvParams.max_units,),  # N max units
-                            dtype=np.int32,
-                        ),
-                    }
-                ),
-                "units_mask": gym.spaces.Box(
-                    low=0,
-                    high=1,
-                    shape=(2, EnvParams.max_units),  # T teams, N max units
-                    dtype=np.bool_,
-                ),
-                "sensor_mask": gym.spaces.Box(
-                    low=0, high=1, shape=(EnvParams.map_width, EnvParams.map_height), dtype=np.bool_
-                ),
-                "map_features": gym.spaces.Dict(
-                    {
-                        "energy": gym.spaces.Box(
-                            low=-1,
-                            high=EnvParams.max_energy_per_tile,
-                            shape=(EnvParams.map_width, EnvParams.map_height),
-                            dtype=np.int32,
-                        ),
-                        "tile_type": gym.spaces.Box(
-                            low=-1, high=2, shape=(EnvParams.map_width, EnvParams.map_height), dtype=np.int32
-                        ),
-                    }
-                ),
-                "relic_nodes": gym.spaces.Box(
+        observation_space = gym.spaces.Dict({
+            "units": gym.spaces.Dict({
+                "position": gym.spaces.Box(
                     low=-1,
                     high=EnvParams.map_height,
-                    shape=(EnvParams.max_relic_nodes, 2),  # N max relic nodes, 2 features for position (x, y)
-                    dtype=np.float32,
+                    shape=(EnvParams.num_teams, EnvParams.max_units, 2),  # N max units, 2 for x, y
+                    dtype=np.int32
                 ),
-                "relic_nodes_mask": gym.spaces.Box(
-                    low=0,
-                    high=1,
-                    shape=(EnvParams.max_relic_nodes,),  # N max relic nodes
-                    dtype=np.bool_,
+                "energy": gym.spaces.Box(
+                    low=-1,
+                    high=EnvParams.max_unit_energy,
+                    shape=(EnvParams.num_teams, EnvParams.max_units),  # N max units
+                    dtype=np.int32
+                )
+            }),
+            "units_mask": gym.spaces.Box(
+                low=0,
+                high=1,
+                shape=(EnvParams.num_teams, EnvParams.max_units),  # T teams, N max units
+                dtype=np.bool_
+            ),
+            "sensor_mask": gym.spaces.Box(
+                low=0,
+                high=1,
+                shape=(EnvParams.map_width, EnvParams.map_height),
+                dtype=np.bool_
+            ),
+            "map_features": gym.spaces.Dict({
+                "energy": gym.spaces.Box(
+                    low=-1,
+                    high=EnvParams.max_energy_per_tile,
+                    shape=(EnvParams.map_width, EnvParams.map_height),
+                    dtype=np.int32
                 ),
-                "team_points": gym.spaces.Box(
-                    low=0,
-                    high=EnvParams.max_units * EnvParams.max_steps_in_match,
-                    shape=(EnvParams.num_teams,),  # T teams
-                    dtype=np.float32,
-                ),
-                "team_wins": gym.spaces.Box(
-                    low=0,
-                    high=EnvParams.match_count_per_episode,
-                    shape=(EnvParams.num_teams,),  # T teams
-                    dtype=np.int32,
-                ),
-                "steps": gym.spaces.Discrete(EnvParams.max_steps_in_match * EnvParams.match_count_per_episode),
-                "match_steps": gym.spaces.Discrete(EnvParams.max_steps_in_match),
-            }
-        )
-        return gym.spaces.Dict(
-            dict(
-                player_0=observation_space,
-                player_1=observation_space,
-            )
-        )
+                "tile_type": gym.spaces.Box(
+                    low=-1,
+                    high=2,
+                    shape=(EnvParams.map_width, EnvParams.map_height),
+                    dtype=np.int32
+                )
+            }),
+            "relic_nodes": gym.spaces.Box(
+                low=-1,
+                high=EnvParams.map_height,
+                shape=(EnvParams.max_relic_nodes, 2),  # N max relic nodes, 2 features for position (x, y)
+                dtype=np.int32
+            ),
+            "relic_nodes_mask": gym.spaces.Box(
+                low=0,
+                high=1,
+                shape=(EnvParams.max_relic_nodes,),  # N max relic nodes
+                dtype=np.bool_
+            ),
+            "team_points": gym.spaces.Box(
+                low=0,
+                high=EnvParams.max_units * EnvParams.max_steps_in_match,
+                shape=(EnvParams.num_teams,),  # T teams
+                dtype=np.int32
+            ),
+            "team_wins": gym.spaces.Box(
+                low=0,
+                high=EnvParams.match_count_per_episode,
+                shape=(EnvParams.num_teams,),  # T teams
+                dtype=np.int32
+            ),
+            "steps": gym.spaces.Discrete(EnvParams.max_steps_in_match * EnvParams.match_count_per_episode),
+            "match_steps": gym.spaces.Discrete(EnvParams.max_steps_in_match)
+        })
+        return {"player_0": observation_space, "player_1": observation_space}
+
 
     def _set_params(self) -> EnvParams:
+
         # generate random game parameters
         # TODO (stao): check why this keeps recompiling when marking structs as static args
         randomized_game_params = dict()
         for k, v in env_params_ranges.items():
             self.rng_key, subkey = jax.random.split(self.rng_key)
-            randomized_game_params[k] = jax.random.choice(subkey, jax.numpy.array(v)).item()
+            randomized_game_params[k] = jax.random.choice(
+                subkey, jax.numpy.array(v)
+            ).item()
         params = EnvParams(**randomized_game_params)
         return params
 
-    def reset(self, *, seed: int | None = None, options: dict[str, Any] | None = None) -> tuple[Any, dict[str, Any]]:
+
+    def reset(
+        self, *, seed: int | None = None, options: dict[str, Any] | None = None
+    ) -> tuple[Any, dict[str, Any]]:
         if seed is not None:
             self.rng_key = jax.random.key(seed)
         self.rng_key, reset_key = jax.random.split(self.rng_key)
-
+        
         params = self._set_params()
         if options is not None and "params" in options:
             params = options["params"]
@@ -212,15 +218,14 @@ class RLLibLuxEnv(MultiAgentEnv):
             info (dict):  エージェントIDをキーとする情報辞書
         """
         # アクションの検証
-        assert (
-            set(action_dict.keys()) == self._agent_ids
-        ), f"Received actions for agents {action_dict.keys()}, expected {self._agent_ids}"
+        assert set(action_dict.keys()) == self._agent_ids, \
+            f"Received actions for agents {action_dict.keys()}, expected {self._agent_ids}"
 
         # NumPy配列をJAX配列に変換
-        action = jax.tree_map(jnp.array, action_dict)
+        action = tree_map(jnp.array, action_dict)
 
         # もともとの step_env() の戻り値は (obs, state, reward, terminated, truncated, info) の6要素
-        self.key, subkey = jax.random.split(self.key)
+        self.rng_key, subkey = jax.random.split(self.rng_key)
         obs, self.state, rewards, terminated, truncated, info = self.env.step(
             key=subkey,
             state=self.state,
@@ -229,16 +234,19 @@ class RLLibLuxEnv(MultiAgentEnv):
         )
 
         # JAX配列をNumPy配列に変換
-        obs = jax.tree_map(np.array, obs)
-        rewards = jax.tree_map(np.array, rewards)
-        terminated = jax.tree_map(np.array, terminated)
-        truncated = jax.tree_map(np.array, truncated)
-        info = jax.tree_map(lambda x: np.array(x) if isinstance(x, jnp.ndarray) else x, info)
+        obs = tree_map(np.array, obs)
+        rewards = tree_map(np.array, rewards)
+        terminated = tree_map(np.array, terminated)
+        truncated = tree_map(np.array, truncated)
+        info = tree_map(lambda x: np.array(x) if isinstance(x, jnp.ndarray) else x, info)
 
         # dones 辞書を作成（RLlibのフォーマット）
         # - 各agentのdone: terminated[agent] or truncated[agent] で計算
         # - "__all__": すべてのエージェントがdoneならTrue
-        dones = {agent_id: bool(terminated[agent_id] or truncated[agent_id]) for agent_id in self.agents}
+        dones = {
+            agent_id: bool(terminated[agent_id] or truncated[agent_id])
+            for agent_id in self.agents
+        }
         dones["__all__"] = all(dones.values())
 
         return obs, rewards, dones, {}, {}
@@ -247,6 +255,7 @@ class RLLibLuxEnv(MultiAgentEnv):
     #     """環境の描画"""
     #     if self.state is not None:
     #         self.env.render(self.state, self.env.default_params)
+
 
     # @property
     # def get_agent_ids(self):
@@ -273,7 +282,11 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
         # state = extract_state(batch["obs"], target_team_id)
         # state = batch["obs"]
         # outputs = self.model(state)
-        outputs = {"policy": torch.zeros((1, len(Action), 24, 24)), "value": torch.zeros((1,))}
+        outputs = {
+            # "policy": torch.zeros((1, len(Action), 24, 24)),
+            "policy": torch.zeros((1, EnvParams.max_units, len(Action))),
+            "value": torch.zeros((1, ))
+        }
         policy_logits = outputs["policy"]
         self._values = outputs["value"]
         # Return features and logits as ACTION_DIST_INPUTS (categorical distribution).
@@ -281,9 +294,6 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
             Columns.ACTION_DIST_INPUTS: policy_logits,
         }
 
-    @override(TorchRLModule)
-    def _forward_train(self, batch, **kwargs):
-        return self._forward(batch, **kwargs)
 
     # We implement this RLModule as a ValueFunctionAPI RLModule, so it can be used
     # by value-based methods like PPO or IMPALA.
@@ -291,14 +301,17 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
     def compute_values(self, batch: dict[str, Any]) -> torch.Tensor:
         return self._values
 
+    @override(TorchRLModule)
+    def get_inference_action_dist_cls(self) -> type[TorchDistribution]:
+        return TorchMultiCategorical
 
 def create_rl_config(cfg: Config) -> AlgorithmConfig:
     # モデル設定
     tmp_env = env_creator({})
     rl_module_spec = RLModuleSpec(
         module_class=LuxUnetTorchRLModule,
-        observation_space=tmp_env.observation_spaces,
-        action_space=tmp_env.action_spaces,
+        observation_space=tmp_env.get_observation_space("player_0"),
+        action_space=tmp_env.get_action_space("player_0"),
         # モデル内部でself.model_config["key"]でアクセスできる
         model_config={
             "n_stack": cfg.n_stack,
@@ -308,7 +321,10 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
     config = (
         PPOConfig()
         # 環境設定
-        .environment(env=cfg.env_name, env_config={"auto_reset": True})
+        .environment(
+            env=cfg.env_name,
+            env_config={"auto_reset": True}
+        )
         # ゲームをしてデータを生成するrunnerの数. cpuの数と合わせる
         .env_runners(
             num_env_runners=os.cpu_count() if not cfg.debug else 1,
@@ -324,15 +340,15 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
         .rl_module(
             rl_module_spec=MultiRLModuleSpec(
                 rl_module_specs={
-                    "player_0_policy": copy.deepcopy(rl_module_spec),
-                    "player_1_policy": copy.deepcopy(rl_module_spec),
+                    "player_0": copy.deepcopy(rl_module_spec),
+                    "player_1": copy.deepcopy(rl_module_spec),
                 }
             )
         )
         # マルチエージェント設定
         .multi_agent(
-            policies=["player_0_policy", "player_1_policy"],
-            policy_mapping_fn=lambda agent_id, *args, **kwargs: f"{agent_id}_policy",
+            policies=["player_0", "player_1"],
+            policy_mapping_fn=lambda agent_id, *args, **kwargs: f"{agent_id}"
         )
         .framework(
             framework="torch",
@@ -342,10 +358,17 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
     return config
 
 
+
+
 def main() -> None:
     cfg = Config()
     # debug mode
-    ray.init(ignore_reinit_error=True, runtime_env={"env_vars": {"RAY_DEBUG": "1"}})
+    ray.init(
+        ignore_reinit_error=True,
+        runtime_env={
+            "env_vars": {"RAY_DEBUG": "1"}
+        }
+    )
     # 環境の登録
     register_env(name=cfg.env_name, env_creator=env_creator)
 
@@ -354,12 +377,12 @@ def main() -> None:
 
     # 学習の設定
     config = create_rl_config(cfg)
-    trainer = config.build()
+    trainer = config.build_algo()
 
     num_iterations = 1
     for i in range(num_iterations):
         result = trainer.train()
 
-
 if __name__ == "__main__":
     main()
+
