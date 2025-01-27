@@ -24,7 +24,7 @@ from ray.rllib.env.multi_agent_env import MultiAgentEnv
 from ray.rllib.core.rl_module.rl_module import RLModuleSpec
 from ray.rllib.algorithms.algorithm_config import AlgorithmConfig
 from ray.rllib.core.rl_module.multi_rl_module import MultiRLModuleSpec
-from ray.rllib.models.torch.torch_distributions import TorchDistribution, TorchMultiCategorical
+from ray.rllib.models.torch.torch_distributions import TorchCategorical, TorchDistribution
 from ray.rllib.core.rl_module.torch.torch_rl_module import TorchRLModule
 
 
@@ -191,29 +191,28 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
             n_stack=self.model_config["n_stack"],
             bilinear=True,
         )
+
+        # TODO: weight読み込み
+        if self.model_config["pretrained_path"]:
+            pass
+
         self._values = None
 
     @override(TorchRLModule)
     def _forward(self, batch, **kwargs):
-        """
-        複数カテゴリ (MultiDiscrete) 用の logits と input_lens を返す例。
-        ここでは実際のNN計算は省略して、ゼロ埋め logits を仮に返す。
-        """
         # バッチサイズ
         batch_size = batch[Columns.OBS].shape[0] if isinstance(batch[Columns.OBS], torch.Tensor) else 1
         # state = extract_state(batch["obs"], target_team_id)
         # state = batch["obs"]
         # outputs = self.model(state)
         outputs = {
-            # "policy": torch.zeros((1, len(Action), 24, 24)),
             "policy": torch.zeros((1, EnvParams.max_units, len(Action))),
             "value": torch.zeros((1,)),
         }
         policy_logits = outputs["policy"]
-        self._values = outputs["value"]
-        input_lens = 16
+        self._values = outputs["value"].tanh()
         return {
-            Columns.ACTION_DIST_INPUTS: (policy_logits, input_lens),
+            Columns.ACTION_DIST_INPUTS: policy_logits,
         }
 
     @override(ValueFunctionAPI)
@@ -222,7 +221,7 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
 
     @override(TorchRLModule)
     def get_inference_action_dist_cls(self) -> type[TorchDistribution]:
-        return TorchMultiCategorical
+        return TorchCategorical
 
 
 def create_rl_config(cfg: Config) -> AlgorithmConfig:
@@ -239,6 +238,7 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
             "pretrained_path": cfg.pretrained_path,
         },
     )
+
     config = (
         PPOConfig()
         .api_stack(
@@ -270,10 +270,9 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
             )
         )
         # マルチエージェント設定
-        # .multi_agent(
-        #     policies=["player_0", "player_1"],
-        #     policy_mapping_fn=lambda agent_id, *args, **kwargs: f"{agent_id}"
-        # )
+        .multi_agent(
+            policies=["player_0", "player_1"], policy_mapping_fn=lambda agent_id, *args, **kwargs: f"{agent_id}"
+        )
         .framework(
             framework="torch",
             eager_tracing=True,
@@ -292,10 +291,10 @@ def main() -> None:
     config = create_rl_config(cfg)
     trainer = config.build_algo(env=cfg.env_name)
 
-    # num_iterations = 1
-    # for i in range(num_iterations):
-    #     result = trainer.train()
-    #     print(f"Iteration {i} result:", result)
+    num_iterations = 1
+    for i in range(num_iterations):
+        result = trainer.train()
+        print(f"Iteration {i} result:", result)
 
 
 if __name__ == "__main__":
