@@ -1,6 +1,7 @@
 from enum import IntEnum, auto
 from typing import Any
 
+import flax
 import numpy as np
 import torch
 
@@ -53,11 +54,15 @@ def to_np(x: torch.Tensor) -> np.ndarray:
 
 
 class EpisodeStore:
-    def __init__(self, target_team_id: int, env_cfg: dict, version: str = "v1") -> None:
+    def __init__(self, target_team_id: int, env_cfg: dict | EnvParams, version: str = "v1") -> None:
         self._relic_map = np.zeros((EnvParams.map_height, EnvParams.map_width), dtype=np.float32)
         # self._relic_nodes = None # TODO: relic_nodesを全て発見したらその情報を使ってpoint_mapを更新する(ポイントが絶対に存在しないところがわかる)
         self._point_map = np.ones((EnvParams.map_height, EnvParams.map_width), dtype=np.float32) * -1
         self._target_team_id = target_team_id
+
+        if isinstance(env_cfg, EnvParams):
+            env_cfg = flax.serialization.to_state_dict(env_cfg)
+
         self.unit_move_cost = env_cfg["unit_move_cost"]
         self.unit_sap_cost = env_cfg["unit_sap_cost"]
         assert version in ["v1", "v2"]
@@ -352,7 +357,7 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
 
     # state
     # map state
-    state_map[State.TILE_TYPE] = np.array(obs["map_features"]["tile_type"]).T  # (24, 24)
+    state_map[State.TILE_TYPE] = np.array(obs["map_features"]["tile_type"]).T
     state_map[State.TILE_TYPE] = mirroring(state_map[State.TILE_TYPE], null_value=-1)
     # energy nodesの位置は未知(tileのenergyはvisionで観測可能)
     state_map[State.ENERGY] = np.array(obs["map_features"]["energy"]).T / 10  # (24, 24)

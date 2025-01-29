@@ -3,18 +3,20 @@ from typing import Any
 from dataclasses import dataclass
 
 import jax
-import ray
 import flax
 import numpy as np
 import torch
 import gymnasium as gym
 import jax.numpy as jnp
 import flax.serialization
-from lux.utils import State, Action, HiddenState
+from lux.utils import State, Action, HiddenState, EpisodeStore, extract_state
 from lux.models import LuxUNetModel
+from lux.params import EnvParams
 from luxai_s3.env import LuxAIS3Env
 from luxai_s3.utils import to_numpy
-from luxai_s3.params import EnvParams, env_params_ranges
+from luxai_s3.params import env_params_ranges
+
+import ray
 from ray.tune.registry import register_env
 from ray.rllib.core.columns import Columns
 from ray.rllib.algorithms.ppo import PPOConfig
@@ -63,6 +65,8 @@ class RLLibLuxEnv(MultiAgentEnv):
         # reset時に更新
         self.rng_key = jax.random.PRNGKey(0)
         self.env_params = self._set_params()
+        self.episode_store1 = EpisodeStore(target_team_id=0, env_cfg=self.env_params)
+        self.episode_store2 = EpisodeStore(target_team_id=1, env_cfg=self.env_params)
 
     def _set_params(self) -> EnvParams:
         randomized_game_params = {}
@@ -74,81 +78,16 @@ class RLLibLuxEnv(MultiAgentEnv):
     def _create_action_space(self):
         num_actions = len(Action)
         num_units = EnvParams.max_units
-        unit_sap_range = env_params_ranges["unit_sap_range"][-1]  # 最大値で設定しておく
-        low = np.zeros((num_units, 3))
-        low[:, 1:] = -unit_sap_range
-        high = np.ones((num_units, 3)) * num_actions
-        high[:, 1:] = unit_sap_range
+        low = np.zeros(num_units)
+        high = np.ones(num_units) * num_actions
         return {
-            "player_0": gym.spaces.Box(low=low, high=high, shape=(num_units, 3), dtype=np.int32),
-            "player_1": gym.spaces.Box(low=low, high=high, shape=(num_units, 3), dtype=np.int32),
+            "player_0": gym.spaces.Box(low=low, high=high, shape=(num_units,), dtype=np.int32),
+            "player_1": gym.spaces.Box(low=low, high=high, shape=(num_units,), dtype=np.int32),
         }
 
     def _create_obs_space(self) -> gym.spaces.Dict:
-        observation_space = gym.spaces.Dict(
-            {
-                "units": gym.spaces.Dict(
-                    {
-                        "position": gym.spaces.Box(
-                            low=-1,
-                            high=EnvParams.map_height,
-                            shape=(EnvParams.num_teams, EnvParams.max_units, 2),
-                            dtype=np.int32,
-                        ),
-                        "energy": gym.spaces.Box(
-                            low=-1,
-                            high=EnvParams.max_unit_energy,
-                            shape=(EnvParams.num_teams, EnvParams.max_units),
-                            dtype=np.int32,
-                        ),
-                    }
-                ),
-                "units_mask": gym.spaces.Box(
-                    low=0, high=1, shape=(EnvParams.num_teams, EnvParams.max_units), dtype=np.bool_
-                ),
-                "sensor_mask": gym.spaces.Box(
-                    low=0, high=1, shape=(EnvParams.map_width, EnvParams.map_height), dtype=np.bool_
-                ),
-                "map_features": gym.spaces.Dict(
-                    {
-                        "energy": gym.spaces.Box(
-                            low=-1,
-                            high=EnvParams.max_energy_per_tile,
-                            shape=(EnvParams.map_width, EnvParams.map_height),
-                            dtype=np.int32,
-                        ),
-                        "tile_type": gym.spaces.Box(
-                            low=-1, high=2, shape=(EnvParams.map_width, EnvParams.map_height), dtype=np.int32
-                        ),
-                    }
-                ),
-                "relic_nodes": gym.spaces.Box(
-                    low=-1,
-                    high=EnvParams.map_height,
-                    shape=(EnvParams.max_relic_nodes, 2),  # N max relic nodes, 2 features for position (x, y)
-                    dtype=np.int32,
-                ),
-                "relic_nodes_mask": gym.spaces.Box(
-                    low=0,
-                    high=1,
-                    shape=(EnvParams.max_relic_nodes,),  # N max relic nodes
-                    dtype=np.bool_,
-                ),
-                "team_points": gym.spaces.Box(
-                    low=0,
-                    high=EnvParams.max_units * EnvParams.max_steps_in_match,
-                    shape=(EnvParams.num_teams,),  # T teams
-                    dtype=np.int32,
-                ),
-                "team_wins": gym.spaces.Box(
-                    low=0,
-                    high=EnvParams.match_count_per_episode,
-                    shape=(EnvParams.num_teams,),  # T teams
-                    dtype=np.int32,
-                ),
-                "steps": gym.spaces.Discrete(EnvParams.max_steps_in_match * EnvParams.match_count_per_episode),
-                "match_steps": gym.spaces.Discrete(EnvParams.max_steps_in_match),
-            }
+        observation_space = gym.spaces.Box(
+            low=-1, high=1, shape=(len(State), EnvParams.map_height, EnvParams.map_width), dtype=np.float32
         )
         return {"player_0": observation_space, "player_1": observation_space}
 
@@ -165,20 +104,40 @@ class RLLibLuxEnv(MultiAgentEnv):
         obs, self.state = self.env.reset(reset_key, params=self.env_params)
         obs = to_numpy(flax.serialization.to_state_dict(obs))
         infos = {k: {} for k in obs.keys()}
-        return obs, infos
+
+        self.episode_store1 = EpisodeStore(target_team_id=0, env_cfg=self.env_params)
+        self.episode_store2 = EpisodeStore(target_team_id=1, env_cfg=self.env_params)
+        state = {
+            "player_0": extract_state(obs["player_0"], 0, self.episode_store1),
+            "player_1": extract_state(obs["player_1"], 1, self.episode_store2),
+        }
+        return state, infos
 
     def step(self, action_dict: dict[str, Any]) -> tuple:
         self.rng_key, step_key = jax.random.split(self.rng_key)
-        # actionをreshape
+        # actionを(16,) -> (16, 3)に変換。ただしsap時も0になっている
+        action = {agent_id: np.zeros((EnvParams.max_units, 3), dtype=np.int32) for agent_id in self.agents}
+        action["player_0"][:, 0] = action_dict["player_0"]
+        action["player_1"][:, 0] = action_dict["player_1"]
+
         obs, self.state, reward, _terminated, _truncated, _ = self.env.step(
-            step_key, self.state, action_dict, self.env_params
+            step_key, self.state, action, self.env_params
         )
         obs = to_numpy(flax.serialization.to_state_dict(obs))
+        state = {
+            "player_0": extract_state(obs["player_0"], 0, self.episode_store1),
+            "player_1": extract_state(obs["player_1"], 1, self.episode_store2),
+        }
+
         reward = to_numpy(reward)
         terminated = {agent_id: done.item() for agent_id, done in _terminated.items()}
+
         truncated = {agent_id: done.item() for agent_id, done in _truncated.items()}
+        # "__all__" (required) is used to indicate env termination.
+        terminated["__all__"] = np.all(list(truncated.values()))  # luxaiはtruncatedがTrueになる
         info = {agent_id: {} for agent_id in self.agents}
-        return obs, reward, terminated, truncated, info
+
+        return state, reward, terminated, truncated, info
 
 
 class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
@@ -200,23 +159,24 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
 
     @override(TorchRLModule)
     def _forward(self, batch, **kwargs):
-        # バッチサイズ
-        batch_size = batch[Columns.OBS].shape[0] if isinstance(batch[Columns.OBS], torch.Tensor) else 1
-        # state = extract_state(batch["obs"], target_team_id)
-        # state = batch["obs"]
-        # outputs = self.model(state)
+        batch_size = batch[Columns.OBS].shape[0]
         outputs = {
-            "policy": torch.zeros((1, EnvParams.max_units, len(Action))),
-            "value": torch.zeros((1,)),
+            "policy": torch.zeros((batch_size, EnvParams.max_units, len(Action))),
+            "value": torch.rand((batch_size,)),
         }
         policy_logits = outputs["policy"]
-        self._values = outputs["value"].tanh()
         return {
             Columns.ACTION_DIST_INPUTS: policy_logits,
         }
 
     @override(ValueFunctionAPI)
     def compute_values(self, batch: dict[str, Any]) -> torch.Tensor:
+        batch_size = batch[Columns.OBS].shape[0]
+        outputs = {
+            "policy": torch.zeros((batch_size, EnvParams.max_units, len(Action))),
+            "value": torch.rand((batch_size,)),
+        }
+        self._values = outputs["value"].tanh()
         return self._values
 
     @override(TorchRLModule)
@@ -257,6 +217,7 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
         .training(
             gamma=0.99,
             lr=1e-4,
+            minibatch_size=1024,
             train_batch_size=1024,
         )
         # https://docs.ray.io/en/latest/rllib/rllib-rlmodule.html#construction-through-rlmodulespecs
