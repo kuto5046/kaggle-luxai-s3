@@ -13,6 +13,7 @@ classifiers = [
 dependencies = [
   "catboost>=1.2.7",
   "debugpy>=1.8.11",
+  "gputil>=1.4",
   "gymnax==0.0.8",
   "h5py>=3.12.1",
   "hydra-core>=1.3.2",
@@ -35,7 +36,7 @@ dependencies = [
   "pyarrow>=17",
   "pydantic>=2.7.4",
   "pytest>=8.3.3",
-  "ray[rllib]>=2.38",
+  "ray[default,rllib]>=2.41",
   "rich>=13.8.1",
   "ruff>=0.6.5",
   "scikit-learn>=1.5.2",

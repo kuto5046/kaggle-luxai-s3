@@ -1,5 +1,6 @@
 import os
 from typing import Any
+from collections import deque
 from dataclasses import dataclass
 
 import jax
@@ -19,15 +20,25 @@ from luxai_s3.params import env_params_ranges
 import ray
 from ray.tune.registry import register_env
 from ray.rllib.core.columns import Columns
+from ray.rllib.utils.typing import ModuleID, TensorType
 from ray.rllib.algorithms.ppo import PPOConfig
 from ray.rllib.utils.annotations import override
+from ray.rllib.utils.torch_utils import explained_variance
+from ray.rllib.algorithms.ppo.ppo import (
+    LEARNER_RESULTS_KL_KEY,
+    LEARNER_RESULTS_VF_EXPLAINED_VAR_KEY,
+    LEARNER_RESULTS_VF_LOSS_UNCLIPPED_KEY,
+)
 from ray.rllib.core.rl_module.apis import ValueFunctionAPI
 from ray.rllib.env.multi_agent_env import MultiAgentEnv
+from ray.rllib.core.learner.learner import ENTROPY_KEY, VF_LOSS_KEY, POLICY_LOSS_KEY
 from ray.rllib.core.rl_module.rl_module import RLModuleSpec
+from ray.rllib.evaluation.postprocessing import Postprocessing
 from ray.rllib.algorithms.algorithm_config import AlgorithmConfig
 from ray.rllib.core.rl_module.multi_rl_module import MultiRLModuleSpec
 from ray.rllib.models.torch.torch_distributions import TorchCategorical, TorchDistribution
 from ray.rllib.core.rl_module.torch.torch_rl_module import TorchRLModule
+from ray.rllib.algorithms.ppo.torch.ppo_torch_learner import PPOTorchLearner
 
 
 @dataclass
@@ -41,7 +52,6 @@ class Config:
 
 
 def env_creator(config: dict[str, Any]) -> MultiAgentEnv:
-    """環境作成関数"""
     return RLLibLuxEnv(config)
 
 
@@ -53,7 +63,7 @@ class RLLibLuxEnv(MultiAgentEnv):
     def __init__(self, config: dict[str, Any]):
         super().__init__()
         self.env = LuxAIS3Env()
-
+        self.n_stack = config["n_stack"]
         self.state = None
         # アクション・観測空間の設定
         self.action_spaces = self._create_action_space()
@@ -68,6 +78,9 @@ class RLLibLuxEnv(MultiAgentEnv):
         self.episode_store1 = EpisodeStore(target_team_id=0, env_cfg=self.env_params)
         self.episode_store2 = EpisodeStore(target_team_id=1, env_cfg=self.env_params)
 
+        self.agent0_states = deque(maxlen=self.n_stack)
+        self.agent1_states = deque(maxlen=self.n_stack)
+
     def _set_params(self) -> EnvParams:
         randomized_game_params = {}
         for k, v in env_params_ranges.items():
@@ -78,16 +91,18 @@ class RLLibLuxEnv(MultiAgentEnv):
     def _create_action_space(self):
         num_actions = len(Action)
         num_units = EnvParams.max_units
-        low = np.zeros(num_units)
-        high = np.ones(num_units) * num_actions
+        # Boxは連続値の行動用なので離散アクションはMultiDiscreteを使う
         return {
-            "player_0": gym.spaces.Box(low=low, high=high, shape=(num_units,), dtype=np.int32),
-            "player_1": gym.spaces.Box(low=low, high=high, shape=(num_units,), dtype=np.int32),
+            "player_0": gym.spaces.MultiDiscrete([num_actions] * num_units),
+            "player_1": gym.spaces.MultiDiscrete([num_actions] * num_units),
         }
 
     def _create_obs_space(self) -> gym.spaces.Dict:
         observation_space = gym.spaces.Box(
-            low=-1, high=1, shape=(len(State), EnvParams.map_height, EnvParams.map_width), dtype=np.float32
+            low=-1,
+            high=1,
+            shape=(self.n_stack, len(State), EnvParams.map_height, EnvParams.map_width),
+            dtype=np.float32,
         )
         return {"player_0": observation_space, "player_1": observation_space}
 
@@ -107,16 +122,24 @@ class RLLibLuxEnv(MultiAgentEnv):
 
         self.episode_store1 = EpisodeStore(target_team_id=0, env_cfg=self.env_params)
         self.episode_store2 = EpisodeStore(target_team_id=1, env_cfg=self.env_params)
-        state = {
-            "player_0": extract_state(obs["player_0"], 0, self.episode_store1),
-            "player_1": extract_state(obs["player_1"], 1, self.episode_store2),
-        }
+        state = self._create_state(obs)
         return state, infos
+
+    def _create_state(self, obs: dict[str, Any]) -> dict[str, np.ndarray]:
+        agent0_state = extract_state(obs["player_0"], 0, self.episode_store1)
+        agent1_state = extract_state(obs["player_1"], 1, self.episode_store2)
+        self.agent0_states.append(agent0_state)
+        self.agent1_states.append(agent1_state)
+        return {
+            "player_0": np.stack(list(self.agent0_states), axis=0),
+            "player_1": np.stack(list(self.agent1_states), axis=0),
+        }
 
     def step(self, action_dict: dict[str, Any]) -> tuple:
         self.rng_key, step_key = jax.random.split(self.rng_key)
         # actionを(16,) -> (16, 3)に変換。ただしsap時も0になっている
         action = {agent_id: np.zeros((EnvParams.max_units, 3), dtype=np.int32) for agent_id in self.agents}
+        print(action_dict)
         action["player_0"][:, 0] = action_dict["player_0"]
         action["player_1"][:, 0] = action_dict["player_1"]
 
@@ -124,10 +147,7 @@ class RLLibLuxEnv(MultiAgentEnv):
             step_key, self.state, action, self.env_params
         )
         obs = to_numpy(flax.serialization.to_state_dict(obs))
-        state = {
-            "player_0": extract_state(obs["player_0"], 0, self.episode_store1),
-            "player_1": extract_state(obs["player_1"], 1, self.episode_store2),
-        }
+        state = self._create_state(obs)
 
         reward = to_numpy(reward)
         terminated = {agent_id: done.item() for agent_id, done in _terminated.items()}
@@ -159,24 +179,26 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
 
     @override(TorchRLModule)
     def _forward(self, batch, **kwargs):
-        batch_size = batch[Columns.OBS].shape[0]
-        outputs = {
-            "policy": torch.zeros((batch_size, EnvParams.max_units, len(Action))),
-            "value": torch.rand((batch_size,)),
+        outputs = self.model(batch[Columns.OBS])
+        policy_logits = outputs["own_policy"]
+        # この時点では(batch, action, height, width)なので、(batch, action)に変換
+        # unitの位置を取得
+        unit_positions = batch[Columns.OBS][State.UNIT_POSITIONS]
+        return {
+            Columns.ACTION_DIST_INPUTS: policy_logits,
         }
-        policy_logits = outputs["policy"]
+
+    @override(TorchRLModule)
+    def _forward_train(self, batch, **kwargs):
+        outputs = self.model(batch[Columns.OBS])
+        policy_logits = outputs["own_policy"]
+        self._values = outputs["value"].tanh()
         return {
             Columns.ACTION_DIST_INPUTS: policy_logits,
         }
 
     @override(ValueFunctionAPI)
-    def compute_values(self, batch: dict[str, Any]) -> torch.Tensor:
-        batch_size = batch[Columns.OBS].shape[0]
-        outputs = {
-            "policy": torch.zeros((batch_size, EnvParams.max_units, len(Action))),
-            "value": torch.rand((batch_size,)),
-        }
-        self._values = outputs["value"].tanh()
+    def compute_values(self, batch: dict[str, Any], embeddings: Any | None = None) -> torch.Tensor:
         return self._values
 
     @override(TorchRLModule)
@@ -184,8 +206,115 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
         return TorchCategorical
 
 
+class CustomPPOTorchLearner(PPOTorchLearner):
+    """Implements torch-specific PPO loss logic on top of PPOLearner.
+
+    This class implements the ppo loss under `self.compute_loss_for_module()`.
+    """
+
+    @override(PPOTorchLearner)
+    def compute_loss_for_module(
+        self,
+        *,
+        module_id: ModuleID,
+        config: PPOConfig,
+        batch: dict[str, Any],
+        fwd_out: dict[str, TensorType],
+    ) -> TensorType:
+        module = self.module[module_id].unwrapped()
+
+        # Possibly apply masking to some sub loss terms and to the total loss term
+        # at the end. Masking could be used for RNN-based model (zero padded `batch`)
+        # and for PPO's batched value function (and bootstrap value) computations,
+        # for which we add an (artificial) timestep to each episode to
+        # simplify the actual computation.
+        if Columns.LOSS_MASK in batch:
+            mask = batch[Columns.LOSS_MASK]
+            num_valid = torch.sum(mask)
+
+            def possibly_masked_mean(data_):
+                return torch.sum(data_[mask]) / num_valid
+
+        else:
+            possibly_masked_mean = torch.mean
+
+        action_dist_class_train = module.get_train_action_dist_cls()
+        action_dist_class_exploration = module.get_exploration_action_dist_cls()
+
+        curr_action_dist = action_dist_class_train.from_logits(fwd_out[Columns.ACTION_DIST_INPUTS])
+        # TODO (sven): We should ideally do this in the LearnerConnector (separation of
+        #  concerns: Only do things on the EnvRunners that are required for computing
+        #  actions, do NOT do anything on the EnvRunners that's only required for a
+        #   training update).
+        prev_action_dist = action_dist_class_exploration.from_logits(batch[Columns.ACTION_DIST_INPUTS])
+
+        logp_ratio = torch.exp(curr_action_dist.logp(batch[Columns.ACTIONS]) - batch[Columns.ACTION_LOGP])
+
+        # Only calculate kl loss if necessary (kl-coeff > 0.0).
+        if config.use_kl_loss:
+            action_kl = prev_action_dist.kl(curr_action_dist)
+            mean_kl_loss = possibly_masked_mean(action_kl)
+        else:
+            mean_kl_loss = torch.tensor(0.0, device=logp_ratio.device)
+
+        curr_entropy = curr_action_dist.entropy()
+        mean_entropy = possibly_masked_mean(curr_entropy)
+
+        # MEMO: advantagesをunit数分に拡張する
+        batch_size = batch[Postprocessing.ADVANTAGES].shape[0]
+        advantages = batch[Postprocessing.ADVANTAGES].view(batch_size, 1).repeat(1, EnvParams.max_units)
+
+        surrogate_loss = torch.min(
+            advantages * logp_ratio,
+            advantages * torch.clamp(logp_ratio, 1 - config.clip_param, 1 + config.clip_param),
+        )
+
+        # Compute a value function loss.
+        if config.use_critic:
+            value_fn_out = module.compute_values(batch, embeddings=fwd_out.get(Columns.EMBEDDINGS))
+
+            vf_loss = torch.pow(value_fn_out - batch[Postprocessing.VALUE_TARGETS], 2.0)
+            vf_loss_clipped = torch.clamp(vf_loss, 0, config.vf_clip_param)
+            vf_loss_clipped = vf_loss_clipped.view(batch_size, 1).repeat(1, EnvParams.max_units)
+            mean_vf_loss = possibly_masked_mean(vf_loss_clipped)
+            mean_vf_unclipped_loss = possibly_masked_mean(vf_loss)
+        # Ignore the value function -> Set all to 0.0.
+        else:
+            z = torch.tensor(0.0, device=surrogate_loss.device)
+            value_fn_out = mean_vf_unclipped_loss = vf_loss_clipped = mean_vf_loss = z
+
+        total_loss = possibly_masked_mean(
+            -surrogate_loss
+            + config.vf_loss_coeff * vf_loss_clipped
+            - (self.entropy_coeff_schedulers_per_module[module_id].get_current_value() * curr_entropy)
+        )
+
+        # Add mean_kl_loss (already processed through `possibly_masked_mean`),
+        # if necessary.
+        if config.use_kl_loss:
+            total_loss += self.curr_kl_coeffs_per_module[module_id] * mean_kl_loss
+
+        # Log important loss stats.
+        self.metrics.log_dict(
+            {
+                POLICY_LOSS_KEY: -possibly_masked_mean(surrogate_loss),
+                VF_LOSS_KEY: mean_vf_loss,
+                LEARNER_RESULTS_VF_LOSS_UNCLIPPED_KEY: mean_vf_unclipped_loss,
+                LEARNER_RESULTS_VF_EXPLAINED_VAR_KEY: explained_variance(
+                    batch[Postprocessing.VALUE_TARGETS], value_fn_out
+                ),
+                ENTROPY_KEY: mean_entropy,
+                LEARNER_RESULTS_KL_KEY: mean_kl_loss,
+            },
+            key=module_id,
+            window=1,  # <- single items (should not be mean/ema-reduced over time).
+        )
+        # Return the total loss.
+        return total_loss
+
+
 def create_rl_config(cfg: Config) -> AlgorithmConfig:
-    tmp_env = env_creator({})
+    tmp_env = env_creator({"n_stack": cfg.n_stack})
     observation_space = tmp_env.get_observation_space("player_0")
     action_space = tmp_env.get_action_space("player_0")
     rl_module_spec = RLModuleSpec(
@@ -206,7 +335,7 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
             enable_env_runner_and_connector_v2=True,
         )
         # 環境設定
-        .environment(env=cfg.env_name, env_config={})
+        .environment(env=cfg.env_name, env_config={"n_stack": cfg.n_stack})
         # ゲームをしてデータを生成するrunnerの数. cpuの数と合わせる
         .env_runners(
             num_env_runners=os.cpu_count() if not cfg.debug else 1,
@@ -215,6 +344,7 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
         .learners(num_learners=1)
         # 学習パラメータ設定
         .training(
+            learner_class=CustomPPOTorchLearner,
             gamma=0.99,
             lr=1e-4,
             minibatch_size=1024,
