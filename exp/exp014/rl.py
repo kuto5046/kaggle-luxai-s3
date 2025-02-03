@@ -1,5 +1,6 @@
 import os
-from typing import Any
+from typing import Any, Optional
+from pathlib import Path
 from collections import deque
 from dataclasses import dataclass
 
@@ -18,10 +19,12 @@ from luxai_s3.utils import to_numpy
 from luxai_s3.params import env_params_ranges
 
 import ray
+import wandb
 from ray.tune.registry import register_env
 from ray.rllib.core.columns import Columns
-from ray.rllib.utils.typing import ModuleID, TensorType
+from ray.rllib.utils.typing import ModuleID, TensorType, EpisodeType
 from ray.rllib.algorithms.ppo import PPOConfig
+from ray.rllib.env.env_runner import EnvRunner
 from ray.rllib.utils.annotations import override
 from ray.rllib.utils.torch_utils import explained_variance
 from ray.rllib.algorithms.ppo.ppo import (
@@ -29,12 +32,15 @@ from ray.rllib.algorithms.ppo.ppo import (
     LEARNER_RESULTS_VF_EXPLAINED_VAR_KEY,
     LEARNER_RESULTS_VF_LOSS_UNCLIPPED_KEY,
 )
+from ray.rllib.callbacks.callbacks import RLlibCallback
 from ray.rllib.core.rl_module.apis import ValueFunctionAPI
 from ray.rllib.env.multi_agent_env import MultiAgentEnv
+from ray.rllib.algorithms.algorithm import Algorithm
 from ray.rllib.core.learner.learner import ENTROPY_KEY, VF_LOSS_KEY, POLICY_LOSS_KEY
 from ray.rllib.core.rl_module.rl_module import RLModuleSpec
 from ray.rllib.evaluation.postprocessing import Postprocessing
 from ray.rllib.algorithms.algorithm_config import AlgorithmConfig
+from ray.rllib.utils.metrics.metrics_logger import MetricsLogger
 from ray.rllib.core.rl_module.multi_rl_module import MultiRLModuleSpec
 from ray.rllib.models.torch.torch_distributions import TorchCategorical, TorchDistribution
 from ray.rllib.core.rl_module.torch.torch_rl_module import TorchRLModule
@@ -44,11 +50,30 @@ from ray.rllib.algorithms.ppo.torch.ppo_torch_learner import PPOTorchLearner
 @dataclass
 class Config:
     exp_name: str = "exp014"
+    notes: str = "rlをrayで動かす"
     model_name: str = "lux_unet"
     env_name: str = "lux-s3-v0"
     n_stack: int = 1
     pretrained_path: str | None = None
-    debug: bool = True
+    debug: bool = False
+    output_dir: str = Path(f"/home/user/work/exp/{exp_name}")
+    # runner
+    num_env_runners: int = 1  # actorの数
+    num_cpus_per_env_runner: int = 1
+    # learner
+    gamma: float = 0.99
+    lr: float = 1e-4
+    minibatch_size: int = 1024
+    train_batch_size_per_learner: int = 505 * 10
+    num_epochs: int = 2
+
+    def __post_init__(self):
+        if self.debug:
+            self.num_env_runners = 1
+            self.num_cpus_per_env_runner = 1
+            self.minibatch_size = 256
+            self.train_batch_size_per_learner = 505
+            self.num_epochs = 1
 
 
 def env_creator(config: dict[str, Any]) -> MultiAgentEnv:
@@ -90,11 +115,12 @@ class RLLibLuxEnv(MultiAgentEnv):
 
     def _create_action_space(self):
         num_actions = len(Action)
-        num_units = EnvParams.max_units
+        cell_size = EnvParams.map_height * EnvParams.map_width
         # Boxは連続値の行動用なので離散アクションはMultiDiscreteを使う
+        action_space = gym.spaces.MultiDiscrete([num_actions] * cell_size)
         return {
-            "player_0": gym.spaces.MultiDiscrete([num_actions] * num_units),
-            "player_1": gym.spaces.MultiDiscrete([num_actions] * num_units),
+            "player_0": action_space,
+            "player_1": action_space,
         }
 
     def _create_obs_space(self) -> gym.spaces.Dict:
@@ -135,21 +161,31 @@ class RLLibLuxEnv(MultiAgentEnv):
             "player_1": np.stack(list(self.agent1_states), axis=0),
         }
 
+    def _create_action(self, action_dict: dict[str, Any]) -> dict[str, np.ndarray]:
+        actions = {agent_id: np.zeros((EnvParams.max_units, 3), dtype=np.int32) for agent_id in self.agents}
+
+        for agent_idx, (agent_id, action_1dmap) in enumerate(action_dict.items()):
+            action_2dmap = action_1dmap.reshape(EnvParams.map_height, EnvParams.map_width)
+            for unit_id in range(EnvParams.max_units):
+                x, y = self.state.units.position[agent_idx][unit_id]
+                unit_action = action_2dmap[y, x]
+                actions[agent_id][unit_id, 0] = unit_action
+                if unit_action == Action.SAP:
+                    # TODO: sapの場合ap方策も適用する
+                    pass
+        return actions
+
     def step(self, action_dict: dict[str, Any]) -> tuple:
         self.rng_key, step_key = jax.random.split(self.rng_key)
-        # actionを(16,) -> (16, 3)に変換。ただしsap時も0になっている
-        action = {agent_id: np.zeros((EnvParams.max_units, 3), dtype=np.int32) for agent_id in self.agents}
-        print(action_dict)
-        action["player_0"][:, 0] = action_dict["player_0"]
-        action["player_1"][:, 0] = action_dict["player_1"]
-
-        obs, self.state, reward, _terminated, _truncated, _ = self.env.step(
-            step_key, self.state, action, self.env_params
+        actions = self._create_action(action_dict)
+        obs, self.state, _reward, _terminated, _truncated, _ = self.env.step(
+            step_key, self.state, actions, self.env_params
         )
         obs = to_numpy(flax.serialization.to_state_dict(obs))
         state = self._create_state(obs)
 
-        reward = to_numpy(reward)
+        _reward = to_numpy(_reward)
+        reward = {agent_id: int(r.item()) for agent_id, r in _reward.items()}
         terminated = {agent_id: done.item() for agent_id, done in _terminated.items()}
 
         truncated = {agent_id: done.item() for agent_id, done in _truncated.items()}
@@ -179,31 +215,135 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
 
     @override(TorchRLModule)
     def _forward(self, batch, **kwargs):
+        batch_size = batch[Columns.OBS].shape[0]
         outputs = self.model(batch[Columns.OBS])
         policy_logits = outputs["own_policy"]
-        # この時点では(batch, action, height, width)なので、(batch, action)に変換
-        # unitの位置を取得
-        unit_positions = batch[Columns.OBS][State.UNIT_POSITIONS]
+        num_actions = policy_logits.shape[1]
+        # この時点では(batch, action, height, width)なので(batch, height*width, action)に変換
+        policy_logits = policy_logits.reshape(batch_size, num_actions, -1).transpose(2, 1)
         return {
             Columns.ACTION_DIST_INPUTS: policy_logits,
         }
 
     @override(TorchRLModule)
     def _forward_train(self, batch, **kwargs):
+        batch_size = batch[Columns.OBS].shape[0]
         outputs = self.model(batch[Columns.OBS])
         policy_logits = outputs["own_policy"]
-        self._values = outputs["value"].tanh()
+        num_actions = policy_logits.shape[1]
+        policy_logits = policy_logits.reshape(batch_size, num_actions, -1).transpose(2, 1)
+
         return {
             Columns.ACTION_DIST_INPUTS: policy_logits,
         }
 
     @override(ValueFunctionAPI)
     def compute_values(self, batch: dict[str, Any], embeddings: Any | None = None) -> torch.Tensor:
+        outputs = self.model(batch[Columns.OBS])
+        self._values = outputs["value"].tanh().squeeze(dim=1)
         return self._values
 
     @override(TorchRLModule)
     def get_inference_action_dist_cls(self) -> type[TorchDistribution]:
         return TorchCategorical
+
+
+def train_metric_value(results: dict[str, Any], key: str) -> float:
+    # self play前提でplayer_0とplayer_1の値の平均を返す
+    return (results["player_0"][key] + results["player_1"][key]) / 2
+
+
+class WandbLoggerCallback(RLlibCallback):
+    def __init__(self):
+        self.episode_count = 0
+
+    @override(RLlibCallback)
+    def on_train_result(
+        self,
+        *,
+        algorithm: "Algorithm",
+        metrics_logger: MetricsLogger | None = None,
+        result: dict,
+        **kwargs,
+    ) -> None:
+        """Called at the end of Algorithm.train().
+
+        Args:
+            algorithm: Current Algorithm instance.
+            metrics_logger: The MetricsLogger object inside the Algorithm. Can be
+                used to log custom metrics after traing results are available.
+            result: Dict of results returned from Algorithm.train() call.
+                You can mutate this object to add additional metrics.
+            kwargs: Forward compatibility placeholder.
+        """
+        learner_metrics = [
+            # loss
+            "total_loss",
+            "vf_loss",
+            "vf_loss_unclipped",
+            "policy_loss",
+            "mean_kl_loss",
+            # other
+            "entropy",
+            "vf_explained_var",
+            "default_optimizer_learning_rate",
+        ]
+        for key in learner_metrics:
+            wandb.log(
+                {
+                    f"train/{key}": train_metric_value(result["learners"], key),
+                }
+            )
+
+    def on_evaluate_end(
+        self,
+        *,
+        algorithm: "Algorithm",
+        metrics_logger: MetricsLogger | None = None,
+        evaluation_metrics: dict,
+        **kwargs,
+    ) -> None:
+        """Runs when the evaluation is done.
+
+        Runs at the end of Algorithm.evaluate().
+
+        Args:
+            algorithm: Reference to the algorithm instance.
+            metrics_logger: The MetricsLogger object inside the `Algorithm`. Can be
+                used to log custom metrics after the most recent evaluation round.
+            evaluation_metrics: Results dict to be returned from algorithm.evaluate().
+                You can mutate this object to add additional metrics.
+            kwargs: Forward compatibility placeholder.
+        """
+        print(f"############ on_evaluate_end {evaluation_metrics.keys()=}")
+        wandb.log(
+            {
+                # player_0を自身として評価している
+                "evaluate/agent_episode_returns_mean": evaluation_metrics["env_runners"]["agent_episode_returns_mean"][
+                    "player_0"
+                ],
+                "evaluate/episode_duration_sec_mean": evaluation_metrics["env_runners"]["episode_duration_sec_mean"],
+            }
+        )
+
+    @override(RLlibCallback)
+    def on_episode_end(
+        self,
+        *,
+        episode: EpisodeType,
+        env_runner: Optional["EnvRunner"] = None,
+        metrics_logger: MetricsLogger | None = None,
+        **kwargs,
+    ) -> None:
+        # 例: エピソードの長さや報酬を送信する場合
+        rewards = episode.get_rewards()  # これだと履歴が取れる
+        reward = {agent_id: rewards[agent_id][-1] for agent_id in rewards.keys()}
+        # rewards = {
+        #     agent_id: single_episode.get_return() for agent_id, single_episode in episode.agent_episodes.items()
+        # }
+        duration = episode.get_duration_s()
+        print(f"episode {self.episode_count} finished. {reward=} {duration=:0.2f}s")
+        self.episode_count += 1
 
 
 class CustomPPOTorchLearner(PPOTorchLearner):
@@ -248,7 +388,9 @@ class CustomPPOTorchLearner(PPOTorchLearner):
         #   training update).
         prev_action_dist = action_dist_class_exploration.from_logits(batch[Columns.ACTION_DIST_INPUTS])
 
-        logp_ratio = torch.exp(curr_action_dist.logp(batch[Columns.ACTIONS]) - batch[Columns.ACTION_LOGP])
+        # Calculate log probability ratio for each position and sum across spatial dimensions
+        # logp_ratio = torch.exp(curr_action_dist.logp(batch[Columns.ACTIONS]) - batch[Columns.ACTION_LOGP])
+        logp_ratio = torch.exp((curr_action_dist.logp(batch[Columns.ACTIONS]) - batch[Columns.ACTION_LOGP]).sum(dim=1))
 
         # Only calculate kl loss if necessary (kl-coeff > 0.0).
         if config.use_kl_loss:
@@ -257,13 +399,13 @@ class CustomPPOTorchLearner(PPOTorchLearner):
         else:
             mean_kl_loss = torch.tensor(0.0, device=logp_ratio.device)
 
-        curr_entropy = curr_action_dist.entropy()
+        curr_entropy = curr_action_dist.entropy().sum(dim=1)  # (batch, height*width) -> (batch)
         mean_entropy = possibly_masked_mean(curr_entropy)
 
         # MEMO: advantagesをunit数分に拡張する
-        batch_size = batch[Postprocessing.ADVANTAGES].shape[0]
-        advantages = batch[Postprocessing.ADVANTAGES].view(batch_size, 1).repeat(1, EnvParams.max_units)
-
+        # batch_size = batch[Postprocessing.ADVANTAGES].shape[0]
+        # advantages = batch[Postprocessing.ADVANTAGES].view(batch_size, 1).repeat(1, EnvParams.max_units)
+        advantages = batch[Postprocessing.ADVANTAGES]
         surrogate_loss = torch.min(
             advantages * logp_ratio,
             advantages * torch.clamp(logp_ratio, 1 - config.clip_param, 1 + config.clip_param),
@@ -272,10 +414,8 @@ class CustomPPOTorchLearner(PPOTorchLearner):
         # Compute a value function loss.
         if config.use_critic:
             value_fn_out = module.compute_values(batch, embeddings=fwd_out.get(Columns.EMBEDDINGS))
-
             vf_loss = torch.pow(value_fn_out - batch[Postprocessing.VALUE_TARGETS], 2.0)
             vf_loss_clipped = torch.clamp(vf_loss, 0, config.vf_clip_param)
-            vf_loss_clipped = vf_loss_clipped.view(batch_size, 1).repeat(1, EnvParams.max_units)
             mean_vf_loss = possibly_masked_mean(vf_loss_clipped)
             mean_vf_unclipped_loss = possibly_masked_mean(vf_loss)
         # Ignore the value function -> Set all to 0.0.
@@ -338,17 +478,26 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
         .environment(env=cfg.env_name, env_config={"n_stack": cfg.n_stack})
         # ゲームをしてデータを生成するrunnerの数. cpuの数と合わせる
         .env_runners(
-            num_env_runners=os.cpu_count() if not cfg.debug else 1,
+            num_env_runners=cfg.num_env_runners,
+            # num_envs_per_env_runner=cfg.num_envs_per_env_runner,  # multi agentはenv vectorizationが未対応
+            # num_cpus_per_env_runner=cfg.num_cpus_per_env_runner,
+            sample_timeout_s=60 * 5,
         )
         # モデルを学習するlearnerの数。gpuの数と合わせる
         .learners(num_learners=1)
         # 学習パラメータ設定
         .training(
             learner_class=CustomPPOTorchLearner,
-            gamma=0.99,
-            lr=1e-4,
-            minibatch_size=1024,
-            train_batch_size=1024,
+            # PPOの設定
+            use_critic=True,
+            use_gae=True,
+            use_kl_loss=True,
+            # 一般的な学習の設定
+            gamma=cfg.gamma,
+            lr=cfg.lr,
+            minibatch_size=cfg.minibatch_size,
+            train_batch_size_per_learner=cfg.train_batch_size_per_learner,  # 3試合データが集まったら学習する
+            num_epochs=cfg.num_epochs,
         )
         # https://docs.ray.io/en/latest/rllib/rllib-rlmodule.html#construction-through-rlmodulespecs
         .rl_module(
@@ -368,24 +517,50 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
             framework="torch",
             eager_tracing=True,
         )
+        .callbacks(WandbLoggerCallback)
+        .evaluation(
+            evaluation_interval=1,
+            evaluation_duration=10,
+            evaluation_duration_unit="episodes",
+        )
     )
     return config
 
 
+def setup_wandb(cfg: Config):
+    wandb.init(
+        project="kaggle-luxai-s3",
+        entity="kuto5046",
+        group=cfg.exp_name,
+        notes=cfg.notes,
+        mode="disabled" if cfg.debug else "online",
+    )
+
+
 def main() -> None:
     cfg = Config()
+    cfg.output_dir.mkdir(parents=True, exist_ok=True)
+    setup_wandb(cfg)
     # debug mode
-    ray.init(ignore_reinit_error=True, runtime_env={"env_vars": {"RAY_DEBUG": "1"}})
+    ray.init(
+        ignore_reinit_error=True,
+        runtime_env={
+            "env_vars": {
+                "RAY_DEBUG": "1",
+            }
+        },
+    )
     # 環境の登録
     register_env(name=cfg.env_name, env_creator=env_creator)
 
     config = create_rl_config(cfg)
     trainer = config.build_algo(env=cfg.env_name)
+    result = trainer.train()
 
-    num_iterations = 1
-    for i in range(num_iterations):
-        result = trainer.train()
-        print(f"Iteration {i} result:", result)
+    checkpoint_dir = trainer.save_to_path(cfg.output_dir)
+    print(f"save to {checkpoint_dir}")
+    # プログラムを終了
+    os._exit(0)
 
 
 if __name__ == "__main__":

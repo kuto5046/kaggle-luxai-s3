@@ -63,6 +63,10 @@ RUN sudo ln -s /squashfs-root/AppRun /usr/bin/nvim
 # install just
 RUN curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to /usr/local/bin
 
+# sheldon
+RUN curl --proto '=https' -fLsS https://rossmacarthur.github.io/install/crate.sh \
+    | bash -s -- --repo rossmacarthur/sheldon --to ~/.local/bin
+
 # 本当はハードコーディングではなくローカルのidと合わせた方が良い
 # https://qiita.com/yohm/items/047b2e68d008ebb0f001
 ARG DOCKER_UID=1000
@@ -81,6 +85,7 @@ WORKDIR ${HOME}
 # install dotfiles
 RUN git clone https://github.com/kuto5046/dotfiles.git
 RUN bash ./dotfiles/.bin/install.sh
+
 
 # make workdir
 RUN mkdir ${HOME}/work/

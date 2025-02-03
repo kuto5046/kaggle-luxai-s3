@@ -28,10 +28,10 @@ class Config:
     root_dir: Path = Path("/home/user/work")
     input_dir: Path = root_dir / "input"
     episode_dir: Path = root_dir / "output/feature_store/episodes"
-    episode_path: Path = episode_dir / "episodes0119.csv"
+    episode_path: Path = episode_dir / "episodes0202.csv"
     feature_dir: Path = root_dir / f"output/feature_store/{exp_name}"
     target_team_name: str = "Frog Parade"
-    target_sub_ids: list[int] = field(default_factory=lambda: [42340565])
+    target_sub_ids: list[int] = field(default_factory=lambda: [42613059, 42613183])
 
 
 def get_fold(_train: pl.DataFrame, cv: list[tuple[np.ndarray, np.ndarray]]) -> pl.DataFrame:

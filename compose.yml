@@ -34,8 +34,11 @@ services:
         source: ~/.env
         target: /home/user/.env
     ports:
-      - 8888:8888
-      - 8501:8501
+      - 8888:8888  # jupyter
+      - 8501:8501  # wandb
+      - 8265:8265   # Ray Dashboard
+      - 3000:3000   # Grafana
+      - 9090:9090   # Prometheus
     tty: true
     stdin_open: True
     hostname: kuzira

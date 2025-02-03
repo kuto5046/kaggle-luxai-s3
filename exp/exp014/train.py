@@ -22,7 +22,7 @@ LOGGER = logging.getLogger(__name__)
 @dataclass
 class Config:
     exp_name: str = Path(__file__).parent.name
-    notes: str = "敵の行動も予測する"
+    notes: str = "パッチ終了後に仕切り直し"
     seed: int = 2025
     debug: bool = False
     n_splits: int = 5

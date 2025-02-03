@@ -54,9 +54,8 @@ def to_np(x: torch.Tensor) -> np.ndarray:
 
 
 class EpisodeStore:
-    def __init__(self, target_team_id: int, env_cfg: dict | EnvParams, version: str = "v1") -> None:
+    def __init__(self, target_team_id: int, env_cfg: dict | EnvParams) -> None:
         self._relic_map = np.zeros((EnvParams.map_height, EnvParams.map_width), dtype=np.float32)
-        # self._relic_nodes = None # TODO: relic_nodesを全て発見したらその情報を使ってpoint_mapを更新する(ポイントが絶対に存在しないところがわかる)
         self._point_map = np.ones((EnvParams.map_height, EnvParams.map_width), dtype=np.float32) * -1
         self._target_team_id = target_team_id
 
@@ -65,20 +64,20 @@ class EpisodeStore:
 
         self.unit_move_cost = env_cfg["unit_move_cost"]
         self.unit_sap_cost = env_cfg["unit_sap_cost"]
-        assert version in ["v1", "v2"]
-        self.version = version
         self.reset()
 
     def reset(self) -> None:
+        # matchが切り替わったらリセットする
         self._own_unit_positions = np.ones((EnvParams.max_units, 2), dtype=np.int32) * -1
         self._own_unit_energies = np.ones(EnvParams.max_units, dtype=np.int32) * -1
         self._prev_unit_actions = np.zeros(EnvParams.max_units)  # 前のstepで移動したユニット
         self._prev_points = 0
         self._current_points = 0
-        if self.version == "v2":
-            # 1/21のパッチでマッチごとにrelic　　nodesの情報がリセットされるため
-            self._relic_map = np.zeros((EnvParams.map_height, EnvParams.map_width), dtype=np.float32)
-            self._point_map = np.ones((EnvParams.map_height, EnvParams.map_width), dtype=np.float32) * -1
+
+        # 探索が終了していない場合はpoint探索用に-1を設定する
+        if not self._is_finished_relic_search():
+            # 1以外は-1にする
+            self._point_map = np.where(self._point_map != 1, -1, self._point_map)
 
     @property
     def point(self) -> int:
@@ -107,6 +106,9 @@ class EpisodeStore:
         self._update_own_units(obs)
         self._update_points(obs)
         self._update_point_map(obs)
+
+    def _is_finished_relic_search(self) -> bool:
+        return self._relic_map.sum() == EnvParams.max_relic_nodes
 
     def _update_relic_map(self, obs: dict[str, Any]) -> None:
         # # relicの情報を記録する関数
@@ -180,8 +182,10 @@ class EpisodeStore:
 
     def _update_point_map(self, obs: dict[str, Any]) -> None:
         """
-        移動したユニットがいるかをまず考える(いない場合はpointは変動しない)
-
+        各マッチ0~50stepの間でrelic_nodesが発生する(しない場合もある)
+        - max_relic_nodesは6なので全て見つけたら確定する
+        - 50step以降はrelic_nodesは発生しないので探索をやめる
+        - matchが切り替わったらrelic_nodesが発生する可能性があれば-1にして探索するようにする。
         """
         # 必ず_update_points, _update_actionsを先に呼び出すこと
         unit_positions = np.array(obs["units"]["position"][self._target_team_id])  # (max_units, 2)
@@ -203,29 +207,30 @@ class EpisodeStore:
         if len(unknown_positions) == 0:
             return
 
-        # ポイントが変わらない場合そのユニット位置はpointが発生していない
-        if self.point == 0:
-            for x, y in unknown_positions:
-                self._point_map[y, x] = 0
-                ox, oy = get_opposite(x, y)
-                self._point_map[oy, ox] = 0
-        elif 0 < self.point < EnvParams.max_units:
-            # 確定しないところを抽出して按分した場合のmaxをみる
-            prob = (self.point - known_point) / len(unknown_positions)
-            for x, y in unknown_positions:
-                ox, oy = get_opposite(x, y)
-                # 過去にも確率値として計算されている場合もあるため最大値をその地点のポイント発生確率とする
-                self._point_map[y, x] = max(self._point_map[y, x], prob, self._point_map[oy, ox])
-                self._point_map[oy, ox] = self._point_map[y, x]
+        # relic_nodesが全て見つかっているかmatch_stepsが50stepを超えたらpointを確定できる
+        if obs["match_steps"] > 50 or self._is_finished_relic_search():
+            if self.point == 0:
+                for x, y in unknown_positions:
+                    self._point_map[y, x] = 0
+                    ox, oy = get_opposite(x, y)
+                    self._point_map[oy, ox] = 0
+            elif 0 < self.point < EnvParams.max_units:
+                # 確定しないところを抽出して按分した場合のmaxをみる
+                prob = (self.point - known_point) / len(unknown_positions)
+                for x, y in unknown_positions:
+                    ox, oy = get_opposite(x, y)
+                    # 過去にも確率値として計算されている場合もあるため最大値をその地点のポイント発生確率とする
+                    self._point_map[y, x] = max(self._point_map[y, x], prob, self._point_map[oy, ox])
+                    self._point_map[oy, ox] = self._point_map[y, x]
 
-        # ポイントがmax_unitsに達した場合そのユニット位置はすべてpointが発生している
-        elif self.point == EnvParams.max_units:
-            for x, y in unknown_positions:
-                self._point_map[y, x] = 1
-                ox, oy = get_opposite(x, y)
-                self._point_map[oy, ox] = 1
-        else:
-            raise ValueError(f"invalid point: {self.point}")
+            # ポイントがmax_unitsに達した場合そのユニット位置はすべてpointが発生している
+            elif self.point == EnvParams.max_units:
+                for x, y in unknown_positions:
+                    self._point_map[y, x] = 1
+                    ox, oy = get_opposite(x, y)
+                    self._point_map[oy, ox] = 1
+            else:
+                raise ValueError(f"invalid point: {self.point}")
 
 
 def extract_hidden_state(gt_obs: dict[str, Any], target_team_id: int) -> np.ndarray:
