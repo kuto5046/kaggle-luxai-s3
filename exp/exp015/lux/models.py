@@ -407,18 +407,20 @@ class DoubleConv(nn.Module):
         if not mid_channels:
             mid_channels = out_channels
         self.double_conv = nn.Sequential(
-            nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1),
+            nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(mid_channels),
             nn.ReLU(inplace=True),
-            nn.Conv2d(mid_channels, out_channels, kernel_size=3, padding=1),
+            nn.Conv2d(mid_channels, out_channels, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True),
         )
         self.res = res
+        # 入力と出力のチャンネル数が異なる場合のための1x1 convolution
+        self.skip_conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.res:
-            return self.double_conv(x) + x
+            return self.double_conv(x) + self.skip_conv(x)
         else:
             return self.double_conv(x)
 
@@ -428,14 +430,19 @@ class Down(nn.Module):
 
     def __init__(self, in_channels: int, out_channels: int, res: bool = False) -> None:
         super().__init__()
-        self.maxpool_conv = nn.Sequential(nn.MaxPool2d(2), DoubleConv(in_channels, out_channels))
+        self.maxpool = nn.MaxPool2d(2)
+        self.conv = DoubleConv(in_channels, out_channels, res=res)
         self.res = res
+        # スキップコネクション用の1x1 convとダウンサンプリング
+        if self.res:
+            self.skip = nn.Sequential(nn.Conv2d(in_channels, out_channels, kernel_size=1), nn.AvgPool2d(2))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x1 = self.maxpool(x)
+        x1 = self.conv(x1)
         if self.res:
-            return self.maxpool_conv(x) + x
-        else:
-            return self.maxpool_conv(x)
+            return x1 + self.skip(x)
+        return x1
 
 
 class Up(nn.Module):
