@@ -84,7 +84,8 @@ class Agent:
         # マッチごとにリセットされる要素をリセット
         if obs["match_steps"] == 0:
             self.episode_store.reset()
-        self.episode_store.update(obs, self.prev_actions)
+        else:
+            self.episode_store.update(obs, self.prev_actions)
         own_policy_map, opp_policy_map = imitation_model.predict(obs, self.team_id, self.episode_store)
 
         unit_mask = np.array(obs["units_mask"][self.team_id])  # shape (max_units, )
