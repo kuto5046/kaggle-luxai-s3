@@ -15,8 +15,8 @@ st.set_page_config(layout="wide")
 
 
 # データ表示
-def visualize_state(state, n_cols: int = 5):
-    st.subheader("State")
+def visualize_state(state, state_enum, title="State", n_cols: int = 5):
+    st.subheader(title)
     # 全てのチャンネルを可視化する
 
     # ヒートマップ表示
@@ -25,8 +25,8 @@ def visualize_state(state, n_cols: int = 5):
     for i in range(num_channels):
         with cols[i % n_cols]:
             fig = go.Figure(data=go.Heatmap(z=state[i], colorscale="greens"))
-            fig.update_layout(title=f"{State(i).name}", width=300, height=300)
-            st.plotly_chart(fig)
+            fig.update_layout(title=f"{state_enum(i).name}", width=300, height=300)
+            st.plotly_chart(fig, key=f"{title}_{i}")
 
 
 def visualize_pred_action(action, title="Predict Action", color="blues"):
@@ -104,6 +104,7 @@ def main():
                     state = np.zeros((len(State), EnvParams.map_height, EnvParams.map_width), dtype=np.float32)
                 states.append(state)
             state = np.stack(states, axis=0)
+            hidden_state = np.array(h5_file[episode_id]["hidden_states"][str(step_idx)])
             col1, col2 = st.columns([1, 3])
             with col1:
                 visualize_action(own_action)
@@ -116,12 +117,12 @@ def main():
                         pred_opp_action = to_np(output["opp_policy"].argmax(dim=1).cpu().squeeze())
                         st.write(pred_own_action.shape, pred_opp_action.shape)
                     visualize_pred_action(pred_own_action)
-                    visualize_pred_action(pred_opp_action)
+                    # visualize_pred_action(pred_opp_action)
 
             with col2:
                 last_state = states[-1]
-                visualize_state(last_state)
-
+                visualize_state(last_state, State, title="State")
+                visualize_state(hidden_state, HiddenState, title="Hidden State")
     # h5_file.close()
 
 
