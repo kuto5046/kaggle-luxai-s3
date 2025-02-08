@@ -103,6 +103,7 @@ class LaxDataset(Dataset):
                 self.ids.append((episode_id, step_idx))
         self.h5_file = h5py.File(self.cfg.feature_dir / "episodes.h5", "r")
         self.transform = transforms.Compose([LuxAugment()])
+        self.aug = cfg.aug
 
     def __len__(self) -> int:
         return len(self.ids)
@@ -130,7 +131,7 @@ class LaxDataset(Dataset):
             "opp_action": opp_action,
             "win": win,
         }
-        if self.mode == "train":
+        if self.mode == "train" and self.aug:
             inputs = self.transform(inputs)
 
         return inputs
