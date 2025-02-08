@@ -40,3 +40,20 @@ authorizeすることでwandbが利用可能になる
 ```sh
 uv run luxai-s3 Lux-Design-S3/kits/python/main.py exp/exp001/main.py --output replay.json
 ```
+
+## rayのdebug
+ちょっと面倒
+1. ray start
+```bash
+ray start --head
+```
+実行するとnext stepsで指定すべき`ip:port`が表示される
+
+2.vscodeのray debugger拡張機能をinstallしcluster設定
+clusterは1で表示されたものを使う
+```
+172.19.0.2:6379
+```
+
+3. 以下のリンクのように初期設定とbreakpointをおいてファイルをターミナルで実行
+https://docs.ray.io/en/latest/ray-observability/ray-distributed-debugger.html#create-a-ray-task
