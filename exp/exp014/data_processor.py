@@ -123,12 +123,13 @@ class DataProcessor:
                 # マッチごとにリセットされる要素をリセット
                 if obs["match_steps"] == 0:
                     episode_store.reset()
-
-                if prev_step_info is not None:
-                    prev_actions = prev_step_info[target_team_id]["action"]
+                # リセット時以外はupdateをする
                 else:
-                    prev_actions = {}
-                episode_store.update(obs, prev_actions)
+                    if prev_step_info is not None:
+                        prev_actions = prev_step_info[target_team_id]["action"]
+                    else:
+                        prev_actions = {}
+                    episode_store.update(obs, prev_actions)
 
                 if self.cfg.use_gt:
                     state = extract_gt_state(gt_obs, target_team_id)

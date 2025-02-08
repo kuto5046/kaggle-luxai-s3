@@ -56,8 +56,10 @@ def to_np(x: torch.Tensor) -> np.ndarray:
 class EpisodeStore:
     def __init__(self, target_team_id: int, env_cfg: dict | EnvParams) -> None:
         self._relic_map = np.zeros((EnvParams.map_height, EnvParams.map_width), dtype=np.float32)
-        self._point_map = np.ones((EnvParams.map_height, EnvParams.map_width), dtype=np.float32) * -1
+        self._point_map = np.ones((EnvParams.map_height, EnvParams.map_width), dtype=np.float32) * 0.1
         self._target_team_id = target_team_id
+        self._relic_nodes = set()
+        self._is_popup_relic_in_this_match = False
 
         if isinstance(env_cfg, EnvParams):
             env_cfg = flax.serialization.to_state_dict(env_cfg)
@@ -73,11 +75,12 @@ class EpisodeStore:
         self._prev_unit_actions = np.zeros(EnvParams.max_units)  # 前のstepで移動したユニット
         self._prev_points = 0
         self._current_points = 0
+        self._is_popup_relic_in_this_match = False
 
-        # 探索が終了していない場合はpoint探索用に-1を設定する
         if not self._is_finished_relic_search():
-            # 1以外は-1にする
-            self._point_map = np.where(self._point_map != 1, -1, self._point_map)
+            # ないと判定されているところも発生する可能性があるため-1にする
+            self._point_map = np.where(self._point_map != 1, 0.1, self._point_map)
+            # TODO: relic_nodes付近にあるという事前分布入れるようにする
 
     @property
     def point(self) -> int:
@@ -112,14 +115,31 @@ class EpisodeStore:
 
     def _update_relic_map(self, obs: dict[str, Any]) -> None:
         # # relicの情報を記録する関数
-        relic_nodes = obs["relic_nodes"]
-        # relic_nodes_mask = obs['relic_nodes_mask']
-        for x, y in relic_nodes:
-            if x == -1 and y == -1:
-                continue
+        relic_nodes = {(x, y) for x, y in obs["relic_nodes"] if x != -1 and y != -1}
+        new_relic_nodes = relic_nodes - self._relic_nodes
+        if len(new_relic_nodes) == 0:
+            return
+
+        for x, y in new_relic_nodes:
+            self._relic_nodes.add((x, y))
             self._relic_map[y, x] = 1
             ox, oy = get_opposite(x, y)
+            self._relic_nodes.add((ox, oy))
             self._relic_map[oy, ox] = 1
+
+            # relic_nodesの周囲5マスのpointの下限を0.5にする
+            for dy in range(-2, 3):
+                for dx in range(-2, 3):
+                    nx, ny = x + dx, y + dy
+                    if in_map((nx, ny)):
+                        self._point_map[ny, nx] = max(self._point_map[ny, nx], 0.8)
+                        ox, oy = get_opposite(nx, ny)
+                        self._point_map[oy, ox] = self._point_map[ny, nx]
+
+        # ここに到達するということは新しいrelic_nodesが発生しているということ
+        self._is_popup_relic_in_this_match = True
+        # このマッチではrelic_nodesはこれ以上発生しないので0.5以外は0にする (TODO: これpoin_map更新した後にやるべき？)
+        self._point_map = np.where(self._point_map < 0.8, 0, self._point_map)
 
     def _update_actions(self, prev_actions: dict[str, Any]) -> None:
         if len(prev_actions) == 0:
@@ -180,6 +200,34 @@ class EpisodeStore:
         self._prev_points = self._current_points
         self._current_points = obs["team_points"][self._target_team_id]
 
+    def _extract_unknown_point_positions(
+        self, unit_positions: np.ndarray, unit_energies: np.ndarray
+    ) -> tuple[set[tuple[int, int]], int]:
+        # unit_positionsのうちpointが未知の位置のみ抽出する
+        unknown_point_positions = (
+            set()
+        )  # unitが重複している場合ポイントは１つしか入らないため重複を除外するためにsetを使う
+        known_point = 0
+        for (x, y), energy in zip(unit_positions, unit_energies):
+            if x == -1 and y == -1:
+                continue
+            # 敵からのsapで負のエネルギーになってる場合はポイントは獲得されず次のステップでrestartになる
+            if energy < 0:
+                continue
+            if self._point_map[y, x] == 0:
+                continue
+            # ポイントセルとして確定している場合は既知ポイントとしてカウント
+            if self._point_map[y, x] == 1:
+                known_point += 1
+                continue
+            unknown_point_positions.add((x, y))
+        return unknown_point_positions, known_point
+
+    # relic_nodesがこのマッチで確定しているか
+    def _is_finished_relic_search_in_this_match(self, match_steps: int) -> bool:
+        # relic_nodesが全て見つかっているか、今回のマッチではすでにrelic_nodesが発生しているか、この試合ではrelic_nodesが発生しないことが確定していればpointを確定できる
+        return match_steps > 50 or self._is_popup_relic_in_this_match or self._is_finished_relic_search()
+
     def _update_point_map(self, obs: dict[str, Any]) -> None:
         """
         各マッチ0~50stepの間でrelic_nodesが発生する(しない場合もある)
@@ -189,48 +237,37 @@ class EpisodeStore:
         """
         # 必ず_update_points, _update_actionsを先に呼び出すこと
         unit_positions = np.array(obs["units"]["position"][self._target_team_id])  # (max_units, 2)
-        # unit_positionsのうちpoint_mapが未知の位置のみ抽出する
-        unknown_positions = []
-        known_point = 0
-        for x, y in unit_positions:
-            if x == -1 and y == -1:
-                continue
-            # 非ポイントと確定してる場合ポイント計算はしない
-            if self._point_map[y, x] == 0:
-                continue
-            # ポイントセルとして確定している場合は既知ポイントとしてカウント
-            if self._point_map[y, x] == 1:
-                known_point += 1
-                continue
-            unknown_positions.append((x, y))
+        unit_energies = np.array(obs["units"]["energy"][self._target_team_id])  # (max_units, 1)
+        unknown_point_positions, known_point = self._extract_unknown_point_positions(unit_positions, unit_energies)
 
-        if len(unknown_positions) == 0:
+        if len(unknown_point_positions) == 0:
             return
 
-        # relic_nodesが全て見つかっているかmatch_stepsが50stepを超えたらpointを確定できる
-        if obs["match_steps"] > 50 or self._is_finished_relic_search():
-            if self.point == 0:
-                for x, y in unknown_positions:
-                    self._point_map[y, x] = 0
-                    ox, oy = get_opposite(x, y)
-                    self._point_map[oy, ox] = 0
-            elif 0 < self.point < EnvParams.max_units:
-                # 確定しないところを抽出して按分した場合のmaxをみる
-                prob = (self.point - known_point) / len(unknown_positions)
-                for x, y in unknown_positions:
-                    ox, oy = get_opposite(x, y)
-                    # 過去にも確率値として計算されている場合もあるため最大値をその地点のポイント発生確率とする
-                    self._point_map[y, x] = max(self._point_map[y, x], prob, self._point_map[oy, ox])
-                    self._point_map[oy, ox] = self._point_map[y, x]
+        if self._is_finished_relic_search_in_this_match(obs["match_steps"]):
+            unknown_point = self.point - known_point
+            # assert unknown_point >= 0
 
-            # ポイントがmax_unitsに達した場合そのユニット位置はすべてpointが発生している
-            elif self.point == EnvParams.max_units:
-                for x, y in unknown_positions:
-                    self._point_map[y, x] = 1
-                    ox, oy = get_opposite(x, y)
-                    self._point_map[oy, ox] = 1
+            # 未知のユニット位置で得られるポイントがユニット数と同じなら100%の確率でそこにポイントがあると考える
+            if len(unknown_point_positions) == unknown_point:
+                posterior_values = np.ones(len(unknown_point_positions))
+            # 未知のユニット位置で得られるポイントが0ならそこでポイントが得られないと考える
+            elif unknown_point == 0:
+                posterior_values = np.zeros(len(unknown_point_positions))
+
+            elif 0 < unknown_point < len(unknown_point_positions):
+                prior_probs = np.array([self._point_map[y, x] for x, y in unknown_point_positions])
+                likelihood = unknown_point / len(unknown_point_positions)
+                posterior_values = bayesian_update(prior_probs, likelihood, unknown_point)
             else:
-                raise ValueError(f"invalid point: {self.point}")
+                posterior_values = np.ones(len(unknown_point_positions))
+                # raise ValueError(f"{obs['steps']=} {unknown_point=} {self.point=} {known_point=} {len(unknown_point_positions)=} is invalid")
+            # print(f"{obs['steps']=} {unknown_point=} {unknown_point_positions=} {posterior_values=}")
+
+            for i, (x, y) in enumerate(unknown_point_positions):
+                self._point_map[y, x] = posterior_values[i]
+                ox, oy = get_opposite(x, y)
+
+                self._point_map[oy, ox] = self._point_map[y, x]
 
 
 def extract_hidden_state(gt_obs: dict[str, Any], target_team_id: int) -> np.ndarray:
@@ -259,29 +296,38 @@ def extract_hidden_state(gt_obs: dict[str, Any], target_team_id: int) -> np.ndar
     return state_map
 
 
+def bayesian_update(prior_probs: np.ndarray, likelihood: float, unknown_point: float, eps: float = 1e-13) -> np.ndarray:
+    # 対数空間での計算（0を避けるためepsを足す）
+    post_probs = np.exp(np.log(prior_probs + eps) + np.log(likelihood + eps))
+    post_probs /= post_probs.sum()  # 正規化
+
+    # unknown_pointに応じた期待値分布
+    values = post_probs * unknown_point
+
+    # 各位置の値が1を超えた場合、超過分を1未満の箇所に再分配する
+    while np.any(values > 1):
+        total_excess = np.maximum(values - 1, 0).sum()
+        values = np.minimum(values, 1)  # 1を超える部分は1に固定
+        mask = values < 1  # 1未満の箇所
+        if mask.any():
+            # 1未満の箇所に現在の値に比例して余剰分を分配
+            weights = values[mask] / values[mask].sum()
+            values[mask] += total_excess * weights
+    return values
+
+
 def get_gt_point_map(gt_obs: dict[str, Any]) -> np.ndarray:
     relic_map = np.zeros((24, 24))
-    for node_pos, _reward_map in zip(gt_obs["relic_nodes"], gt_obs["relic_node_configs"]):
+    for node_pos, _point_local_map in zip(gt_obs["relic_nodes"], gt_obs["relic_node_configs"]):
         x, y = node_pos
-        reward_map = np.array(_reward_map, dtype=bool)
-        h, w = reward_map.shape
-
-        # reward_mapの中心座標を計算
-        center_y, center_x = h // 2, w // 2
-
-        # mapに挿入する領域の開始・終了座標を計算
-        start_y = max(0, y - center_y)
-        end_y = min(24, y + (h - center_y))
-        start_x = max(0, x - center_x)
-        end_x = min(24, x + (w - center_x))
-
-        # reward_mapの対応する部分を切り出す
-        map_start_y = center_y - (y - start_y)
-        map_end_y = center_y + (end_y - y)
-        map_start_x = center_x - (x - start_x)
-        map_end_x = center_x + (end_x - x)
-
-        relic_map[start_y:end_y, start_x:end_x] = reward_map[map_start_y:map_end_y, map_start_x:map_end_x]
+        point_local_map = np.array(_point_local_map, dtype=np.int8)
+        h, w = point_local_map.shape
+        # assert h == w == 5
+        for i, dx in enumerate(range(-2, 3)):
+            for j, dy in enumerate(range(-2, 3)):
+                nx, ny = x + dx, y + dy
+                if in_map((nx, ny)) and relic_map[ny, nx] != 1:  # 1だったら上書きしない
+                    relic_map[ny, nx] = point_local_map[i, j]
     return relic_map
 
 
