@@ -7,7 +7,6 @@ import seaborn as sns
 from lightning import Trainer, seed_everything
 from lux.models import LaxLitModel, LaxLitDataModule
 from lightning.pytorch.callbacks import (
-    ModelCheckpoint,
     RichProgressBar,
     RichModelSummary,
     LearningRateMonitor,
@@ -22,13 +21,13 @@ LOGGER = logging.getLogger(__name__)
 @dataclass
 class Config:
     exp_name: str = Path(__file__).parent.name
-    notes: str = "exp013のepisodeデータでexp015のデータセット作成方法を利用する"
+    notes: str = "色々特徴量を改善した"
     seed: int = 2025
-    debug: bool = False
+    debug: bool = True
     n_splits: int = 5
     use_fold: int = 0
     root_dir: Path = Path("/home/user/work")
-    feature_version: str = "exp015"
+    feature_version: str = exp_name
     feature_dir: Path = root_dir / f"output/feature_store/{feature_version}"
     output_dir = root_dir / f"exp/{exp_name}/output"
 
@@ -47,14 +46,21 @@ class Config:
     res: bool = False
     aug: bool = False
     n_stack: int = 4
+    # loss
+    loss_weight_own_policy: float = 1.0
+    loss_weight_opp_policy: float = 0.0
+    loss_weight_state: float = 0.0
+    loss_weight_global_state: float = 0.0
+    loss_weight_value: float = 0.0
 
 
 class TrainPipeline:
     def __init__(self, cfg: Config) -> None:
         seed_everything(cfg.seed, workers=True)  # data loaderのworkerもseedする
         self.output_dir = cfg.output_dir
+        if self.output_dir.exists():
+            shutil.rmtree(self.output_dir)
         self.output_dir.mkdir(exist_ok=True, parents=True)
-        shutil.rmtree(self.output_dir)
 
         self.cfg = cfg
         self.debug_config()
@@ -69,19 +75,19 @@ class TrainPipeline:
         self.datamodule = LaxLitDataModule(self.cfg)
 
     def setup_callbacks(self) -> None:
-        epoch_checkpoint = ModelCheckpoint(
-            dirpath=self.output_dir,
-            monitor="Loss/valid",
-            mode="min",
-            filename="best_model",
-            save_weights_only=True,
-            verbose=True,
-        )
+        # epoch_checkpoint = ModelCheckpoint(
+        #     dirpath=self.output_dir,
+        #     monitor="Loss/valid",
+        #     mode="min",
+        #     filename="best_model",
+        #     save_weights_only=True,
+        #     verbose=True,
+        # )
         lr_monitor = LearningRateMonitor("step")
         progress_bar = RichProgressBar()
         model_summary = RichModelSummary(max_depth=2)
         self.callbacks = [
-            epoch_checkpoint,
+            # epoch_checkpoint,
             lr_monitor,
             progress_bar,
             model_summary,
@@ -102,7 +108,6 @@ class TrainPipeline:
 
     def train(self) -> None:
         self.trainer = Trainer(
-            # env
             # default_root_dir=Path.cwd(),
             accelerator="auto",
             precision="16-mixed" if self.cfg.use_amp else 32,

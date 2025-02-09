@@ -1,5 +1,6 @@
 import random
 from typing import Any
+from pathlib import Path
 from dataclasses import dataclass
 
 import h5py
@@ -16,7 +17,7 @@ from torch.utils.data import Dataset, DataLoader
 
 import wandb
 
-from .utils import State, Action, HiddenState, to_np
+from .utils import State, Action, GlobalState, HiddenState, HiddenGlobalState, to_np
 from .params import EnvParams
 
 
@@ -111,22 +112,34 @@ class LaxDataset(Dataset):
     def __getitem__(self, idx: int) -> dict[str, np.ndarray]:
         episode_id, step_idx = self.ids[idx]
         states = []
+        global_states = []
         for i in range(self.cfg.n_stack - 1, -1, -1):
             if step_idx - i >= 0:
                 state = np.array(self.h5_file[str(episode_id)]["states"][str(step_idx - i)]).astype(np.float32)
+                global_state = np.array(self.h5_file[str(episode_id)]["global_states"][str(step_idx - i)]).astype(
+                    np.float32
+                )
             else:
                 state = np.zeros((len(State), EnvParams.map_height, EnvParams.map_width), dtype=np.float32)
+                global_state = np.zeros(len(GlobalState), dtype=np.float32)
             states.append(state)
-
+            global_states.append(global_state)
         state = np.stack(states, axis=0)  # (n_stack, channel, x, y)
+        global_state = np.stack(global_states, axis=0)  # (n_stack, channel)
+
         hidden_state = np.array(self.h5_file[str(episode_id)]["hidden_states"][str(step_idx)]).astype(np.float32)
+        hidden_global_state = np.array(self.h5_file[str(episode_id)]["hidden_global_states"][str(step_idx)]).astype(
+            np.float32
+        )
         actions = np.array(self.h5_file[str(episode_id)]["actions"][str(step_idx)]).astype(np.float32)
         own_action = actions[0]
         opp_action = actions[1]
         win = np.array(self.h5_file[str(episode_id)]["win"][str(step_idx)]).astype(np.float32)
         inputs = {
             "state": state,
+            "global_state": global_state,
             "hidden_state": hidden_state,
+            "hidden_global_state": hidden_global_state,
             "own_action": own_action,
             "opp_action": opp_action,
             "win": win,
@@ -184,10 +197,13 @@ class LaxLitModel(LightningModule):
     def __init__(self, cfg: dataclass) -> None:
         super().__init__()
         self.cfg = cfg
+        self.output_dir = self.cfg.output_dir
         self.model = LuxUNetModel(
             state_space_size=len(State),
+            global_state_space_size=len(GlobalState),
             action_space_size=len(Action),
             hidden_state_space_size=len(HiddenState),
+            hidden_global_state_space_size=len(HiddenGlobalState),
             n_stack=cfg.n_stack,
             res=cfg.res,
         )
@@ -200,8 +216,8 @@ class LaxLitModel(LightningModule):
         self.valid_metrics = metrics.clone(postfix="/valid")
         self.valid_outputs = {"ground_truth": [], "predictions": []}
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.model(x)
+    def forward(self, state: torch.Tensor, global_state: torch.Tensor) -> torch.Tensor:
+        return self.model(state, global_state)
 
     def training_step(self, batch: Any, batch_idx: int) -> torch.Tensor:
         return self._share_step(batch, mode="train")
@@ -211,13 +227,16 @@ class LaxLitModel(LightningModule):
 
     def _share_step(self, batch: Any, mode: str = "train") -> torch.Tensor:
         states = batch["state"]
+        global_states = batch["global_state"]
         hidden_states = batch["hidden_state"]
+        hidden_global_states = batch["hidden_global_state"]
         own_actions = batch["own_action"]
         opp_actions = batch["opp_action"]
-        outputs = self(states)
+        outputs = self(states, global_states)
         own_policy_logits = outputs["own_policy"]
         opp_policy_logits = outputs["opp_policy"]
         state_logits = outputs["state"]
+        global_state_logits = outputs["global_state"]
         value_logits = outputs["value"]
 
         own_policy_preds = torch.softmax(own_policy_logits, dim=1)
@@ -232,7 +251,14 @@ class LaxLitModel(LightningModule):
         value_loss = self.criterion2(value_logits.flatten(), batch["win"])
 
         state_loss = self.criterion3(state_logits.flatten(), hidden_states.flatten())
-        loss = own_policy_loss + opp_policy_loss + state_loss  # + value_loss
+        global_state_loss = self.criterion3(global_state_logits.flatten(), hidden_global_states.flatten())
+        loss = (
+            own_policy_loss * self.cfg.loss_weight_own_policy
+            + opp_policy_loss * self.cfg.loss_weight_opp_policy
+            + state_loss * self.cfg.loss_weight_state
+            + value_loss * self.cfg.loss_weight_value
+            + global_state_loss * self.cfg.loss_weight_global_state
+        )
 
         self.log(
             f"PolicyLoss/{mode}",
@@ -261,6 +287,14 @@ class LaxLitModel(LightningModule):
         self.log(
             f"OppPolicyLoss/{mode}",
             opp_policy_loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+        )
+        self.log(
+            f"GlobalStateLoss/{mode}",
+            global_state_loss,
             on_step=False,
             on_epoch=True,
             prog_bar=False,
@@ -304,6 +338,7 @@ class LaxLitModel(LightningModule):
         if self.trainer.callback_metrics["Loss/valid"] < self.trainer.callback_metrics.get(
             "best_valid_loss", float("inf")
         ):
+            save_model(self.model, self.output_dir)
             self.trainer.callback_metrics["best_valid_loss"] = self.trainer.callback_metrics["Loss/valid"]
             wandb.log(
                 {
@@ -497,8 +532,10 @@ class LuxUNetModel(nn.Module):
     def __init__(
         self,
         state_space_size: int,
+        global_state_space_size: int,
         action_space_size: int,
         hidden_state_space_size: int,
+        hidden_global_state_space_size: int,
         n_stack: int,
         bilinear: bool = True,
         res: bool = False,
@@ -510,8 +547,10 @@ class LuxUNetModel(nn.Module):
         self.down1 = Down(64, 128, res=res)
         self.down2 = Down(128, 256, res=res)
         self.down3 = Down(256, 256, res=res)
+
+        #
         factor = 2 if bilinear else 1
-        self.up1 = Up(256 * 2, 256 // factor, bilinear)
+        self.up1 = Up(256 * 2 + global_state_space_size, 256 // factor, bilinear)
         self.up2 = Up(256, 128 // factor, bilinear)
         self.up3 = Up(128, 64, bilinear)
         self.own_policy_net = OutConv(64 * n_stack, action_space_size)
@@ -519,16 +558,39 @@ class LuxUNetModel(nn.Module):
         self.state_net = OutConv(64 * n_stack, hidden_state_space_size)
         self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
         self.value_net = nn.Sequential(
-            nn.Linear(256 * n_stack, 128), nn.ReLU(), nn.Linear(128, 64), nn.ReLU(), nn.Linear(64, 1)
+            nn.Linear((256 + global_state_space_size) * n_stack, 128),
+            nn.ReLU(),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1),
+        )
+        self.global_state_net = nn.Sequential(
+            nn.Linear((256 + global_state_space_size) * n_stack, 128),
+            nn.ReLU(),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, len(HiddenGlobalState)),
         )
 
-    def forward(self, state: torch.Tensor) -> dict[str, torch.Tensor]:
+    def forward(self, state: torch.Tensor, global_state: torch.Tensor) -> dict[str, torch.Tensor]:
         _n, _t, _c, _x, _y = state.shape
         x = state.view(-1, _c, _x, _y)
         x1 = self.inc(x)
         x2 = self.down1(x1)
         x3 = self.down2(x2)
         x4 = self.down3(x3)
+
+        # sx, syのマップにグローバルステートをブロードキャスト
+        sx, sy = x4.shape[2:]
+        _n, _t, _c = global_state.shape
+        gx = global_state.view(-1, _c, 1, 1)
+        gx = gx.repeat(1, 1, sx, sy)
+
+        x4 = torch.cat([x4, gx], dim=1)
+        x = self.global_avg_pool(x4).view(_n, -1)
+        value_logits = self.value_net(x)
+        global_state_logits = self.global_state_net(x)
+
         x = self.up1(x4, x3)
         x = self.up2(x, x2)
         x = self.up3(x, x1)
@@ -537,11 +599,18 @@ class LuxUNetModel(nn.Module):
         own_policy_logits = self.own_policy_net(x)
         opp_policy_logits = self.opp_policy_net(x)
         state_logits = self.state_net(x)
-        x = self.global_avg_pool(x4).view(_n, -1)
-        value_logits = self.value_net(x)
+
         return {
             "own_policy": own_policy_logits,
             "opp_policy": opp_policy_logits,
             "state": state_logits,
+            "global_state": global_state_logits,
             "value": value_logits,
         }
+
+
+def save_model(model, output_dir: Path, latest: bool = False):
+    if latest:
+        torch.save(model.state_dict(), output_dir / "latest_model.pth")
+    else:
+        torch.save(model.state_dict(), output_dir / "best_model.pth")
