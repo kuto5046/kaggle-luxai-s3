@@ -42,7 +42,7 @@ class Config:
     feature_dir: Path = root_dir / f"output/feature_store/{exp_name}"
     target_team_name: str = "Frog Parade"
     target_sub_ids: list[int] = field(default_factory=lambda: [42613183])
-    validation: bool = False
+    validation: bool = True
 
 
 def get_fold(_train: pl.DataFrame, cv: list[tuple[np.ndarray, np.ndarray]]) -> pl.DataFrame:
@@ -97,7 +97,7 @@ class DataProcessor:
         print(f"unique episode_df: {len(episode_df)}")
         if self.cfg.debug:
             # episode_df = episode_df.sample(n=10, seed=self.cfg.seed)
-            episode_df = episode_df.filter(pl.col("EpisodeId") == 65682718)
+            episode_df = episode_df.filter(pl.col("EpisodeId") == 66515471)
         return episode_df
 
     def _process_episode(self, row) -> tuple[str, int, int]:
@@ -126,10 +126,9 @@ class DataProcessor:
 
             # episode内で獲得する情報
             env_params = EnvParams(**json_load["configuration"]["env_cfg"])
-            episode_store = EpisodeStore(target_team_id, env_params, self.cfg.validation)
+            episode_store = EpisodeStore(episode_id, target_team_id, env_params, self.cfg.validation)
             steps = json_load["steps"]
             for step_idx in range(len(steps) - 1):  # 505でdoneとなるため-1
-                prev_step_info = steps[step_idx - 1] if step_idx > 0 else None
                 step_info = steps[step_idx]
                 next_step_info = steps[step_idx + 1]
                 obs = json.loads(step_info[target_team_id]["observation"]["obs"])
@@ -140,11 +139,7 @@ class DataProcessor:
                     episode_store.reset()
                 # リセット時以外はupdateをする
                 else:
-                    if prev_step_info is not None:
-                        prev_actions = prev_step_info[target_team_id]["action"]
-                    else:
-                        prev_actions = {}
-                    episode_store.update(obs, prev_actions)
+                    episode_store.update(obs)
 
                 if self.cfg.use_gt:
                     state = extract_gt_state(gt_obs, target_team_id)
@@ -169,6 +164,10 @@ class DataProcessor:
                             assert not (gt_point == 1 and pred_point == 0), f"{episode_id=} {step_idx=} {i=} {j=}"
                             # gtが0ならpredは1ではいけない
                             assert not (gt_point == 0 and pred_point == 1), f"{episode_id=} {step_idx=} {i=} {j=}"
+
+                            # gt_unit_count = hidden_state[HiddenState.OWN_UNIT_COUNT, i, j]
+                            # pred_unit_count = state[State.OWN_UNIT_COUNT, i, j]
+                            # assert gt_unit_count == pred_unit_count, f"{episode_id=} {step_idx=} {i=} {j=} {gt_unit_count=} {pred_unit_count=}"
 
                 next_actions = next_step_info[target_team_id]["action"]
                 own_action = extract_action(next_actions, obs, target_team_id)
