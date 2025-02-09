@@ -7,6 +7,7 @@ import seaborn as sns
 from lightning import Trainer, seed_everything
 from lux.models import LaxLitModel, LaxLitDataModule
 from lightning.pytorch.callbacks import (
+    ModelCheckpoint,
     RichProgressBar,
     RichModelSummary,
     LearningRateMonitor,
@@ -23,7 +24,7 @@ class Config:
     exp_name: str = Path(__file__).parent.name
     notes: str = "色々特徴量を改善した"
     seed: int = 2025
-    debug: bool = True
+    debug: bool = False
     n_splits: int = 5
     use_fold: int = 0
     root_dir: Path = Path("/home/user/work")
@@ -45,7 +46,7 @@ class Config:
     # model
     res: bool = False
     aug: bool = False
-    n_stack: int = 4
+    n_stack: int = 1
     # loss
     loss_weight_own_policy: float = 1.0
     loss_weight_opp_policy: float = 0.0
@@ -75,19 +76,19 @@ class TrainPipeline:
         self.datamodule = LaxLitDataModule(self.cfg)
 
     def setup_callbacks(self) -> None:
-        # epoch_checkpoint = ModelCheckpoint(
-        #     dirpath=self.output_dir,
-        #     monitor="Loss/valid",
-        #     mode="min",
-        #     filename="best_model",
-        #     save_weights_only=True,
-        #     verbose=True,
-        # )
+        epoch_checkpoint = ModelCheckpoint(
+            dirpath=self.output_dir,
+            monitor="Loss/valid",
+            mode="min",
+            filename="best_model",
+            save_weights_only=True,
+            verbose=True,
+        )
         lr_monitor = LearningRateMonitor("step")
         progress_bar = RichProgressBar()
         model_summary = RichModelSummary(max_depth=2)
         self.callbacks = [
-            # epoch_checkpoint,
+            epoch_checkpoint,
             lr_monitor,
             progress_bar,
             model_summary,

@@ -338,7 +338,7 @@ class LaxLitModel(LightningModule):
         if self.trainer.callback_metrics["Loss/valid"] < self.trainer.callback_metrics.get(
             "best_valid_loss", float("inf")
         ):
-            save_model(self.model, self.output_dir)
+            # save_model(self.model, self.output_dir)
             self.trainer.callback_metrics["best_valid_loss"] = self.trainer.callback_metrics["Loss/valid"]
             wandb.log(
                 {
