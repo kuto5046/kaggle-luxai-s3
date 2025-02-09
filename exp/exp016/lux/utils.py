@@ -76,7 +76,11 @@ def to_np(x: torch.Tensor) -> np.ndarray:
 
 class EpisodeStore:
     def __init__(
-        self, episode_id: int, target_team_id: int, env_cfg: dict | EnvParams, validation: bool = False
+        self,
+        target_team_id: int,
+        env_cfg: dict | EnvParams,
+        validation: bool = False,
+        episode_id: int | None = None,
     ) -> None:
         self._init_low_prob = 0.1  # マップ全体に設定されるpoint発生確率
         self._init_high_prob = 0.5  # 可能性があるところに設定されるpoint発生確率

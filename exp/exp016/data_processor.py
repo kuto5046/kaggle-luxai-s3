@@ -126,7 +126,7 @@ class DataProcessor:
 
             # episode内で獲得する情報
             env_params = EnvParams(**json_load["configuration"]["env_cfg"])
-            episode_store = EpisodeStore(episode_id, target_team_id, env_params, self.cfg.validation)
+            episode_store = EpisodeStore(target_team_id, env_params, self.cfg.validation, episode_id)
             steps = json_load["steps"]
             for step_idx in range(len(steps) - 1):  # 505でdoneとなるため-1
                 step_info = steps[step_idx]

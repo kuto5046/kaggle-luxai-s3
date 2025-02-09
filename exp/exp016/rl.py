@@ -11,7 +11,16 @@ import torch
 import gymnasium as gym
 import jax.numpy as jnp
 import flax.serialization
-from lux.utils import State, Action, HiddenState, EpisodeStore, extract_state
+from lux.utils import (
+    State,
+    Action,
+    GlobalState,
+    HiddenState,
+    EpisodeStore,
+    HiddenGlobalState,
+    extract_state,
+    extract_global_state,
+)
 from lux.models import LuxUNetModel
 from lux.params import EnvParams
 from luxai_s3.env import LuxAIS3Env
@@ -49,13 +58,13 @@ from ray.rllib.algorithms.ppo.torch.ppo_torch_learner import PPOTorchLearner
 
 @dataclass
 class Config:
-    exp_name: str = "exp014"
+    exp_name: str = Path(__file__).parent.name
     notes: str = "rlをrayで動かす"
     model_name: str = "lux_unet"
     env_name: str = "lux-s3-v0"
     n_stack: int = 1
     pretrained_path: str | None = None
-    debug: bool = False
+    debug: bool = True
     output_dir: str = Path(f"/home/user/work/exp/{exp_name}")
     # runner
     num_env_runners: int = 1  # actorの数
@@ -105,6 +114,8 @@ class RLLibLuxEnv(MultiAgentEnv):
 
         self.agent0_states = deque(maxlen=self.n_stack)
         self.agent1_states = deque(maxlen=self.n_stack)
+        self.agent0_global_states = deque(maxlen=self.n_stack)
+        self.agent1_global_states = deque(maxlen=self.n_stack)
 
     def _set_params(self) -> EnvParams:
         randomized_game_params = {}
@@ -124,11 +135,21 @@ class RLLibLuxEnv(MultiAgentEnv):
         }
 
     def _create_obs_space(self) -> gym.spaces.Dict:
-        observation_space = gym.spaces.Box(
-            low=-1,
-            high=1,
-            shape=(self.n_stack, len(State), EnvParams.map_height, EnvParams.map_width),
-            dtype=np.float32,
+        observation_space = gym.spaces.Dict(
+            {
+                "state": gym.spaces.Box(
+                    low=-100,
+                    high=100,
+                    shape=(self.n_stack, len(State), EnvParams.map_height, EnvParams.map_width),
+                    dtype=np.float32,
+                ),
+                "global_state": gym.spaces.Box(
+                    low=-100,
+                    high=100,
+                    shape=(self.n_stack, len(GlobalState)),
+                    dtype=np.float32,
+                ),
+            }
         )
         return {"player_0": observation_space, "player_1": observation_space}
 
@@ -152,13 +173,32 @@ class RLLibLuxEnv(MultiAgentEnv):
         return state, infos
 
     def _create_state(self, obs: dict[str, Any]) -> dict[str, np.ndarray]:
+        steps = obs["player_0"]["match_steps"]
+        if steps == 0:
+            self.episode_store1.reset()
+            self.episode_store2.reset()
+        else:
+            self.episode_store1.update(obs["player_0"])
+            self.episode_store2.update(obs["player_1"])
+
         agent0_state = extract_state(obs["player_0"], 0, self.episode_store1)
         agent1_state = extract_state(obs["player_1"], 1, self.episode_store2)
+        agent0_global_state = extract_global_state(obs["player_0"], 0, self.env_params)
+        agent1_global_state = extract_global_state(obs["player_1"], 1, self.env_params)
+
         self.agent0_states.append(agent0_state)
         self.agent1_states.append(agent1_state)
+        self.agent0_global_states.append(agent0_global_state)
+        self.agent1_global_states.append(agent1_global_state)
         return {
-            "player_0": np.stack(list(self.agent0_states), axis=0),
-            "player_1": np.stack(list(self.agent1_states), axis=0),
+            "player_0": {
+                "state": np.stack(list(self.agent0_states), axis=0),
+                "global_state": np.stack(list(self.agent0_global_states), axis=0),
+            },
+            "player_1": {
+                "state": np.stack(list(self.agent1_states), axis=0),
+                "global_state": np.stack(list(self.agent1_global_states), axis=0),
+            },
         }
 
     def _create_action(self, action_dict: dict[str, Any]) -> dict[str, np.ndarray]:
@@ -201,8 +241,10 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
     def setup(self):
         self.model = LuxUNetModel(
             state_space_size=len(State),
+            global_state_space_size=len(GlobalState),
             action_space_size=len(Action),
             hidden_state_space_size=len(HiddenState),
+            hidden_global_state_space_size=len(HiddenGlobalState),
             n_stack=self.model_config["n_stack"],
             bilinear=True,
         )

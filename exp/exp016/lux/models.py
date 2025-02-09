@@ -216,8 +216,8 @@ class LaxLitModel(LightningModule):
         self.valid_metrics = metrics.clone(postfix="/valid")
         self.valid_outputs = {"ground_truth": [], "predictions": []}
 
-    def forward(self, state: torch.Tensor, global_state: torch.Tensor) -> torch.Tensor:
-        return self.model(state, global_state)
+    def forward(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        return self.model(batch)
 
     def training_step(self, batch: Any, batch_idx: int) -> torch.Tensor:
         return self._share_step(batch, mode="train")
@@ -226,32 +226,21 @@ class LaxLitModel(LightningModule):
         return self._share_step(batch, mode="valid")
 
     def _share_step(self, batch: Any, mode: str = "train") -> torch.Tensor:
-        states = batch["state"]
-        global_states = batch["global_state"]
-        hidden_states = batch["hidden_state"]
-        hidden_global_states = batch["hidden_global_state"]
-        own_actions = batch["own_action"]
-        opp_actions = batch["opp_action"]
-        outputs = self(states, global_states)
-        own_policy_logits = outputs["own_policy"]
-        opp_policy_logits = outputs["opp_policy"]
-        state_logits = outputs["state"]
-        global_state_logits = outputs["global_state"]
-        value_logits = outputs["value"]
+        outputs = self(batch)
 
-        own_policy_preds = torch.softmax(own_policy_logits, dim=1)
-        opp_policy_preds = torch.softmax(opp_policy_logits, dim=1)
+        own_policy_preds = torch.softmax(outputs["own_policy"], dim=1)
+        opp_policy_preds = torch.softmax(outputs["opp_policy"], dim=1)
 
-        own_policy_targets = one_hot_encoder(own_actions, n_classes=len(Action))
-        opp_policy_targets = one_hot_encoder(opp_actions, n_classes=len(Action))
+        own_policy_targets = one_hot_encoder(batch["own_action"], n_classes=len(Action))
+        opp_policy_targets = one_hot_encoder(batch["opp_action"], n_classes=len(Action))
 
         own_policy_loss = self.criterion1(own_policy_preds, own_policy_targets)
         opp_policy_loss = self.criterion1(opp_policy_preds, opp_policy_targets)
 
-        value_loss = self.criterion2(value_logits.flatten(), batch["win"])
+        value_loss = self.criterion2(outputs["value"].flatten(), batch["win"])
 
-        state_loss = self.criterion3(state_logits.flatten(), hidden_states.flatten())
-        global_state_loss = self.criterion3(global_state_logits.flatten(), hidden_global_states.flatten())
+        state_loss = self.criterion3(outputs["state"].flatten(), batch["hidden_state"].flatten())
+        global_state_loss = self.criterion3(outputs["global_state"].flatten(), batch["hidden_global_state"].flatten())
         loss = (
             own_policy_loss * self.cfg.loss_weight_own_policy
             + opp_policy_loss * self.cfg.loss_weight_opp_policy
@@ -309,9 +298,9 @@ class LaxLitModel(LightningModule):
             logger=True,
         )
 
-        preds = torch.softmax(own_policy_logits, dim=1).argmax(dim=1).flatten()
-        gts = own_actions.flatten()
-        unit_masks = (states[:, -1, State.OWN_UNIT_COUNT] > 0).flatten()  # unitが存在するところだけで計算する
+        preds = torch.softmax(outputs["own_policy"], dim=1).argmax(dim=1).flatten()
+        gts = batch["own_action"].flatten()
+        unit_masks = (batch["state"][:, -1, State.OWN_UNIT_COUNT] > 0).flatten()  # unitが存在するところだけで計算する
 
         preds = preds[unit_masks]
         gts = gts[unit_masks]
@@ -572,7 +561,9 @@ class LuxUNetModel(nn.Module):
             nn.Linear(64, len(HiddenGlobalState)),
         )
 
-    def forward(self, state: torch.Tensor, global_state: torch.Tensor) -> dict[str, torch.Tensor]:
+    def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        state = batch["state"]
+        global_state = batch["global_state"]
         _n, _t, _c, _x, _y = state.shape
         x = state.view(-1, _c, _x, _y)
         x1 = self.inc(x)
