@@ -240,7 +240,7 @@ class EpisodeStore:
         unit_energies = np.array(obs["units"]["energy"][self._target_team_id])  # (max_units, 1)
         unknown_point_positions, known_point = self._extract_unknown_point_positions(unit_positions, unit_energies)
         unknown_point = self.point - known_point
-        # x, y = 2, 20
+        # x, y = 17, 5
         # print(
         #     f"{obs['steps']=} {self.point=} {unknown_point=} {self._point_map[y, x]=} {get_opposite(x, y)=} {unknown_point_positions=}"
         # )

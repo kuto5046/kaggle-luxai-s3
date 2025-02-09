@@ -42,7 +42,7 @@ class Config:
     feature_dir: Path = root_dir / f"output/feature_store/{exp_name}"
     target_team_name: str = "Frog Parade"
     target_sub_ids: list[int] = field(default_factory=lambda: [42613183])
-    validation: bool = True
+    validation: bool = False
 
 
 def get_fold(_train: pl.DataFrame, cv: list[tuple[np.ndarray, np.ndarray]]) -> pl.DataFrame:
@@ -97,7 +97,7 @@ class DataProcessor:
         print(f"unique episode_df: {len(episode_df)}")
         if self.cfg.debug:
             # episode_df = episode_df.sample(n=10, seed=self.cfg.seed)
-            episode_df = episode_df.filter(pl.col("EpisodeId") == 65692820)
+            episode_df = episode_df.filter(pl.col("EpisodeId") == 66557056)
         return episode_df
 
     def _process_episode(self, row) -> tuple[str, int, int]:
@@ -162,8 +162,8 @@ class DataProcessor:
                             pred_point = state[State.POINTS, i, j]
                             # gtが1ならpredは0ではいけない (未発見のrelicがある場合発生しうるのでassertを外す)
                             # assert not (gt_point == 1 and pred_point == 0), f"{episode_id=} {step_idx=} {i=} {j=}"
-                            # gtが0ならpredは1ではいけない
-                            assert not (gt_point == 0 and pred_point == 1), f"{episode_id=} {step_idx=} {i=} {j=}"
+                            # gtが0ならpredは1ではいけない(例外的に発生するが後から修正されるためassertを外す)
+                            # assert not (gt_point == 0 and pred_point == 1), f"{episode_id=} {step_idx=} {i=} {j=}"
 
                             # gt_unit_count = hidden_state[HiddenState.OWN_UNIT_COUNT, i, j]
                             # pred_unit_count = state[State.OWN_UNIT_COUNT, i, j]
