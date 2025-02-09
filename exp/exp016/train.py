@@ -1,5 +1,6 @@
 import shutil
 import logging
+import argparse
 from pathlib import Path
 from dataclasses import dataclass
 
@@ -34,7 +35,7 @@ class Config:
 
     # trainer
     epoch: int = 10
-    limit_train_batches: float = 0.1
+    limit_train_batches: float = 1.0
     limit_val_batches: float = 1.0
     use_amp: bool = False
     batch_size: int = 512
@@ -46,13 +47,30 @@ class Config:
     # model
     res: bool = False
     aug: bool = False
-    n_stack: int = 1
+    n_stack: int = 4
     # loss
     loss_weight_own_policy: float = 1.0
     loss_weight_opp_policy: float = 0.0
     loss_weight_state: float = 0.0
     loss_weight_global_state: float = 0.0
     loss_weight_value: float = 0.0
+
+    @classmethod
+    def from_args(cls) -> "Config":
+        """
+        configをコマンドライン引数から読み込む
+        $ uv run python exp/exp016/train.py --debug --epoch 2
+        """
+        parser = argparse.ArgumentParser()
+        for field in cls.__dataclass_fields__.values():
+            parser.add_argument(
+                f"--{field.name}",
+                type=field.type,
+                default=field.default,
+                help=f"{field.name} (default: {field.default})",
+            )
+        args = parser.parse_args()
+        return cls(**vars(args))
 
 
 class TrainPipeline:
@@ -69,7 +87,7 @@ class TrainPipeline:
     def debug_config(self) -> None:
         if self.cfg.debug:
             self.cfg.epoch = 2
-            self.cfg.limit_train_batches = 0.1
+            self.cfg.limit_train_batches = 0.01
             self.cfg.limit_val_batches = 0.1
 
     def setup_dataset(self) -> None:
@@ -133,7 +151,7 @@ class TrainPipeline:
 
 
 def main() -> None:
-    cfg = Config()
+    cfg = Config.from_args()
     pipeline = TrainPipeline(cfg)
     pipeline.run()
 
