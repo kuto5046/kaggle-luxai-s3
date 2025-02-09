@@ -32,7 +32,7 @@ LOGGER = logging.getLogger(__name__)
 class Config:
     exp_name: str = Path(__file__).parent.name
     seed: int = 2025
-    debug: bool = True
+    debug: bool = False
     use_gt: bool = False
     n_splits: int = 5
     root_dir: Path = Path("/home/user/work")
@@ -97,7 +97,7 @@ class DataProcessor:
         print(f"unique episode_df: {len(episode_df)}")
         if self.cfg.debug:
             # episode_df = episode_df.sample(n=10, seed=self.cfg.seed)
-            episode_df = episode_df.filter(pl.col("EpisodeId") == 66515471)
+            episode_df = episode_df.filter(pl.col("EpisodeId") == 65692820)
         return episode_df
 
     def _process_episode(self, row) -> tuple[str, int, int]:
@@ -160,8 +160,8 @@ class DataProcessor:
                         for j in range(24):
                             gt_point = hidden_state[HiddenState.POINTS, i, j]
                             pred_point = state[State.POINTS, i, j]
-                            # gtが1ならpredは0ではいけない
-                            assert not (gt_point == 1 and pred_point == 0), f"{episode_id=} {step_idx=} {i=} {j=}"
+                            # gtが1ならpredは0ではいけない (未発見のrelicがある場合発生しうるのでassertを外す)
+                            # assert not (gt_point == 1 and pred_point == 0), f"{episode_id=} {step_idx=} {i=} {j=}"
                             # gtが0ならpredは1ではいけない
                             assert not (gt_point == 0 and pred_point == 1), f"{episode_id=} {step_idx=} {i=} {j=}"
 

@@ -14,6 +14,7 @@ class State(IntEnum):
     SENSOR_MASK = auto()
     RELICS = auto()
     POINTS = auto()  # relic nodes周辺のポイントを獲得できるノード
+    ENTROPY = auto()
     OWN_UNIT_COUNT = auto()
     OWN_UNIT_ENERGY = auto()
     # OWN_UNIT_MASK = auto()
@@ -81,7 +82,9 @@ class EpisodeStore:
         self._init_high_prob = 0.5  # 可能性があるところに設定されるpoint発生確率
         self._relic_map = np.zeros((EnvParams.map_height, EnvParams.map_width), dtype=np.float32)
         self._point_map = np.ones((EnvParams.map_height, EnvParams.map_width), dtype=np.float32) * self._init_low_prob
-        self._visit_count = np.zeros((EnvParams.map_height, EnvParams.map_width), dtype=np.int32)
+        self._visit_count = np.zeros(
+            (EnvParams.map_height, EnvParams.map_width), dtype=np.float32
+        )  # 訪問回数を正規化して記録
         self._target_team_id = target_team_id
         self._relic_nodes = set()
         self._is_popup_relic_in_this_match = False
@@ -100,6 +103,7 @@ class EpisodeStore:
         self._prev_points = 0
         self._current_points = 0
         self._is_popup_relic_in_this_match = False
+        self._visit_count = np.zeros((EnvParams.map_height, EnvParams.map_width), dtype=np.float32)
 
         if not self._is_finished_relic_search():
             # ないと判定されているところも発生する可能性があるため-1にする
@@ -117,6 +121,14 @@ class EpisodeStore:
     @property
     def point_map(self) -> np.ndarray:
         return self._point_map.copy()
+
+    @property
+    def entropy_map(self) -> np.ndarray:
+        eps = 1e-13
+        p = self.point_map
+        q = 1 - p
+        entropy = -(p * np.log2(p + eps) + q * np.log2(q + eps))
+        return entropy
 
     @property
     def visit_count(self) -> np.ndarray:
@@ -228,6 +240,7 @@ class EpisodeStore:
         unit_energies = np.array(obs["units"]["energy"][self._target_team_id])  # (max_units, 1)
         unknown_point_positions, known_point = self._extract_unknown_point_positions(unit_positions, unit_energies)
         unknown_point = self.point - known_point
+        # x, y = 2, 20
         # print(
         #     f"{obs['steps']=} {self.point=} {unknown_point=} {self._point_map[y, x]=} {get_opposite(x, y)=} {unknown_point_positions=}"
         # )
@@ -411,6 +424,7 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
 
     state_map[State.RELICS] = episode_store.relic_map
     state_map[State.POINTS] = episode_store.point_map
+    state_map[State.ENTROPY] = episode_store.entropy_map
     state_map[State.VISIT_COUNT] = episode_store.visit_count
 
     # unit state
