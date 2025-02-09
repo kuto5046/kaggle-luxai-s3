@@ -43,7 +43,7 @@ class HiddenState(IntEnum):
 
 # episodeごとに変動する環境パラメータ
 class HiddenGlobalState(IntEnum):
-    NEBULA_TILE_VISION_REDUCTION = auto()
+    NEBULA_TILE_VISION_REDUCTION = 0
     NEBULA_TILE_ENERGY_REDUCTION = auto()
     UNIT_SAP_DROPOFF_FACTOR = auto()
     UNIT_ENERGY_VOID_FACTOR = auto()
@@ -73,11 +73,12 @@ def to_np(x: torch.Tensor) -> np.ndarray:
 
 
 class EpisodeStore:
-    def __init__(self, target_team_id: int, env_cfg: dict | EnvParams) -> None:
+    def __init__(self, target_team_id: int, env_cfg: dict | EnvParams, validation: bool = False) -> None:
         self._relic_map = np.zeros((EnvParams.map_height, EnvParams.map_width), dtype=np.float32)
         self._point_map = np.ones((EnvParams.map_height, EnvParams.map_width), dtype=np.float32) * 0.1
         self._target_team_id = target_team_id
         self._relic_nodes = set()
+        self.validation = validation
         self._is_popup_relic_in_this_match = False
 
         if isinstance(env_cfg, EnvParams):
@@ -98,7 +99,7 @@ class EpisodeStore:
 
         if not self._is_finished_relic_search():
             # ないと判定されているところも発生する可能性があるため-1にする
-            self._point_map = np.where(self._point_map != 1, 0.1, self._point_map)
+            self._point_map = np.where(self._point_map == 0, 0.1, self._point_map)
             # TODO: relic_nodes付近にあるという事前分布入れるようにする
 
     @property
@@ -139,6 +140,15 @@ class EpisodeStore:
         if len(new_relic_nodes) == 0:
             return
 
+        # 既知のrelic_nodesの範囲の場合Trueにする
+        old_point_candidate_mask = np.zeros((EnvParams.map_height, EnvParams.map_width), dtype=np.bool_)
+        for x, y in self._relic_nodes:
+            for dy in range(-2, 3):
+                for dx in range(-2, 3):
+                    nx, ny = x + dx, y + dy
+                    if in_map((nx, ny)):
+                        old_point_candidate_mask[ny, nx] = True
+
         for x, y in new_relic_nodes:
             self._relic_nodes.add((x, y))
             self._relic_map[y, x] = 1
@@ -150,6 +160,7 @@ class EpisodeStore:
             for dy in range(-2, 3):
                 for dx in range(-2, 3):
                     nx, ny = x + dx, y + dy
+                    # 既知のrelic_nodesの範囲&0より大きい場合はスキップ
                     if in_map((nx, ny)):
                         self._point_map[ny, nx] = max(self._point_map[ny, nx], 0.8)
                         ox, oy = get_opposite(nx, ny)
@@ -157,8 +168,8 @@ class EpisodeStore:
 
         # ここに到達するということは新しいrelic_nodesが発生しているということ
         self._is_popup_relic_in_this_match = True
-        # このマッチではrelic_nodesはこれ以上発生しないので0.5以外は0にする (TODO: これpoin_map更新した後にやるべき？)
-        self._point_map = np.where(self._point_map < 0.8, 0, self._point_map)
+        # このマッチではrelic_nodesはこれ以上発生しないので可能性が0のところは0にする
+        self._point_map = np.where((self._point_map < 0.8) & (~old_point_candidate_mask), 0, self._point_map)
 
     def _update_actions(self, prev_actions: dict[str, Any]) -> None:
         if len(prev_actions) == 0:
@@ -262,15 +273,18 @@ class EpisodeStore:
         unit_positions = np.array(obs["units"]["position"][self._target_team_id])  # (max_units, 2)
         unit_energies = np.array(obs["units"]["energy"][self._target_team_id])  # (max_units, 1)
         unknown_point_positions, known_point = self._extract_unknown_point_positions(unit_positions, unit_energies)
+        unknown_point = self.point - known_point
+        x, y = 10, 6
+        print(
+            f"{obs['steps']=} {self.point=} {unknown_point=} {self._point_map[y, x]=} {get_opposite(x, y)=} {unknown_point_positions=}"
+        )
 
         if len(unknown_point_positions) == 0:
             return
 
         if self._is_finished_relic_search_in_this_match(obs["match_steps"]):
-            unknown_point = self.point - known_point
-            if self.cfg.validation:
+            if self.validation:
                 assert unknown_point >= 0
-            # print(f"{obs['steps']=} {self.point=} {unknown_point=} {self._point_map[9, 17]=} {self._point_map[6, 14]=} {unknown_point_positions=}")
 
             # 未知のユニット位置で得られるポイントがユニット数と同じなら100%の確率でそこにポイントがあると考える
             if len(unknown_point_positions) == unknown_point:
@@ -477,26 +491,38 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
     return state_map
 
 
-def extract_global_state(obs: dict[str, Any], target_team_id: int, env_params: dict[str, Any]) -> np.ndarray:
+def extract_global_state(obs: dict[str, Any], target_team_id: int, env_params: EnvParams) -> np.ndarray:
     enemy_team_id = 1 - target_team_id
     global_states = np.zeros((len(GlobalState),), dtype=np.float32)
     # game state
-    global_states[GlobalState.MATCH_STEPS] = obs["match_steps"] / EnvParams.max_steps_in_match  # そのマッチの進行度
+    global_states[GlobalState.MATCH_STEPS] = obs["match_steps"] / env_params.max_steps_in_match  # そのマッチの進行度
     global_states[GlobalState.MATCH_COUNT] = (
-        obs["steps"] // (EnvParams.max_steps_in_match + 1)
-    ) / EnvParams.match_count_per_episode  # 何試合目か
+        obs["steps"] // (env_params.max_steps_in_match + 1)
+    ) / env_params.match_count_per_episode  # 何試合目か
     global_states[GlobalState.TEAM_POINTS] = (
         obs["team_points"][target_team_id] - obs["team_points"][enemy_team_id]
     ) / 100
     global_states[GlobalState.TEAM_WINS] = (
         obs["team_wins"][target_team_id] - obs["team_wins"][enemy_team_id]
-    ) / EnvParams.match_count_per_episode
+    ) / env_params.match_count_per_episode
 
-    global_states[GlobalState.UNIT_MOVE_COST] = env_params["unit_move_cost"] / EnvParams.init_unit_energy
-    global_states[GlobalState.UNIT_SAP_COST] = env_params["unit_sap_cost"] / EnvParams.init_unit_energy
-    global_states[GlobalState.UNIT_SAP_RANGE] = env_params["unit_sap_range"]
-    global_states[GlobalState.UNIT_SENSOR_RANGE] = env_params["unit_sensor_range"]
+    global_states[GlobalState.UNIT_MOVE_COST] = env_params.unit_move_cost / env_params.init_unit_energy
+    global_states[GlobalState.UNIT_SAP_COST] = env_params.unit_sap_cost / env_params.init_unit_energy
+    global_states[GlobalState.UNIT_SAP_RANGE] = env_params.unit_sap_range
+    global_states[GlobalState.UNIT_SENSOR_RANGE] = env_params.unit_sensor_range
     return global_states
+
+
+def extract_hidden_global_state(env_params: dict[str, Any]) -> np.ndarray:
+    hidden_global_states = np.zeros((len(HiddenGlobalState),), dtype=np.float32)
+    hidden_global_states[HiddenGlobalState.NEBULA_TILE_VISION_REDUCTION] = env_params.nebula_tile_vision_reduction
+    hidden_global_states[HiddenGlobalState.NEBULA_TILE_ENERGY_REDUCTION] = env_params.nebula_tile_energy_reduction
+    hidden_global_states[HiddenGlobalState.UNIT_SAP_DROPOFF_FACTOR] = env_params.unit_sap_dropoff_factor
+    hidden_global_states[HiddenGlobalState.UNIT_ENERGY_VOID_FACTOR] = env_params.unit_energy_void_factor
+    hidden_global_states[HiddenGlobalState.NEBULA_TILE_DRIFT_SPEED] = env_params.nebula_tile_drift_speed
+    hidden_global_states[HiddenGlobalState.ENERGY_NODE_DRIFT_SPEED] = env_params.energy_node_drift_speed
+    hidden_global_states[HiddenGlobalState.ENERGY_NODE_DRIFT_MAGNITUDE] = env_params.energy_node_drift_magnitude
+    return hidden_global_states
 
 
 def extract_action(actions: dict[str, Any], obs: dict[str, Any], target_team_id: int) -> tuple[np.ndarray, np.ndarray]:

@@ -19,6 +19,7 @@ from lux.utils import (
     extract_gt_state,
     extract_global_state,
     extract_hidden_state,
+    extract_hidden_global_state,
 )
 from tqdm.auto import tqdm
 from lux.params import EnvParams
@@ -41,7 +42,7 @@ class Config:
     feature_dir: Path = root_dir / f"output/feature_store/{exp_name}"
     target_team_name: str = "Frog Parade"
     target_sub_ids: list[int] = field(default_factory=lambda: [42613183])
-    validation: bool = True
+    validation: bool = False
 
 
 def get_fold(_train: pl.DataFrame, cv: list[tuple[np.ndarray, np.ndarray]]) -> pl.DataFrame:
@@ -117,6 +118,7 @@ class DataProcessor:
             episode_state_group = episode_group.create_group("states")
             episode_global_state_group = episode_group.create_group("global_states")
             episode_hidden_state_group = episode_group.create_group("hidden_states")
+            episode_hidden_global_state_group = episode_group.create_group("hidden_global_states")
             episode_win_group = episode_group.create_group("win")
 
             target_team_id = np.argmax(json_load["rewards"])  # win or tie
@@ -124,7 +126,7 @@ class DataProcessor:
 
             # episode内で獲得する情報
             env_params = EnvParams(**json_load["configuration"]["env_cfg"])
-            episode_store = EpisodeStore(target_team_id, env_params)
+            episode_store = EpisodeStore(target_team_id, env_params, self.cfg.validation)
             steps = json_load["steps"]
             for step_idx in range(len(steps) - 1):  # 505でdoneとなるため-1
                 prev_step_info = steps[step_idx - 1] if step_idx > 0 else None
@@ -156,15 +158,17 @@ class DataProcessor:
                 hidden_state = extract_hidden_state(gt_obs, target_team_id)
                 episode_hidden_state_group.create_dataset(f"{step_idx}", data=hidden_state)
 
+                hidden_global_state = extract_hidden_global_state(env_params)
+                episode_hidden_global_state_group.create_dataset(f"{step_idx}", data=hidden_global_state)
                 if self.cfg.validation:
                     for i in range(24):
                         for j in range(24):
                             gt_point = hidden_state[HiddenState.POINTS, i, j]
                             pred_point = state[State.POINTS, i, j]
                             # gtが1ならpredは0ではいけない
-                            assert not (gt_point == 1 and pred_point == 0)
+                            assert not (gt_point == 1 and pred_point == 0), f"{episode_id=} {step_idx=} {i=} {j=}"
                             # gtが0ならpredは1ではいけない
-                            assert not (gt_point == 0 and pred_point == 1)
+                            assert not (gt_point == 0 and pred_point == 1), f"{episode_id=} {step_idx=} {i=} {j=}"
 
                 next_actions = next_step_info[target_team_id]["action"]
                 own_action = extract_action(next_actions, obs, target_team_id)
