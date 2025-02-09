@@ -10,7 +10,15 @@ import numpy as np
 import joblib
 import polars as pl
 from lightning import seed_everything
-from lux.utils import EpisodeStore, extract_state, extract_action, extract_gt_state, extract_hidden_state
+from lux.utils import (
+    State,
+    HiddenState,
+    EpisodeStore,
+    extract_state,
+    extract_action,
+    extract_gt_state,
+    extract_hidden_state,
+)
 from tqdm.auto import tqdm
 from lux.params import EnvParams
 from sklearn.model_selection import KFold
@@ -22,16 +30,17 @@ LOGGER = logging.getLogger(__name__)
 class Config:
     exp_name: str = Path(__file__).parent.name
     seed: int = 2025
-    debug: bool = False
+    debug: bool = True
     use_gt: bool = False
     n_splits: int = 5
     root_dir: Path = Path("/home/user/work")
     input_dir: Path = root_dir / "input"
     episode_dir: Path = root_dir / "output/feature_store/episodes"
-    episode_path: Path = episode_dir / "episodes0202.csv"
+    episode_path: Path = episode_dir / "episodes0208.csv"
     feature_dir: Path = root_dir / f"output/feature_store/{exp_name}"
     target_team_name: str = "Frog Parade"
-    target_sub_ids: list[int] = field(default_factory=lambda: [42613059, 42613183])
+    target_sub_ids: list[int] = field(default_factory=lambda: [42613183])
+    validation: bool = True
 
 
 def get_fold(_train: pl.DataFrame, cv: list[tuple[np.ndarray, np.ndarray]]) -> pl.DataFrame:
@@ -85,7 +94,8 @@ class DataProcessor:
         episode_df = episode_df.unique("EpisodeId")
         print(f"unique episode_df: {len(episode_df)}")
         if self.cfg.debug:
-            episode_df = episode_df.sample(n=10, seed=self.cfg.seed)
+            # episode_df = episode_df.sample(n=10, seed=self.cfg.seed)
+            episode_df = episode_df.filter(pl.col("EpisodeId") == 65682718)
         return episode_df
 
     def _process_episode(self, row) -> tuple[str, int, int]:
@@ -140,6 +150,16 @@ class DataProcessor:
                 hidden_state = extract_hidden_state(gt_obs, target_team_id)
                 episode_hidden_state_group.create_dataset(f"{step_idx}", data=hidden_state)
 
+                if self.cfg.validation:
+                    for i in range(24):
+                        for j in range(24):
+                            gt_point = hidden_state[HiddenState.POINTS, i, j]
+                            pred_point = state[State.POINTS, i, j]
+                            # gtが1ならpredは0ではいけない
+                            assert not (gt_point == 1 and pred_point == 0)
+                            # gtが0ならpredは1ではいけない
+                            assert not (gt_point == 0 and pred_point == 1)
+
                 next_actions = next_step_info[target_team_id]["action"]
                 own_action = extract_action(next_actions, obs, target_team_id)
                 opp_action = extract_action(next_actions, obs, 1 - target_team_id)
@@ -181,7 +201,8 @@ class DataProcessor:
     def run(self) -> None:
         episode_paths = self.read_data()
         df = self.preprocess(episode_paths)
-        df = self.add_fold(df)
+        if not self.cfg.debug:
+            df = self.add_fold(df)
         df.write_csv(self.feature_dir / "train.csv")
 
 

@@ -499,6 +499,12 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
             train_batch_size_per_learner=cfg.train_batch_size_per_learner,  # 3試合データが集まったら学習する
             num_epochs=cfg.num_epochs,
         )
+        .python_environment(
+            extra_python_environs_for_worker={
+                "XLA_FLAGS": "--xla_force_host_platform_device_count=1",
+                "OMP_NUM_THREADS": "1",
+            }
+        )
         # https://docs.ray.io/en/latest/rllib/rllib-rlmodule.html#construction-through-rlmodulespecs
         .rl_module(
             rl_module_spec=MultiRLModuleSpec(

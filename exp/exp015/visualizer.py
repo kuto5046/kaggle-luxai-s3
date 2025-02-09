@@ -80,7 +80,7 @@ def main():
     # エピソード選択
     episode_id = str(st.selectbox("エピソードを選択", episode_ids))
 
-    n_stack = 4
+    n_stack = 1
     model = load_model(exp_name, n_stack=n_stack)
     if episode_id:
         link = f"https://s3vis.lux-ai.org/#/visualizer?input={episode_id}"

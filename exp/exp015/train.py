@@ -22,13 +22,13 @@ LOGGER = logging.getLogger(__name__)
 @dataclass
 class Config:
     exp_name: str = Path(__file__).parent.name
-    notes: str = "residual層"
+    notes: str = "exp013のepisodeデータでexp015のデータセット作成方法を利用する"
     seed: int = 2025
     debug: bool = False
     n_splits: int = 5
     use_fold: int = 0
     root_dir: Path = Path("/home/user/work")
-    feature_version: str = "exp014"
+    feature_version: str = "exp015"
     feature_dir: Path = root_dir / f"output/feature_store/{feature_version}"
     output_dir = root_dir / f"exp/{exp_name}/output"
 
@@ -44,7 +44,8 @@ class Config:
     weight_decay: float = 0.01
     warmup_step_rate: float = 0.1
     # model
-    res: bool = True
+    res: bool = False
+    aug: bool = False
     n_stack: int = 4
 
 

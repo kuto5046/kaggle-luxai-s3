@@ -207,6 +207,7 @@ class EpisodeStore:
         unknown_point_positions = (
             set()
         )  # unitが重複している場合ポイントは１つしか入らないため重複を除外するためにsetを使う
+        known_point_positions = set()
         known_point = 0
         for (x, y), energy in zip(unit_positions, unit_energies):
             if x == -1 and y == -1:
@@ -214,11 +215,13 @@ class EpisodeStore:
             # 敵からのsapで負のエネルギーになってる場合はポイントは獲得されず次のステップでrestartになる
             if energy < 0:
                 continue
-            if self._point_map[y, x] == 0:
+            # known_point_positionsに含まれている場合はスキップ(unitが同じセルに重複して存在するケース)
+            if (x, y) in known_point_positions:
                 continue
             # ポイントセルとして確定している場合は既知ポイントとしてカウント
             if self._point_map[y, x] == 1:
                 known_point += 1
+                known_point_positions.add((x, y))
                 continue
             unknown_point_positions.add((x, y))
         return unknown_point_positions, known_point
@@ -245,7 +248,9 @@ class EpisodeStore:
 
         if self._is_finished_relic_search_in_this_match(obs["match_steps"]):
             unknown_point = self.point - known_point
-            # assert unknown_point >= 0
+            if self.cfg.validation:
+                assert unknown_point >= 0
+            # print(f"{obs['steps']=} {self.point=} {unknown_point=} {self._point_map[9, 17]=} {self._point_map[6, 14]=} {unknown_point_positions=}")
 
             # 未知のユニット位置で得られるポイントがユニット数と同じなら100%の確率でそこにポイントがあると考える
             if len(unknown_point_positions) == unknown_point:
@@ -259,9 +264,9 @@ class EpisodeStore:
                 likelihood = unknown_point / len(unknown_point_positions)
                 posterior_values = bayesian_update(prior_probs, likelihood, unknown_point)
             else:
-                posterior_values = np.ones(len(unknown_point_positions))
-                # raise ValueError(f"{obs['steps']=} {unknown_point=} {self.point=} {known_point=} {len(unknown_point_positions)=} is invalid")
-            # print(f"{obs['steps']=} {unknown_point=} {unknown_point_positions=} {posterior_values=}")
+                raise ValueError(
+                    f"{obs['steps']=} {unknown_point=} {self.point=} {known_point=} {len(unknown_point_positions)=} is invalid"
+                )
 
             for i, (x, y) in enumerate(unknown_point_positions):
                 self._point_map[y, x] = posterior_values[i]
@@ -427,6 +432,10 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
             # 敵チームの情報はvision内にいない限り見れない
             unit_energies = np.array(obs["units"]["energy"][team_id])  # (max_units, 1)
             unit_positions = np.array(obs["units"]["position"][team_id])  # (max_units, 2)
+            # sensor_maskが1(見える範囲)の場合は0にする。それ以外は0.5
+            state_map[State.OPP_UNIT_COUNT] = 0.5 / EnvParams.max_units
+            state_map[State.OPP_UNIT_COUNT] *= 1 - state_map[State.SENSOR_MASK]
+
         unit_masks = np.array(obs["units_mask"][team_id])  # (max_units, )
         # available_unit_ids = np.where(unit_masks)[0]
         for unit_id in range(EnvParams.max_units):
