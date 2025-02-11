@@ -22,7 +22,7 @@ def saveEpisode(epid: int, save_path: Path) -> None:
 
 
 def main():
-    df = pl.read_csv("/home/user/work/output/feature_store/episodes/episodes0208.csv")
+    df = pl.read_csv("/home/user/work/output/feature_store/episodes/episodes0210.csv")
     start_time = datetime.datetime.now(tz=datetime.timezone.utc)
     episode_count = 0
     for _sub_id, df in df.group_by("SubmissionId"):

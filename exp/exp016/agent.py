@@ -5,7 +5,17 @@ from collections import deque
 import numpy as np
 import torch
 from lightning import seed_everything
-from lux.utils import State, Action, HiddenState, EpisodeStore, extract_state, get_valid_policy_map
+from lux.utils import (
+    State,
+    Action,
+    GlobalState,
+    HiddenState,
+    EpisodeStore,
+    HiddenGlobalState,
+    extract_state,
+    extract_global_state,
+    get_valid_policy_map,
+)
 from lux.models import LuxUNetModel
 from lux.params import EnvParams
 from scipy.special import softmax
@@ -15,18 +25,22 @@ class Config:
     seed: int = 2025
     # 確率的な行動を取るかどうか
     stochastic: bool = False  # Falseにするとargmaxで行動を選択する
+    res: bool = True
     n_stack: int = 4
 
     checkpoint_path: Path = Path(__file__).parent / "output/best_model.ckpt"
 
 
 class ILAgent:
-    def __init__(self, env_cfg: EnvParams, checkpoint_path: Path, n_stack: int) -> None:
+    def __init__(self, env_cfg: EnvParams, checkpoint_path: Path, n_stack: int, res: bool = True) -> None:
         self.model = LuxUNetModel(
             state_space_size=len(State),
+            global_state_space_size=len(GlobalState),
             action_space_size=len(Action),
             hidden_state_space_size=len(HiddenState),
+            hidden_global_state_space_size=len(HiddenGlobalState),
             n_stack=n_stack,
+            res=res,
         )
         ckpt = torch.load(checkpoint_path, weights_only=True, map_location="cpu")
         state_dict = {k.replace("model.", ""): v for k, v in ckpt["state_dict"].items()}
@@ -36,17 +50,23 @@ class ILAgent:
         self.env_cfg = env_cfg
         # n_stack分のstateを保持するqueue
         self.stack_states = deque(maxlen=n_stack)
+        self.stack_global_states = deque(maxlen=n_stack)
         for i in range(n_stack):
             self.stack_states.append(np.zeros((len(State), 24, 24)))
+            self.stack_global_states.append(np.zeros(len(GlobalState)))
 
     def predict(self, obs: dict[str, Any], team_id: int, episode_store: EpisodeStore) -> tuple[np.ndarray, np.ndarray]:
         state = extract_state(obs, team_id, episode_store)
+        global_state = extract_global_state(obs, team_id, self.env_cfg)
         self.stack_states.append(state)
-        stacked_state = np.stack(list(self.stack_states), axis=0)
-        stacked_state = torch.from_numpy(stacked_state).unsqueeze(0).float()
+        self.stack_global_states.append(global_state)
+        states = {
+            "state": torch.from_numpy(np.stack(list(self.stack_states), axis=0)).unsqueeze(0).float(),
+            "global_state": torch.from_numpy(np.stack(list(self.stack_global_states), axis=0)).unsqueeze(0).float(),
+        }
 
         with torch.no_grad():
-            output = self.model(stacked_state)
+            output = self.model(states)
             own_policy_map = output["own_policy"].squeeze().numpy()
             opp_policy_map = output["opp_policy"].squeeze().numpy()
 
@@ -65,7 +85,7 @@ class ILAgent:
 
 cfg = Config()
 seed_everything(cfg.seed, workers=True)
-imitation_model = ILAgent(EnvParams, cfg.checkpoint_path, cfg.n_stack)
+imitation_model = ILAgent(EnvParams, cfg.checkpoint_path, cfg.n_stack, cfg.res)
 
 
 class Agent:
@@ -78,14 +98,13 @@ class Agent:
         # np.random.seed(self.cfg.seed)
         self.env_cfg = env_cfg
         self.episode_store = EpisodeStore(self.team_id, env_cfg)
-        self.prev_actions = {}
 
     def act(self, step: int, obs, remainingOverageTime: int = 60):
         # マッチごとにリセットされる要素をリセット
         if obs["match_steps"] == 0:
             self.episode_store.reset()
         else:
-            self.episode_store.update(obs, self.prev_actions)
+            self.episode_store.update(obs)
         own_policy_map, opp_policy_map = imitation_model.predict(obs, self.team_id, self.episode_store)
 
         unit_mask = np.array(obs["units_mask"][self.team_id])  # shape (max_units, )
@@ -126,7 +145,6 @@ class Agent:
                 else:
                     actions[unit_id] = [action, 0, 0]
                     break
-        self.prev_actions = actions.copy()
         return actions
 
 
