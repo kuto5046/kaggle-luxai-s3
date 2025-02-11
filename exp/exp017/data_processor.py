@@ -11,8 +11,6 @@ import joblib
 import polars as pl
 from lightning import seed_everything
 from lux.utils import (
-    State,
-    HiddenState,
     EpisodeStore,
     extract_state,
     extract_action,
@@ -71,9 +69,10 @@ def valid_episode(json_load: dict[str, Any], target_team_name: str) -> bool:
         if r is None:
             print(f"rewards include None -> {json_load['rewards']}")
             return False
-    win_idx = np.argmax([r or 0 for r in json_load["rewards"]])  # win or tie
-    win_team = json_load["info"]["TeamNames"][win_idx]
-    return win_team == target_team_name
+    # win_idx = np.argmax([r or 0 for r in json_load["rewards"]])  # win or tie
+    # win_team = json_load["info"]["TeamNames"][win_idx]
+    # return win_team == target_team_name
+    return True
 
 
 class DataProcessor:
@@ -96,8 +95,8 @@ class DataProcessor:
         episode_df = episode_df.unique("EpisodeId")
         print(f"unique episode_df: {len(episode_df)}")
         if self.cfg.debug:
-            # episode_df = episode_df.sample(n=10, seed=self.cfg.seed)
-            episode_df = episode_df.filter(pl.col("EpisodeId") == 66557056)
+            # episode_df = episode_df.sample(n=1, seed=self.cfg.seed)
+            episode_df = episode_df.filter(pl.col("EpisodeId") == 66451776)
         return episode_df
 
     def _process_episode(self, row) -> tuple[str, int, int]:
@@ -108,7 +107,7 @@ class DataProcessor:
         with open(episode_path) as f:
             json_load = json.load(f)
 
-        # 無効なepisodeはスキップ
+        # 無効なepisodeはスキップ(valueも学習したいのでskip)
         if not valid_episode(json_load, self.cfg.target_team_name):
             return None
 
@@ -155,31 +154,16 @@ class DataProcessor:
 
                 hidden_global_state = extract_hidden_global_state(env_params)
                 episode_hidden_global_state_group.create_dataset(f"{step_idx}", data=hidden_global_state)
-                if self.cfg.validation:
-                    for i in range(24):
-                        for j in range(24):
-                            gt_point = hidden_state[HiddenState.POINTS, i, j]
-                            pred_point = state[State.POINTS, i, j]
-                            # gtが1ならpredは0ではいけない (未発見のrelicがある場合発生しうるのでassertを外す)
-                            # assert not (gt_point == 1 and pred_point == 0), f"{episode_id=} {step_idx=} {i=} {j=}"
-                            # gtが0ならpredは1ではいけない(例外的に発生するが後から修正されるためassertを外す)
-                            # assert not (gt_point == 0 and pred_point == 1), f"{episode_id=} {step_idx=} {i=} {j=}"
-
-                            # gt_unit_count = hidden_state[HiddenState.OWN_UNIT_COUNT, i, j]
-                            # pred_unit_count = state[State.OWN_UNIT_COUNT, i, j]
-                            # assert gt_unit_count == pred_unit_count, f"{episode_id=} {step_idx=} {i=} {j=} {gt_unit_count=} {pred_unit_count=}"
 
                 next_actions = next_step_info[target_team_id]["action"]
-                own_action = extract_action(next_actions, obs, target_team_id)
-                opp_action = extract_action(next_actions, obs, 1 - target_team_id)
-                action = np.stack([own_action, opp_action], axis=0)  # (2, 24, 24)
+                action = extract_action(next_actions, obs, target_team_id)
                 episode_action_group.create_dataset(f"{step_idx}", data=action)
 
                 match_idx = obs["steps"] // (EnvParams.max_steps_in_match + 1)
                 is_win = match_results[match_idx]
                 episode_win_group.create_dataset(f"{step_idx}", data=is_win)
 
-        return str(episode_id), len(steps) - 1, target_team_id
+        return str(episode_id), len(steps) - 1, target_team_id, is_win
 
     def preprocess(self, df: pl.DataFrame) -> pl.DataFrame:
         # 並列処理の実行
@@ -190,7 +174,7 @@ class DataProcessor:
 
         # 有効なエピソードのみを抽出
         valid_results = [r for r in results if r is not None]
-        valid_ids, max_steps, target_team_ids = zip(*valid_results)
+        valid_ids, max_steps, target_team_ids, is_wins = zip(*valid_results)
 
         # 一時ファイルを1つのh5ファイルにマージ
         with h5py.File(self.feature_dir / "episodes.h5", "w") as out_f:
@@ -201,7 +185,7 @@ class DataProcessor:
                 temp_path.unlink()  # 一時ファイルの削除
 
         return pl.DataFrame(
-            {"EpisodeId": valid_ids, "MaxStep": max_steps, "TargetTeamId": target_team_ids},
+            {"EpisodeId": valid_ids, "MaxStep": max_steps, "TargetTeamId": target_team_ids, "Win": is_wins},
         )
 
     def add_fold(self, df: pl.DataFrame) -> pl.DataFrame:

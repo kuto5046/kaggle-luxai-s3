@@ -49,11 +49,11 @@ class Config:
     aug: bool = False
     n_stack: int = 4
     # loss
-    loss_weight_own_policy: float = 1.0
-    loss_weight_opp_policy: float = 0.0
-    loss_weight_state: float = 0.0
-    loss_weight_global_state: float = 0.0
+    loss_weight_policy: float = 1.0
+    loss_weight_state: float = 1.0
+    loss_weight_global_state: float = 1.0
     loss_weight_value: float = 0.0
+    loss_weight_sap: float = 1.0
 
     @classmethod
     def from_args(cls) -> "Config":

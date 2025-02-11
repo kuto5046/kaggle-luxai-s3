@@ -52,35 +52,29 @@ class LuxAugment:
         # x,yが実際のmapと行列で異なるので操作を直感的にするために転置後に処理する
         state = inputs["state"].copy()
         hidden_state = inputs["hidden_state"].copy()
-        own_action = inputs["own_action"].copy()
-        opp_action = inputs["opp_action"].copy()
-
+        action = inputs["action"].copy()
+        sap = inputs["sap"].copy()
         # Flip vertically↑↓(# switch up(1) and down(3))
         if random.random() < self.p:
             state = np.flip(state, axis=2).copy()
             hidden_state = np.flip(hidden_state, axis=1).copy()
-            own_action = np.flip(own_action, axis=0)
-            own_action = self.switch_action(own_action, Action.UP, Action.DOWN)
-            opp_action = np.flip(opp_action, axis=0)
-            opp_action = self.switch_action(opp_action, Action.UP, Action.DOWN)
-
+            action = np.flip(action, axis=0)
+            action = self.switch_action(action, Action.UP, Action.DOWN)
+            sap = np.flip(sap, axis=0)
         # Flip horizontally →← (switch left(2) and right(4))
         if random.random() < self.p:
             state = np.flip(state, axis=3).copy()
             hidden_state = np.flip(hidden_state, axis=2).copy()
-            own_action = np.flip(own_action, axis=1)
-            own_action = self.switch_action(own_action, Action.LEFT, Action.RIGHT)
-            opp_action = np.flip(opp_action, axis=1)
-            opp_action = self.switch_action(opp_action, Action.LEFT, Action.RIGHT)
-
+            action = np.flip(action, axis=1)
+            action = self.switch_action(action, Action.LEFT, Action.RIGHT)
+            sap = np.flip(sap, axis=1)
         # Rotate 90 degrees ↑→ (right->up, up->left left->down down->right)
         if random.random() < self.p:
             state = np.rot90(state, axes=(2, 3)).copy()
             hidden_state = np.rot90(hidden_state, axes=(1, 2)).copy()
-            own_action = np.rot90(own_action, axes=(0, 1))
-            own_action = self.rotate_action(own_action)
-            opp_action = np.rot90(opp_action, axes=(0, 1))
-            opp_action = self.rotate_action(opp_action)
+            action = np.rot90(action, axes=(0, 1))
+            action = self.rotate_action(action)
+            sap = np.rot90(sap, axes=(0, 1))
 
         # TODO:
         # mapをランダムにずらす
@@ -88,8 +82,8 @@ class LuxAugment:
 
         inputs["state"] = state
         inputs["hidden_state"] = hidden_state
-        inputs["own_action"] = own_action
-        inputs["opp_action"] = opp_action
+        inputs["action"] = action
+        inputs["sap"] = sap
         return inputs
 
 
@@ -132,16 +126,16 @@ class LaxDataset(Dataset):
             np.float32
         )
         actions = np.array(self.h5_file[str(episode_id)]["actions"][str(step_idx)]).astype(np.float32)
-        own_action = actions[0]
-        opp_action = actions[1]
+        action = actions[0]
+        sap = actions[1]
         win = np.array(self.h5_file[str(episode_id)]["win"][str(step_idx)]).astype(np.float32)
         inputs = {
             "state": state,
             "global_state": global_state,
             "hidden_state": hidden_state,
             "hidden_global_state": hidden_global_state,
-            "own_action": own_action,
-            "opp_action": opp_action,
+            "action": action,
+            "sap": sap,
             "win": win,
         }
         if self.mode == "train" and self.aug:
@@ -157,6 +151,7 @@ class LaxLitDataModule(LightningDataModule):
 
     def setup(self, stage: str | None = None) -> None:
         df = pl.read_csv(self.cfg.feature_dir / "train.csv")
+        df = df.filter(pl.col("Win"))  # 勝利したエピソードのみを使用
         train = df.filter(pl.col("fold") != self.cfg.use_fold)
         valid = df.filter(pl.col("fold") == self.cfg.use_fold)
         self.train_dataset = LaxDataset(train, self.cfg, mode="train")
@@ -210,6 +205,7 @@ class LaxLitModel(LightningModule):
         self.criterion1 = DiceLoss(n_classes=len(Action))
         self.criterion2 = nn.BCEWithLogitsLoss()
         self.criterion3 = nn.MSELoss()
+        self.criterion4 = DiceLoss(n_classes=2)
 
         metrics = self.get_metrics()
         self.train_metrics = metrics.clone(postfix="/train")
@@ -228,30 +224,34 @@ class LaxLitModel(LightningModule):
     def _share_step(self, batch: Any, mode: str = "train") -> torch.Tensor:
         outputs = self(batch)
 
-        own_policy_preds = torch.softmax(outputs["own_policy"], dim=1)
-        opp_policy_preds = torch.softmax(outputs["opp_policy"], dim=1)
-
-        own_policy_targets = one_hot_encoder(batch["own_action"], n_classes=len(Action))
-        opp_policy_targets = one_hot_encoder(batch["opp_action"], n_classes=len(Action))
-
-        own_policy_loss = self.criterion1(own_policy_preds, own_policy_targets)
-        opp_policy_loss = self.criterion1(opp_policy_preds, opp_policy_targets)
+        policy_preds = torch.softmax(outputs["policy"], dim=1)
+        policy_targets = one_hot_encoder(batch["action"], n_classes=len(Action))
+        policy_loss = self.criterion1(policy_preds, policy_targets)
 
         value_loss = self.criterion2(outputs["value"].flatten(), batch["win"])
-
         state_loss = self.criterion3(outputs["state"].flatten(), batch["hidden_state"].flatten())
         global_state_loss = self.criterion3(outputs["global_state"].flatten(), batch["hidden_global_state"].flatten())
+
+        sap_loss = self.criterion4(outputs["sap"], batch["sap"])
         loss = (
-            own_policy_loss * self.cfg.loss_weight_own_policy
-            + opp_policy_loss * self.cfg.loss_weight_opp_policy
+            policy_loss * self.cfg.loss_weight_policy
             + state_loss * self.cfg.loss_weight_state
             + value_loss * self.cfg.loss_weight_value
             + global_state_loss * self.cfg.loss_weight_global_state
+            + sap_loss * self.cfg.loss_weight_sap
         )
 
         self.log(
             f"PolicyLoss/{mode}",
-            own_policy_loss,
+            policy_loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+        )
+        self.log(
+            f"SapLoss/{mode}",
+            sap_loss,
             on_step=False,
             on_epoch=True,
             prog_bar=False,
@@ -273,14 +273,7 @@ class LaxLitModel(LightningModule):
             prog_bar=False,
             logger=True,
         )
-        self.log(
-            f"OppPolicyLoss/{mode}",
-            opp_policy_loss,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=False,
-            logger=True,
-        )
+
         self.log(
             f"GlobalStateLoss/{mode}",
             global_state_loss,
@@ -298,8 +291,8 @@ class LaxLitModel(LightningModule):
             logger=True,
         )
 
-        preds = torch.softmax(outputs["own_policy"], dim=1).argmax(dim=1).flatten()
-        gts = batch["own_action"].flatten()
+        preds = torch.softmax(outputs["policy"], dim=1).argmax(dim=1).flatten()
+        gts = batch["action"].flatten()
         unit_masks = (batch["state"][:, -1, State.OWN_UNIT_COUNT] > 0).flatten()  # unitが存在するところだけで計算する
 
         preds = preds[unit_masks]
@@ -542,8 +535,8 @@ class LuxUNetModel(nn.Module):
         self.up1 = Up(256 * 2 + global_state_space_size, 256 // factor, bilinear)
         self.up2 = Up(256, 128 // factor, bilinear)
         self.up3 = Up(128, 64, bilinear)
-        self.own_policy_net = OutConv(64 * n_stack, action_space_size)
-        self.opp_policy_net = OutConv(64 * n_stack, action_space_size)
+        self.policy_net = OutConv(64 * n_stack, action_space_size)
+        self.sap_net = OutConv(64 * n_stack, 1)
         self.state_net = OutConv(64 * n_stack, hidden_state_space_size)
         self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
         self.value_net = nn.Sequential(
@@ -587,13 +580,13 @@ class LuxUNetModel(nn.Module):
         x = self.up3(x, x1)
 
         x = x.view(_n, -1, _x, _y)
-        own_policy_logits = self.own_policy_net(x)
-        opp_policy_logits = self.opp_policy_net(x)
+        policy_logits = self.policy_net(x)
+        sap_logits = self.sap_net(x)
         state_logits = self.state_net(x)
 
         return {
-            "own_policy": own_policy_logits,
-            "opp_policy": opp_policy_logits,
+            "policy": policy_logits,
+            "sap": sap_logits,
             "state": state_logits,
             "global_state": global_state_logits,
             "value": value_logits,

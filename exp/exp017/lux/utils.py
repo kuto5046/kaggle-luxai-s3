@@ -496,8 +496,8 @@ def extract_hidden_global_state(env_params: dict[str, Any]) -> np.ndarray:
     return hidden_global_states
 
 
-def extract_action(actions: dict[str, Any], obs: dict[str, Any], target_team_id: int) -> tuple[np.ndarray, np.ndarray]:
-    action_map = np.zeros((EnvParams.map_width, EnvParams.map_height), dtype=np.float32)
+def extract_action(actions: dict[str, Any], obs: dict[str, Any], target_team_id: int) -> np.ndarray:
+    action_map = np.zeros((2, EnvParams.map_width, EnvParams.map_height), dtype=np.float32)
     # unit state
     unit_masks = np.array(obs["units_mask"][target_team_id])  # (max_units, )
     unit_positions = np.array(obs["units"]["position"][target_team_id])  # (max_units, 2)
@@ -505,8 +505,14 @@ def extract_action(actions: dict[str, Any], obs: dict[str, Any], target_team_id:
     available_unit_ids = np.where(unit_masks)[0]
     for unit_id in available_unit_ids:
         x, y = unit_positions[unit_id]
-        action_map[y, x] = actions[unit_id][0]
-
+        action_map[0, y, x] = actions[unit_id][0]
+        # sapしている位置を1にする
+        if actions[unit_id][0] == Action.SAP:
+            dx, dy = actions[unit_id][1:]
+            nx = x + dx
+            ny = y + dy
+            if in_map((nx, ny)):
+                action_map[1, ny, nx] = 1
     return action_map
 
 
@@ -528,6 +534,15 @@ def get_valid_policy_map(obs: dict[str, Any], team_id: int, env_cfg: EnvParams) 
         if not can_sap(energy, env_cfg.unit_sap_cost):
             validate_policy_map[Action.SAP, y, x] = 0
     return validate_policy_map
+
+
+def get_valid_sap_map(obs: dict[str, Any], team_id: int, env_cfg: EnvParams) -> np.ndarray:
+    validate_sap_map = np.zeros((EnvParams.map_width, EnvParams.map_height), dtype=np.float32)
+    tile_type_map = np.array(obs["map_features"]["tile_type"]).T  # (24, 24)
+    # tileがASTEROID_TILEの場合はsapできない
+    validate_sap_map[tile_type_map == TileType.ASTEROID] = 0
+    # 味方unitにはsapしてもいいのか？
+    return validate_sap_map
 
 
 def calc_next_pos(pos: tuple[int, int], action: Action) -> tuple[int, int]:

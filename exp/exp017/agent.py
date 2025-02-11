@@ -13,6 +13,7 @@ from lux.utils import (
     EpisodeStore,
     HiddenGlobalState,
     extract_state,
+    get_valid_sap_map,
     extract_global_state,
     get_valid_policy_map,
 )
@@ -67,12 +68,12 @@ class ILAgent:
 
         with torch.no_grad():
             output = self.model(states)
-            own_policy_map = output["own_policy"].squeeze().numpy()
-            opp_policy_map = output["opp_policy"].squeeze().numpy()
+            policy_map = output["policy"].squeeze().numpy()
+            sap_policy_map = output["sap"].squeeze().numpy()
 
-        own_policy_map = self.get_legal_policy(obs, own_policy_map, team_id)
-        opp_policy_map = self.get_legal_policy(obs, opp_policy_map, 1 - team_id)
-        return own_policy_map, opp_policy_map
+        policy_map = self.get_legal_policy(obs, policy_map, team_id)
+        sap_policy_map = self.get_legal_sap_policy(obs, sap_policy_map, team_id)
+        return policy_map, sap_policy_map
 
     def get_legal_policy(self, obs: dict[str, Any], policy_map: np.ndarray, team_id: int) -> np.ndarray:
         legal_action_map = get_valid_policy_map(obs, team_id, self.env_cfg)
@@ -81,6 +82,12 @@ class ILAgent:
         # 無効な行動は負の大きな値になるためsoftmax後は0になる。その上で再度無効な行動を0にする
         policy_map = softmax(policy_map - action_mask_map, axis=0) * (action_mask_map == 0) * 1
         return policy_map
+
+    def get_legal_sap_policy(self, obs: dict[str, Any], sap_map: np.ndarray, team_id: int) -> np.ndarray:
+        legal_sap_map = get_valid_sap_map(obs, team_id, self.env_cfg)
+        # 無効な場所は0にする
+        sap_map *= legal_sap_map
+        return sap_map
 
 
 cfg = Config()
@@ -105,7 +112,7 @@ class Agent:
             self.episode_store.reset()
         else:
             self.episode_store.update(obs)
-        own_policy_map, opp_policy_map = imitation_model.predict(obs, self.team_id, self.episode_store)
+        policy_map, sap_policy_map = imitation_model.predict(obs, self.team_id, self.episode_store)
 
         unit_mask = np.array(obs["units_mask"][self.team_id])  # shape (max_units, )
         unit_positions = np.array(obs["units"]["position"][self.team_id])  # shape (max_units, 2)
@@ -117,31 +124,30 @@ class Agent:
         for unit_id in available_unit_ids:
             unit_pos = unit_positions[unit_id]
             x, y = unit_pos
-            own_policy = own_policy_map[:, y, x]
+            policy = policy_map[:, y, x]
 
             while True:
                 if cfg.stochastic:
-                    action = np.random.choice(range(6), p=own_policy)
+                    action = np.random.choice(range(6), p=policy)
                 else:
-                    action = own_policy.argmax()
+                    action = policy.argmax()
 
                 # print(policy, file=sys.stderr)
                 if action == Action.SAP:
-                    # params.unit_sap_rangeの範囲内にいる敵ユニットをランダムに選択
-                    opp_unit_ids = get_nearby_enemy_unit_ids(
-                        unit_pos, opp_unit_positions, self.env_cfg["unit_sap_range"]
-                    )
-                    # 敵のユニットがいる場合はランダムにサンプリングしてSAPする
-                    if len(opp_unit_ids) > 0:
-                        opp_unit_id = np.random.choice(opp_unit_ids)
-                        opp_unit_pos = opp_unit_positions[opp_unit_id]
-                        opp_action = opp_policy_map[:, opp_unit_pos[1], opp_unit_pos[0]].argmax()
-                        if opp_action in [Action.SAP, Action.CENTER]:
-                            # opp_unit_next_pos = calc_next_pos(opp_unit_pos, opp_action)
-                            relative_pos = calc_relative_pos(unit_pos, opp_unit_pos)
-                            actions[unit_id] = [Action.SAP, relative_pos[0], relative_pos[1]]
-                            break
-                    own_policy[Action.SAP] = 0
+                    # sap候補を抽出 sap_policy_map > 0.5以上のマスを抽出
+                    sap_candidate_masks = sap_policy_map > 0.5
+                    _sap_candidate_positions = np.argwhere(sap_candidate_masks)
+                    sap_candidate_positions = [
+                        pos
+                        for pos in _sap_candidate_positions
+                        if is_within_k_tiles(unit_pos, pos, self.env_cfg["unit_sap_range"])
+                    ]
+                    if len(sap_candidate_positions) > 0:
+                        sap_pos = np.random.choice(sap_candidate_positions)
+                        actions[unit_id] = [Action.SAP, sap_pos[0], sap_pos[1]]
+                        break
+                    # sapしない
+                    policy[Action.SAP] = 0
                 else:
                     actions[unit_id] = [action, 0, 0]
                     break

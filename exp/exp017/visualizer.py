@@ -6,7 +6,7 @@ import torch
 import polars as pl
 import streamlit as st
 import plotly.graph_objects as go
-from lux.utils import State, Action, GlobalState, HiddenState, HiddenGlobalState, to_np
+from lux.utils import State, Action, GlobalState, HiddenState, HiddenGlobalState
 from lux.models import LuxUNetModel
 from lux.params import EnvParams
 
@@ -98,7 +98,7 @@ def main():
             # データ取得
             actions = np.array(h5_file[episode_id]["actions"][str(step_idx)])
             own_action = actions[0]
-            opp_action = actions[1]
+            sap_action = actions[1]
             states = []
             global_states = []
             for i in range(n_stack - 1, -1, -1):
@@ -116,28 +116,40 @@ def main():
             col1, col2, col3 = st.columns([1, 1, 4])
             with col1:
                 visualize_action(own_action, title="Own Action")
-                visualize_action(opp_action, title="Opp Action")
+                st.subheader("SAP Action")
+                # ヒートマップ表示 sequentialではないdeiscreteな色を使う
+                fig = go.Figure(data=go.Heatmap(z=sap_action, zmax=1, zmin=0, colorscale="reds"))
+                fig.update_layout(width=400, height=400)
+                st.plotly_chart(fig, key="SAP Action")
+                st.write(
+                    [
+                        (x, y)
+                        for x in range(EnvParams.map_height)
+                        for y in range(EnvParams.map_width)
+                        if sap_action[y, x] == 1
+                    ]
+                )
 
-            with col2:
-                if model is not None:
-                    torch_states = {
-                        "state": torch.tensor(state).unsqueeze(0).float(),
-                        "global_state": torch.tensor(global_state).unsqueeze(0).float(),
-                    }
-                    with torch.no_grad():
-                        output = model(torch_states)
-                        pred_own_action = to_np(output["own_policy"].argmax(dim=1).cpu().squeeze())
-                        pred_opp_action = to_np(output["opp_policy"].argmax(dim=1).cpu().squeeze())
-                        pred_state = to_np(output["state"].cpu().squeeze())
+            # with col2:
+            #     if model is not None:
+            #         torch_states = {
+            #             "state": torch.tensor(state).unsqueeze(0).float(),
+            #             "global_state": torch.tensor(global_state).unsqueeze(0).float(),
+            #         }
+            #         with torch.no_grad():
+            #             output = model(torch_states)
+            #             pred_own_action = to_np(output["own_policy"].argmax(dim=1).cpu().squeeze())
+            #             pred_opp_action = to_np(output["opp_policy"].argmax(dim=1).cpu().squeeze())
+            #             pred_state = to_np(output["state"].cpu().squeeze())
 
-                    visualize_pred_action(pred_own_action, title="Predict Own Action")
-                    visualize_pred_action(pred_opp_action, title="Predict Opp Action")
+            #         visualize_pred_action(pred_own_action, title="Predict Own Action")
+            #         visualize_pred_action(pred_opp_action, title="Predict Opp Action")
 
             with col3:
                 last_state = states[-1]
                 visualize_state(last_state, State, title="State")
                 visualize_state(hidden_state, HiddenState, title="Hidden State")
-                visualize_state(pred_state, HiddenState, title="Predict State")
+                # visualize_state(pred_state, HiddenState, title="Predict State")
     # h5_file.close()
 
 
