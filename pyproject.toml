@@ -24,7 +24,7 @@ dependencies = [
   "kagglehub>=0.3.3",
   "lightgbm>=4.5",
   "lightning>=2.3.3",
-  "luxai-s3>=0.1.1",
+  "luxai-s3>=0.2.1",
   "markupsafe==3", # 3.0.2だとpytorchのエラーが出る
   "mypy>=1.11.2",
   "nbformat>=5.10.4",
@@ -51,7 +51,7 @@ dependencies = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src", "luxai_s3"]
+packages = ["src"]
 
 [tool.ruff]
 extend-include = ["*.ipynb"]
@@ -59,6 +59,3 @@ extend-include = ["*.ipynb"]
 [tool.uv]
 extra-index-url = ["https://download.pytorch.org/whl/cu121"]
 index-strategy = "unsafe-best-match"
-
-[tool.uv.sources]
-luxai-s3 = { path = "Lux-Design-S3/src" }

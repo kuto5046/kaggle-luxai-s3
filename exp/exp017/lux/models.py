@@ -232,7 +232,9 @@ class LaxLitModel(LightningModule):
         state_loss = self.criterion3(outputs["state"].flatten(), batch["hidden_state"].flatten())
         global_state_loss = self.criterion3(outputs["global_state"].flatten(), batch["hidden_global_state"].flatten())
 
-        sap_loss = self.criterion4(outputs["sap"], batch["sap"])
+        sap_preds = one_hot_encoder(outputs["sap"].squeeze(1), n_classes=2)
+        sap_targets = one_hot_encoder(batch["sap"], n_classes=2)
+        sap_loss = self.criterion4(sap_preds, sap_targets)
         loss = (
             policy_loss * self.cfg.loss_weight_policy
             + state_loss * self.cfg.loss_weight_state
@@ -407,7 +409,7 @@ class DiceLoss(nn.Module):
         return loss
 
     def forward(self, inputs: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        # assert inputs.size() == target.size(), f"predict {inputs.size()} & target {target.size()} shape do not match"
+        assert inputs.size() == target.size(), f"predict {inputs.size()} & target {target.size()} shape do not match"
         class_wise_dice = []
         loss = 0.0
         for i in range(0, self.n_classes):
