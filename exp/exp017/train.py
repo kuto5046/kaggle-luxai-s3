@@ -45,8 +45,8 @@ class Config:
     weight_decay: float = 0.01
     warmup_step_rate: float = 0.1
     # model
-    res: bool = False
-    aug: bool = False
+    res: bool = True
+    aug: bool = True
     n_stack: int = 4
     # loss
     loss_weight_policy: float = 1.0

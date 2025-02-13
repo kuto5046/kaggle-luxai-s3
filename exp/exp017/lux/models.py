@@ -58,23 +58,23 @@ class LuxAugment:
         if random.random() < self.p:
             state = np.flip(state, axis=2).copy()
             hidden_state = np.flip(hidden_state, axis=1).copy()
-            action = np.flip(action, axis=0)
+            action = np.flip(action, axis=0).copy()
             action = self.switch_action(action, Action.UP, Action.DOWN)
-            sap = np.flip(sap, axis=0)
+            sap = np.flip(sap, axis=0).copy()
         # Flip horizontally →← (switch left(2) and right(4))
         if random.random() < self.p:
             state = np.flip(state, axis=3).copy()
             hidden_state = np.flip(hidden_state, axis=2).copy()
-            action = np.flip(action, axis=1)
+            action = np.flip(action, axis=1).copy()
             action = self.switch_action(action, Action.LEFT, Action.RIGHT)
-            sap = np.flip(sap, axis=1)
-        # Rotate 90 degrees ↑→ (right->up, up->left left->down down->right)
+            sap = np.flip(sap, axis=1).copy()
+        # # Rotate 90 degrees ↑→ (right->up, up->left left->down down->right)
         if random.random() < self.p:
             state = np.rot90(state, axes=(2, 3)).copy()
             hidden_state = np.rot90(hidden_state, axes=(1, 2)).copy()
-            action = np.rot90(action, axes=(0, 1))
+            action = np.rot90(action, axes=(0, 1)).copy()
             action = self.rotate_action(action)
-            sap = np.rot90(sap, axes=(0, 1))
+            sap = np.rot90(sap, axes=(0, 1)).copy()
 
         # TODO:
         # mapをランダムにずらす
@@ -205,7 +205,7 @@ class LaxLitModel(LightningModule):
         self.criterion1 = DiceLoss(n_classes=len(Action))
         self.criterion2 = nn.BCEWithLogitsLoss()
         self.criterion3 = nn.MSELoss()
-        self.criterion4 = DiceLoss(n_classes=2)
+        self.criterion4 = nn.BCEWithLogitsLoss()
 
         metrics = self.get_metrics()
         self.train_metrics = metrics.clone(postfix="/train")
@@ -232,9 +232,7 @@ class LaxLitModel(LightningModule):
         state_loss = self.criterion3(outputs["state"].flatten(), batch["hidden_state"].flatten())
         global_state_loss = self.criterion3(outputs["global_state"].flatten(), batch["hidden_global_state"].flatten())
 
-        sap_preds = one_hot_encoder(outputs["sap"].squeeze(1), n_classes=2)
-        sap_targets = one_hot_encoder(batch["sap"], n_classes=2)
-        sap_loss = self.criterion4(sap_preds, sap_targets)
+        sap_loss = self.criterion4(outputs["sap"].flatten(), batch["sap"].flatten())
         loss = (
             policy_loss * self.cfg.loss_weight_policy
             + state_loss * self.cfg.loss_weight_state
