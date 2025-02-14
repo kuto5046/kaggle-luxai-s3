@@ -92,11 +92,12 @@ class DataProcessor:
         episode_df = episode_df.filter(pl.col("SubmissionId").is_in(self.cfg.target_sub_ids))
         print(f"episode_df: {len(episode_df)}")
         # なぜかepisodeに重複があるため除去
+        # episode_df = episode_df.sample(n=1000, seed=self.cfg.seed)
         episode_df = episode_df.unique("EpisodeId")
         print(f"unique episode_df: {len(episode_df)}")
         if self.cfg.debug:
             # episode_df = episode_df.sample(n=1, seed=self.cfg.seed)
-            episode_df = episode_df.filter(pl.col("EpisodeId") == 66451776)
+            episode_df = episode_df.filter(pl.col("EpisodeId") == 66393376)
         return episode_df
 
     def _process_episode(self, row) -> tuple[str, int, int]:

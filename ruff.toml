@@ -49,7 +49,8 @@ ignore = [
 	"PLR0913",  # allow too many arguments
 	"F841", # allow unused variable
 	"PLR0912",
-	"PLR0915"
+	"PLR0915",
+	"RUF015",
 ]
 
 [lint.flake8-annotations]

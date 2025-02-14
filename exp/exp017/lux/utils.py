@@ -5,7 +5,7 @@ import flax
 import numpy as np
 import torch
 
-from .params import EnvParams
+from .params import EnvParams, env_params_ranges
 
 
 class State(IntEnum):
@@ -37,7 +37,7 @@ class GlobalState(IntEnum):
 
 
 class HiddenState(IntEnum):
-    OWN_UNIT_COUNT = 0
+    # OWN_UNIT_COUNT = 0
     OPP_UNIT_COUNT = auto()
     POINTS = auto()
     ENERGY = auto()
@@ -64,7 +64,7 @@ class Action(IntEnum):
 
 
 class TileType(IntEnum):
-    UKNOWN = -1
+    UNKNOWN = -1
     EMPTY = 0
     NEBULA = 1
     ASTEROID = 2
@@ -86,6 +86,10 @@ class EpisodeStore:
         self._init_high_prob = 0.5  # 可能性があるところに設定されるpoint発生確率
         self._relic_map = np.zeros((EnvParams.map_height, EnvParams.map_width), dtype=np.float32)
         self._point_map = np.ones((EnvParams.map_height, EnvParams.map_width), dtype=np.float32) * self._init_low_prob
+        self._tile_type_map = np.ones((EnvParams.map_height, EnvParams.map_width), dtype=np.float32) * TileType.UNKNOWN
+        self._nebula_tile_drift_speed_candidates = set(env_params_ranges["nebula_tile_drift_speed"])
+        self.candidate_to_multiple = {0.15: 7, 0.1: 10, 0.05: 20, 0.025: 40}
+
         self._visit_count = np.zeros(
             (EnvParams.map_height, EnvParams.map_width), dtype=np.float32
         )  # 訪問回数を正規化して記録
@@ -138,7 +142,12 @@ class EpisodeStore:
     def visit_count(self) -> np.ndarray:
         return self._visit_count.copy()
 
+    @property
+    def tile_type_map(self) -> np.ndarray:
+        return self._tile_type_map.copy()
+
     def update(self, obs: dict[str, Any]) -> None:
+        self._update_tile_type_map(obs)
         self._update_relic_map(obs)
         self._update_visit_count(obs)
         self._update_points(obs)
@@ -146,6 +155,109 @@ class EpisodeStore:
 
     def _is_finished_relic_search(self) -> bool:
         return self._relic_map.sum() == EnvParams.max_relic_nodes
+
+    def _filter_tile_speed_candidates(self, new_tile_type_map: np.ndarray, steps: int) -> None:
+        """
+        記録済みの前のステップ時点でのマップと新しいマップを比較してマップの移動速度を特定する
+        """
+
+        def get_valid_mask(new_tile_type_map: np.ndarray, old_tile_type_map: np.ndarray) -> np.ndarray:
+            """
+            新しいマップと前回のマップの、両方が UNKNOWN でないセルのマスクを作成
+            """
+            return (new_tile_type_map != TileType.UNKNOWN) & (old_tile_type_map != TileType.UNKNOWN)
+
+        def get_mujun_mask(
+            new_tile_type_map: np.ndarray, old_tile_type_map: np.ndarray
+        ) -> tuple[np.ndarray, np.ndarray]:
+            """
+            2つのマップがUNKNOWNでないセルのみを比較して矛盾している箇所を抽出
+            """
+            # 新しいマップと前回のマップの、両方が UNKNOWN でないセルのマスクを作成
+            valid_mask = get_valid_mask(new_tile_type_map, old_tile_type_map)
+            # その中で、値が矛盾している箇所を抽出
+            diff_mask = valid_mask & (new_tile_type_map != old_tile_type_map)
+            return diff_mask, valid_mask
+
+        def get_roll_mujun_count(new_tile_type_map: np.ndarray, old_tile_type_map: np.ndarray, sign: int) -> int:
+            rolled_map = np.roll(old_tile_type_map, shift=(1 * sign, -1 * sign), axis=(0, 1))
+            mujun_mask, _ = get_mujun_mask(new_tile_type_map, rolled_map)
+            return mujun_mask.sum()
+
+        mujun_mask, valid_mask = get_mujun_mask(new_tile_type_map, self._tile_type_map)
+        valid_count = valid_mask.sum()
+        mujun_count = mujun_mask.sum()
+
+        # 内部マップを正方向 (1, -1) および負方向 (-1, 1) に roll した２種類のマップを作成
+        pos_mujun_count = get_roll_mujun_count(new_tile_type_map, self._tile_type_map, sign=1)
+        neg_mujun_count = get_roll_mujun_count(new_tile_type_map, self._tile_type_map, sign=-1)
+
+        # 矛盾がない場合でも移動している可能性がある(移動したが移動先のセルも同じになる場合)
+        # TODO: すでに除外してる候補のstepの場合この処理は不要なのでスキップしてもいいかも。逆に誤って除外してる場合に追加するてもある？ミスっててもいい感じになるようにしたい
+        if mujun_count == 0:
+            # 移動させた場合に矛盾が生じるなら移動していないと考える
+            if pos_mujun_count > 0 and neg_mujun_count > 0:
+                # 移動していないなら候補を絞れる(steps=10で移動していないなら10は除外できる)
+                candidates = {
+                    cand
+                    for cand in self._nebula_tile_drift_speed_candidates
+                    if (steps - 1) % self.candidate_to_multiple[abs(cand)] != 0
+                }
+                self._nebula_tile_drift_speed_candidates = candidates
+                return
+            # 片方に矛盾がない場合、移動している可能性もある(観測セル数が少ない場合こういうことが起こる)
+            else:
+                # この場合は新しい観測で上書きするのが安全な気がする
+                # self._tile_type_map = new_tile_type_map
+                return
+        # 矛盾が発生する場合、移動しているはずなのでステップ数がどの倍数かに基づいて候補を絞り込む
+        else:
+            candidates = [
+                cand
+                for cand in self._nebula_tile_drift_speed_candidates
+                if (steps - 1) % self.candidate_to_multiple[abs(cand)] == 0
+            ]
+
+            if len(candidates) == 0:
+                raise ValueError(
+                    f"矛盾が発生しているが条件を満たす候補が無い: {self.episode_id=} {steps=} {self._nebula_tile_drift_speed_candidates=}"
+                )
+
+            if self.validation:
+                # どちらかは一致しているはず
+                assert pos_mujun_count == 0 or neg_mujun_count == 0
+                # 両方一致はないはず(ここがミスる場合は緩和した方がいい)
+                assert pos_mujun_count + neg_mujun_count > 0
+
+            # 0の場合は正方向を選択
+            sign = 1 if pos_mujun_count == 0 else -1
+
+            # 有効な候補の中から、chosen_sign に合致する drift_speed のみを残す
+            new_candidates = {cand for cand in candidates if np.sign(cand) == sign}
+            # 候補リストを更新
+            self._nebula_tile_drift_speed_candidates = new_candidates
+            # 移動させる
+            self._tile_type_map = np.roll(self._tile_type_map, shift=(1 * sign, -1 * sign), axis=(0, 1))
+
+    def _update_tile_type_map(self, obs: dict[str, Any]) -> None:
+        # 新しいタイルタイプマップ（内部規則に合わせ転置済み）
+        new_tile_type_map = np.array(obs["map_features"]["tile_type"]).T
+
+        # speed候補を絞り込む(移動の可能性のあるstepでのみ行う)
+        if (obs["steps"] - 1) % 7 == 0 or (obs["steps"] - 1) % 10 == 0:
+            if len(self._nebula_tile_drift_speed_candidates) > 1:
+                self._filter_tile_speed_candidates(new_tile_type_map, obs["steps"])
+            elif len(self._nebula_tile_drift_speed_candidates) == 1:
+                # すでに drift_speed が確定している場合、移動が発生するタイミングでmapをrollする
+                # これだと確定していない場合に移動が発生する可能性もあるがそれが無視されている
+                speed = list(self._nebula_tile_drift_speed_candidates)[0]
+                # 切り替わるタイミングであればマップを更新
+                if (obs["steps"] - 1) % self.candidate_to_multiple[abs(speed)] == 0:
+                    sign = int(np.sign(speed))
+                    self._tile_type_map = np.roll(self._tile_type_map, shift=(1 * sign, -1 * sign), axis=(0, 1))
+
+        # 観測値を上書き(未知の場合はそのままでそれ以外は観測値で上書き)
+        self._tile_type_map = np.where(new_tile_type_map == TileType.UNKNOWN, self._tile_type_map, new_tile_type_map)
 
     def _update_relic_map(self, obs: dict[str, Any]) -> None:
         # # relicの情報を記録する関数
@@ -188,7 +300,6 @@ class EpisodeStore:
         )
 
     def _update_visit_count(self, obs: dict[str, Any]) -> None:
-        # TODO: gtと一致しないため正確でない
         # 自チームのunitの情報を記録する
         own_unit_positions = np.array(obs["units"]["position"][self._target_team_id])
         for unit_id in range(EnvParams.max_units):
@@ -419,7 +530,8 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
 
     # state
     # map state
-    state_map[State.TILE_TYPE] = np.array(obs["map_features"]["tile_type"]).T
+    # state_map[State.TILE_TYPE] = np.array(obs["map_features"]["tile_type"]).T
+    state_map[State.TILE_TYPE] = episode_store.tile_type_map
     state_map[State.TILE_TYPE] = mirroring(state_map[State.TILE_TYPE], null_value=-1)
     # energy nodesの位置は未知(tileのenergyはvisionで観測可能) energy系は正規化の分母をinit_unit_energyにする
     state_map[State.ENERGY] = np.array(obs["map_features"]["energy"]).T / EnvParams.init_unit_energy
@@ -439,8 +551,15 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
         unit_masks = np.array(obs["units_mask"][team_id])  # (max_units, )
         if team_id != target_team_id:
             # sensor_maskが1(見える範囲)の場合は0にする。それ以外は0.5
-            state_map[State.OPP_UNIT_COUNT] = 0.5 / EnvParams.max_units
+            state_map[State.OPP_UNIT_COUNT] = -1
             state_map[State.OPP_UNIT_COUNT] *= 1 - state_map[State.SENSOR_MASK]
+            # アステロイドのところは存在しないので0
+            state_map[State.OPP_UNIT_COUNT] *= 1 - (state_map[State.TILE_TYPE] == TileType.ASTEROID)
+
+            state_map[State.OPP_UNIT_ENERGY] = -1
+            state_map[State.OPP_UNIT_ENERGY] *= 1 - state_map[State.SENSOR_MASK]
+            # アステロイドのところは存在しないので0
+            state_map[State.OPP_UNIT_ENERGY] *= 1 - (state_map[State.TILE_TYPE] == TileType.ASTEROID)
 
         # available_unit_ids = np.where(unit_masks)[0]
         for unit_id in range(EnvParams.max_units):
