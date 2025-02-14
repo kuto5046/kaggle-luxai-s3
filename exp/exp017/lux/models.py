@@ -205,7 +205,8 @@ class LaxLitModel(LightningModule):
         self.criterion1 = DiceLoss(n_classes=len(Action))
         self.criterion2 = nn.BCEWithLogitsLoss()
         self.criterion3 = nn.MSELoss()
-        self.criterion4 = nn.BCEWithLogitsLoss()
+        # self.criterion4 = nn.BCEWithLogitsLoss()
+        self.criterion4 = FocalLoss()
 
         metrics = self.get_metrics()
         self.train_metrics = metrics.clone(postfix="/train")
@@ -598,3 +599,17 @@ def save_model(model, output_dir: Path, latest: bool = False):
         torch.save(model.state_dict(), output_dir / "latest_model.pth")
     else:
         torch.save(model.state_dict(), output_dir / "best_model.pth")
+
+
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=0.25, gamma=2):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.bce = nn.BCEWithLogitsLoss(reduction="none")
+
+    def forward(self, logits, targets):
+        bce_loss = self.bce(logits, targets)
+        pt = torch.exp(-bce_loss)  # 確率の補正
+        focal_loss = self.alpha * (1 - pt) ** self.gamma * bce_loss
+        return focal_loss.mean()

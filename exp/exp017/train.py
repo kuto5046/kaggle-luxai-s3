@@ -23,7 +23,7 @@ LOGGER = logging.getLogger(__name__)
 @dataclass
 class Config:
     exp_name: str = Path(__file__).parent.name
-    notes: str = "map tile typeを推定するようにした"
+    notes: str = "sapをfocal lossで学習するようにした"
     seed: int = 2025
     debug: bool = False
     n_splits: int = 5
