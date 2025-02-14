@@ -38,7 +38,7 @@ class GlobalState(IntEnum):
 
 class HiddenState(IntEnum):
     # OWN_UNIT_COUNT = 0
-    OPP_UNIT_COUNT = auto()
+    OPP_UNIT_COUNT = 0
     POINTS = auto()
     ENERGY = auto()
 
@@ -408,7 +408,8 @@ def extract_hidden_state(gt_obs: dict[str, Any], target_team_id: int) -> np.ndar
             x, y = unit_positions[unit_id]
 
             if team_id == target_team_id:
-                state_map[HiddenState.OWN_UNIT_COUNT, y, x] += 1 / EnvParams.max_units
+                pass
+                # state_map[HiddenState.OWN_UNIT_COUNT, y, x] += 1 / EnvParams.max_units
             else:
                 state_map[HiddenState.OPP_UNIT_COUNT, y, x] += 1 / EnvParams.max_units
 
