@@ -69,10 +69,10 @@ def valid_episode(json_load: dict[str, Any], target_team_name: str) -> bool:
         if r is None:
             print(f"rewards include None -> {json_load['rewards']}")
             return False
-    # win_idx = np.argmax([r or 0 for r in json_load["rewards"]])  # win or tie
-    # win_team = json_load["info"]["TeamNames"][win_idx]
-    # return win_team == target_team_name
-    return True
+    win_idx = np.argmax([r or 0 for r in json_load["rewards"]])  # win or tie
+    win_team = json_load["info"]["TeamNames"][win_idx]
+    return win_team == target_team_name
+    # return True
 
 
 class DataProcessor:
@@ -97,7 +97,7 @@ class DataProcessor:
         print(f"unique episode_df: {len(episode_df)}")
         if self.cfg.debug:
             # episode_df = episode_df.sample(n=1, seed=self.cfg.seed)
-            episode_df = episode_df.filter(pl.col("EpisodeId") == 66393376)
+            episode_df = episode_df.filter(pl.col("EpisodeId") == 67293512)
         return episode_df
 
     def _process_episode(self, row) -> tuple[str, int, int]:
