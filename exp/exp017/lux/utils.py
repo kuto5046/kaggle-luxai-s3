@@ -22,6 +22,7 @@ class State(IntEnum):
     OPP_UNIT_ENERGY = auto()
     # OPP_UNIT_MASK = auto()
     VISIT_COUNT = auto()
+    SAP_AVAILABLE_AREA = auto()  # sapを使用できるエリア
 
 
 class GlobalState(IntEnum):
@@ -49,7 +50,7 @@ class HiddenGlobalState(IntEnum):
     NEBULA_TILE_ENERGY_REDUCTION = auto()
     UNIT_SAP_DROPOFF_FACTOR = auto()
     UNIT_ENERGY_VOID_FACTOR = auto()
-    NEBULA_TILE_DRIFT_SPEED = auto()
+    # NEBULA_TILE_DRIFT_SPEED = auto() . # 推定可能なので不要
     ENERGY_NODE_DRIFT_SPEED = auto()
     ENERGY_NODE_DRIFT_MAGNITUDE = auto()
 
@@ -104,6 +105,7 @@ class EpisodeStore:
 
         self.unit_move_cost = env_cfg["unit_move_cost"]
         self.unit_sap_cost = env_cfg["unit_sap_cost"]
+        self.unit_sap_range = env_cfg["unit_sap_range"]
         self.reset()
 
     def reset(self) -> None:
@@ -574,6 +576,14 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
                 # 重複はそんなに発生しないだろうということで正規化はしない
                 state_map[State.OWN_UNIT_COUNT, y, x] += 1 / EnvParams.max_units
                 state_map[State.OWN_UNIT_ENERGY, y, x] += unit_energy / EnvParams.init_unit_energy
+                # sapを使用できるエリアを1にする
+                for dx in range(-EnvParams.unit_sap_range, EnvParams.unit_sap_range + 1):
+                    for dy in range(-EnvParams.unit_sap_range, EnvParams.unit_sap_range + 1):
+                        nx, ny = x + dx, y + dy
+                        if in_map((nx, ny)) and can_sap(
+                            nx, ny, unit_energy, episode_store.unit_sap_cost, episode_store.tile_type_map
+                        ):
+                            state_map[State.SAP_AVAILABLE_AREA, ny, nx] = 1
                 # state_map[State.OWN_UNIT_MASK, y, x] = unit_mask
             else:
                 state_map[State.OPP_UNIT_COUNT, y, x] += 1 / EnvParams.max_units
@@ -708,5 +718,5 @@ def can_move(pos: tuple[int, int], energy: int, dir: int, tile_type_map: np.ndar
     return True
 
 
-def can_sap(energy: int, unit_sap_cost: int):
-    return energy >= unit_sap_cost
+def can_sap(x: int, y: int, energy: int, unit_sap_cost: int, tile_type_map: np.ndarray):
+    return energy >= unit_sap_cost and tile_type_map[y, x] != TileType.ASTEROID
