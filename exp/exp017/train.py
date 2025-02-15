@@ -23,7 +23,7 @@ LOGGER = logging.getLogger(__name__)
 @dataclass
 class Config:
     exp_name: str = Path(__file__).parent.name
-    notes: str = "sapをfocal lossで学習するようにした"
+    notes: str = "policyをmasked bce / sapをfocal lossで学習するようにした"
     seed: int = 2025
     debug: bool = False
     n_splits: int = 5
@@ -35,7 +35,7 @@ class Config:
 
     # trainer
     epoch: int = 30
-    limit_train_batches: float = 1.0
+    limit_train_batches: float = 0.1
     limit_val_batches: float = 1.0
     use_amp: bool = False
     batch_size: int = 1024

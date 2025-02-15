@@ -202,10 +202,10 @@ class LaxLitModel(LightningModule):
             n_stack=cfg.n_stack,
             res=cfg.res,
         )
-        self.criterion1 = DiceLoss(n_classes=len(Action))
+        # self.criterion1 = DiceLoss(n_classes=len(Action))
+        self.criterion1 = MaskedBCEWithLogitsLoss()
         self.criterion2 = nn.BCEWithLogitsLoss()
         self.criterion3 = nn.MSELoss()
-        # self.criterion4 = nn.BCEWithLogitsLoss()
         self.criterion4 = FocalLoss()
 
         metrics = self.get_metrics()
@@ -386,36 +386,6 @@ def one_hot_encoder(input_tensor: torch.Tensor, n_classes: int) -> torch.Tensor:
         tensor_list.append(temp_prob.unsqueeze(1))
     output_tensor = torch.cat(tensor_list, dim=1)
     return output_tensor.float()
-
-
-class DiceLoss(nn.Module):
-    def __init__(self, n_classes: int, weights: None | list[float] = None) -> None:
-        super().__init__()
-        self.n_classes = n_classes
-        if weights is None:
-            self.weights = torch.ones(n_classes)
-        else:
-            self.weights = torch.tensor(weights)
-
-    def _dice_loss(self, score: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        target = target.float()
-        smooth = 1e-5
-        intersect = torch.sum(score * target)
-        y_sum = torch.sum(target * target)
-        z_sum = torch.sum(score * score)
-        loss = (2 * intersect + smooth) / (z_sum + y_sum + smooth)
-        loss = 1 - loss
-        return loss
-
-    def forward(self, inputs: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        assert inputs.size() == target.size(), f"predict {inputs.size()} & target {target.size()} shape do not match"
-        class_wise_dice = []
-        loss = 0.0
-        for i in range(0, self.n_classes):
-            dice = self._dice_loss(inputs[:, i], target[:, i])
-            class_wise_dice.append(1.0 - dice.item())
-            loss += dice * self.weights[i]  # Apply the class weight
-        return loss / torch.sum(self.weights)
 
 
 class DoubleConv(nn.Module):
@@ -599,6 +569,56 @@ def save_model(model, output_dir: Path, latest: bool = False):
         torch.save(model.state_dict(), output_dir / "latest_model.pth")
     else:
         torch.save(model.state_dict(), output_dir / "best_model.pth")
+
+
+class MaskedBCEWithLogitsLoss(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.bce = nn.BCEWithLogitsLoss(reduction="none")
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        masked_loss = self.bce(logits, targets) * mask
+        return masked_loss.sum() / mask.sum()
+
+
+class DiceLoss(nn.Module):
+    def __init__(self, n_classes: int, weights: None | list[float] = None) -> None:
+        super().__init__()
+        self.n_classes = n_classes
+        if weights is None:
+            self.weights = torch.ones(n_classes)
+        else:
+            self.weights = torch.tensor(weights)
+
+    def _dice_loss(self, score: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        target = target.float()
+        smooth = 1e-5
+        intersect = torch.sum(score * target)
+        y_sum = torch.sum(target * target)
+        z_sum = torch.sum(score * score)
+        loss = (2 * intersect + smooth) / (z_sum + y_sum + smooth)
+        loss = 1 - loss
+        return loss
+
+    def forward(self, inputs: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        # If binary classification, the output tensors might have a single channel.
+        # In that case, we squeeze the channel dimension and calculate the binary dice loss.
+        if self.n_classes == 1 or (inputs.ndim > 1 and inputs.size(1) == 1):
+            # inputs = inputs.squeeze(1)
+            # Squeeze the target too if needed. If the target has an extra channel dimension, remove it.
+            # target = target.squeeze(1) if (target.ndim > 1 and target.size(1) == 1) else target
+            dice = self._dice_loss(inputs, target)
+            # If weights are provided, apply the weight of the single channel.
+            return dice * self.weights[0] / torch.sum(self.weights)
+
+        # assert inputs.size() == target.size(), f"predict {inputs.size()} & target {target.size()} shape do not match"
+        class_wise_dice = []
+        loss = 0.0
+        for i in range(0, self.n_classes):
+            dice = self._dice_loss(inputs[:, i], target[:, i])
+            class_wise_dice.append(1.0 - dice.item())
+            loss += dice * self.weights[i]  # Apply the class weight
+        return loss / torch.sum(self.weights)
 
 
 class FocalLoss(nn.Module):
