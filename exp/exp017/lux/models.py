@@ -206,7 +206,7 @@ class LaxLitModel(LightningModule):
         self.criterion1 = MaskedBCEWithLogitsLoss()
         self.criterion2 = nn.BCEWithLogitsLoss()
         self.criterion3 = nn.MSELoss()
-        self.criterion4 = FocalLoss()
+        self.criterion4 = MaskedFocalLoss()
 
         metrics = self.get_metrics()
         self.train_metrics = metrics.clone(postfix="/train")
@@ -234,7 +234,8 @@ class LaxLitModel(LightningModule):
         state_loss = self.criterion3(outputs["state"].flatten(), batch["hidden_state"].flatten())
         global_state_loss = self.criterion3(outputs["global_state"].flatten(), batch["hidden_global_state"].flatten())
 
-        sap_loss = self.criterion4(outputs["sap"].flatten(), batch["sap"].flatten())
+        sap_available_mask = (batch["state"][:, -1, State.SAP_AVAILABLE_AREA] > 0).unsqueeze(1)  # (batch_size, 1, w, h)
+        sap_loss = self.criterion4(outputs["sap"].flatten(), batch["sap"].flatten(), sap_available_mask)
         loss = (
             policy_loss * self.cfg.loss_weight_policy
             + state_loss * self.cfg.loss_weight_state
@@ -622,15 +623,16 @@ class DiceLoss(nn.Module):
         return loss / torch.sum(self.weights)
 
 
-class FocalLoss(nn.Module):
+class MaskedFocalLoss(nn.Module):
     def __init__(self, alpha=0.25, gamma=2):
         super().__init__()
         self.alpha = alpha
         self.gamma = gamma
         self.bce = nn.BCEWithLogitsLoss(reduction="none")
 
-    def forward(self, logits, targets):
+    def forward(self, logits, targets, mask):
         bce_loss = self.bce(logits, targets)
         pt = torch.exp(-bce_loss)  # 確率の補正
         focal_loss = self.alpha * (1 - pt) ** self.gamma * bce_loss
-        return focal_loss.mean()
+        masked_focal_loss = focal_loss * mask
+        return masked_focal_loss.sum() / mask.sum()
