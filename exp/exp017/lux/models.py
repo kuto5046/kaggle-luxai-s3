@@ -198,7 +198,6 @@ class LaxLitModel(LightningModule):
             global_state_space_size=len(GlobalState),
             action_space_size=len(Action),
             hidden_state_space_size=len(HiddenState),
-            hidden_global_state_space_size=len(HiddenGlobalState),
             n_stack=cfg.n_stack,
             res=cfg.res,
         )
@@ -234,14 +233,14 @@ class LaxLitModel(LightningModule):
         state_loss = self.criterion3(outputs["state"].flatten(), batch["hidden_state"].flatten())
         global_state_loss = self.criterion3(outputs["global_state"].flatten(), batch["hidden_global_state"].flatten())
 
-        sap_available_mask = (batch["state"][:, -1, State.SAP_AVAILABLE_AREA] > 0).unsqueeze(1)  # (batch_size, 1, w, h)
-        sap_loss = self.criterion4(outputs["sap"].flatten(), batch["sap"].flatten(), sap_available_mask)
+        # sap_available_mask = (batch["state"][:, -1, State.SAP_AVAILABLE_AREA] > 0)  # (batch_size, w, h)
+        # sap_loss = self.criterion4(outputs["sap"].squeeze(1), batch["sap"], sap_available_mask)
         loss = (
             policy_loss * self.cfg.loss_weight_policy
             + state_loss * self.cfg.loss_weight_state
             # + value_loss * self.cfg.loss_weight_value
             + global_state_loss * self.cfg.loss_weight_global_state
-            + sap_loss * self.cfg.loss_weight_sap
+            # + sap_loss * self.cfg.loss_weight_sap
         )
 
         self.log(
@@ -252,14 +251,14 @@ class LaxLitModel(LightningModule):
             prog_bar=False,
             logger=True,
         )
-        self.log(
-            f"SapLoss/{mode}",
-            sap_loss,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=False,
-            logger=True,
-        )
+        # self.log(
+        #     f"SapLoss/{mode}",
+        #     sap_loss,
+        #     on_step=False,
+        #     on_epoch=True,
+        #     prog_bar=False,
+        #     logger=True,
+        # )
         # self.log(
         #     f"ValueLoss/{mode}",
         #     value_loss,
@@ -490,7 +489,6 @@ class LuxUNetModel(nn.Module):
         global_state_space_size: int,
         action_space_size: int,
         hidden_state_space_size: int,
-        hidden_global_state_space_size: int,
         n_stack: int,
         bilinear: bool = True,
         res: bool = False,
@@ -509,7 +507,7 @@ class LuxUNetModel(nn.Module):
         self.up2 = Up(256, 128 // factor, bilinear)
         self.up3 = Up(128, 64, bilinear)
         self.policy_net = OutConv(64 * n_stack, action_space_size)
-        self.sap_net = OutConv(64 * n_stack, 1)
+        # self.sap_net = OutConv(64 * n_stack, 1)
         self.state_net = OutConv(64 * n_stack, hidden_state_space_size)
         self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
         # self.value_net = nn.Sequential(
@@ -554,12 +552,12 @@ class LuxUNetModel(nn.Module):
 
         x = x.view(_n, -1, _x, _y)
         policy_logits = self.policy_net(x)
-        sap_logits = self.sap_net(x)
+        # sap_logits = self.sap_net(x)
         state_logits = self.state_net(x)
 
         return {
             "policy": policy_logits,
-            "sap": sap_logits,
+            # "sap": sap_logits,
             "state": state_logits,
             "global_state": global_state_logits,
             # "value": value_logits,

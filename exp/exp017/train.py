@@ -23,7 +23,7 @@ LOGGER = logging.getLogger(__name__)
 @dataclass
 class Config:
     exp_name: str = Path(__file__).parent.name
-    notes: str = "policyをmasked bce / sapをfocal lossで学習するようにした"
+    notes: str = "policyをmasked bce / sapをmasked focal lossで学習するようにした"
     seed: int = 2025
     debug: bool = False
     n_splits: int = 5

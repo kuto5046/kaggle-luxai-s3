@@ -6,12 +6,16 @@ import torch
 import polars as pl
 import streamlit as st
 import plotly.graph_objects as go
-from lux.utils import State, Action, GlobalState, HiddenState, HiddenGlobalState
+from lux.utils import State, Action, GlobalState, HiddenState, HiddenGlobalState, to_np
 from lux.models import LuxUNetModel
 from lux.params import EnvParams
 
 # ページ設定
 st.set_page_config(layout="wide")
+
+
+def sigmoid(x):
+    return 1 / (1 + np.exp(-x))
 
 
 # データ表示
@@ -49,6 +53,7 @@ def visualize_action(action, title="Action"):
 def load_model(exp_name: str, n_stack: int) -> LuxUNetModel | None:
     checkpoint_path = Path(f"/home/user/work/exp/{exp_name}/output/best_model.ckpt")
     if not checkpoint_path.exists():
+        st.write(f"Checkpoint file not found: {checkpoint_path}")
         return None
 
     model = LuxUNetModel(
@@ -85,6 +90,7 @@ def main():
 
     n_stack = 4
     model = load_model(exp_name, n_stack=n_stack)
+    # model = None
     if episode_id:
         link = f"https://s3vis.lux-ai.org/#/visualizer?input={episode_id}"
         st.info(f"[Lux AI Visualizer]({link})")
@@ -111,45 +117,44 @@ def main():
                 states.append(state)
                 global_states.append(global_state)
             state = np.stack(states, axis=0)
+            last_state = states[-1]
             global_state = np.stack(global_states, axis=0)
             hidden_state = np.array(h5_file[episode_id]["hidden_states"][str(step_idx)])
             col1, col2, col3 = st.columns([1, 1, 4])
             with col1:
-                visualize_action(own_action, title="Own Action")
-                st.subheader("SAP Action")
+                visualize_action(own_action, title="Target Action")
+                st.subheader("Target SAP Action")
                 # ヒートマップ表示 sequentialではないdeiscreteな色を使う
                 fig = go.Figure(data=go.Heatmap(z=sap_action, zmax=1, zmin=0, colorscale="reds"))
                 fig.update_layout(width=400, height=400)
                 st.plotly_chart(fig, key="SAP Action")
-                st.write(
-                    [
-                        (x, y)
-                        for x in range(EnvParams.map_height)
-                        for y in range(EnvParams.map_width)
-                        if sap_action[y, x] == 1
-                    ]
-                )
 
-            # with col2:
-            #     if model is not None:
-            #         torch_states = {
-            #             "state": torch.tensor(state).unsqueeze(0).float(),
-            #             "global_state": torch.tensor(global_state).unsqueeze(0).float(),
-            #         }
-            #         with torch.no_grad():
-            #             output = model(torch_states)
-            #             pred_own_action = to_np(output["own_policy"].argmax(dim=1).cpu().squeeze())
-            #             pred_opp_action = to_np(output["opp_policy"].argmax(dim=1).cpu().squeeze())
-            #             pred_state = to_np(output["state"].cpu().squeeze())
+            with col2:
+                if model is not None:
+                    torch_states = {
+                        "state": torch.tensor(state).unsqueeze(0).float(),
+                        "global_state": torch.tensor(global_state).unsqueeze(0).float(),
+                    }
+                    with torch.no_grad():
+                        output = model(torch_states)
+                        pred_own_action = to_np(output["policy"].argmax(dim=1).cpu().squeeze())
+                        pred_sap_action = sigmoid(to_np(output["sap"].cpu().squeeze()))
+                        pred_state = to_np(output["state"].cpu().squeeze())
 
-            #         visualize_pred_action(pred_own_action, title="Predict Own Action")
-            #         visualize_pred_action(pred_opp_action, title="Predict Opp Action")
+                    pred_own_action *= last_state[State.OWN_UNIT_COUNT] > 0
+                    pred_sap_action *= last_state[State.SAP_AVAILABLE_AREA] > 0
+                    visualize_pred_action(pred_own_action, title="Predict Action")
+                    st.subheader("Predict SAP Action")
+                    # ヒートマップ表示 sequentialではないdeiscreteな色を使う
+                    fig = go.Figure(data=go.Heatmap(z=pred_sap_action, zmax=1, zmin=0, colorscale="blues"))
+                    fig.update_layout(width=400, height=400)
+                    st.plotly_chart(fig, key="Predict SAP Action")
 
             with col3:
-                last_state = states[-1]
                 visualize_state(last_state, State, title="State")
                 visualize_state(hidden_state, HiddenState, title="Hidden State")
-                # visualize_state(pred_state, HiddenState, title="Predict State")
+                if model is not None:
+                    visualize_state(pred_state, HiddenState, title="Predict State")
     # h5_file.close()
 
 

@@ -10,6 +10,7 @@ from .params import EnvParams, env_params_ranges
 
 class State(IntEnum):
     TILE_TYPE = 0  # 0スタート
+    NEXT_TILE_TYPE = auto()
     ENERGY = auto()
     SENSOR_MASK = auto()
     RELICS = auto()
@@ -88,6 +89,9 @@ class EpisodeStore:
         self._relic_map = np.zeros((EnvParams.map_height, EnvParams.map_width), dtype=np.float32)
         self._point_map = np.ones((EnvParams.map_height, EnvParams.map_width), dtype=np.float32) * self._init_low_prob
         self._tile_type_map = np.ones((EnvParams.map_height, EnvParams.map_width), dtype=np.float32) * TileType.UNKNOWN
+        self._next_tile_type_map = (
+            np.ones((EnvParams.map_height, EnvParams.map_width), dtype=np.float32) * TileType.UNKNOWN
+        )
         self._nebula_tile_drift_speed_candidates = set(env_params_ranges["nebula_tile_drift_speed"])
         self.candidate_to_multiple = {0.15: 7, 0.1: 10, 0.05: 20, 0.025: 40}
 
@@ -147,6 +151,10 @@ class EpisodeStore:
     @property
     def tile_type_map(self) -> np.ndarray:
         return self._tile_type_map.copy()
+
+    @property
+    def next_tile_type_map(self) -> np.ndarray:
+        return self._next_tile_type_map.copy()
 
     def update(self, obs: dict[str, Any]) -> None:
         self._update_tile_type_map(obs)
@@ -260,6 +268,18 @@ class EpisodeStore:
 
         # 観測値を上書き(未知の場合はそのままでそれ以外は観測値で上書き)
         self._tile_type_map = np.where(new_tile_type_map == TileType.UNKNOWN, self._tile_type_map, new_tile_type_map)
+        if len(self._nebula_tile_drift_speed_candidates) == 1:
+            speed = list(self._nebula_tile_drift_speed_candidates)[0]
+            next_step = obs["steps"]
+            # 次のステップで移動する場合はマップを更新
+            if next_step % self.candidate_to_multiple[abs(speed)] == 0:
+                sign = int(np.sign(speed))
+                self._next_tile_type_map = np.roll(self._tile_type_map, shift=(1 * sign, -1 * sign), axis=(0, 1))
+            else:
+                self._next_tile_type_map = self._tile_type_map.copy()
+        else:
+            # 絞れていない場合はそのまま
+            self._next_tile_type_map = self._tile_type_map.copy()
 
     def _update_relic_map(self, obs: dict[str, Any]) -> None:
         # # relicの情報を記録する関数
@@ -536,6 +556,8 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
     # state_map[State.TILE_TYPE] = np.array(obs["map_features"]["tile_type"]).T
     state_map[State.TILE_TYPE] = episode_store.tile_type_map
     state_map[State.TILE_TYPE] = mirroring(state_map[State.TILE_TYPE], null_value=-1)
+    state_map[State.NEXT_TILE_TYPE] = episode_store.next_tile_type_map
+    state_map[State.NEXT_TILE_TYPE] = mirroring(state_map[State.NEXT_TILE_TYPE], null_value=-1)
     # energy nodesの位置は未知(tileのenergyはvisionで観測可能) energy系は正規化の分母をinit_unit_energyにする
     state_map[State.ENERGY] = np.array(obs["map_features"]["energy"]).T / EnvParams.init_unit_energy
     state_map[State.ENERGY] = mirroring(state_map[State.ENERGY], null_value=-0.1)
