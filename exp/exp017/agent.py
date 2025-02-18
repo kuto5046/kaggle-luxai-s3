@@ -122,7 +122,7 @@ class Agent:
         unit_positions = np.array(obs["units"]["position"][self.team_id])  # shape (max_units, 2)
         available_unit_ids = np.where(unit_mask)[0]
 
-        opp_unit_positions = np.array([pos for pos in obs["units"]["position"][self.opp_team_id] if pos[0] != -1])
+        opp_unit_positions = [tuple(pos) for pos in obs["units"]["position"][self.opp_team_id] if pos[0] != -1]
         actions = np.zeros((self.env_cfg["max_units"], 3), dtype=int)
         # unit ids range from 0 to max_units - 1
         for unit_id in available_unit_ids:
@@ -146,14 +146,16 @@ class Agent:
                         sap_pos = opp_unit_positions[np.random.choice(nearby_enemy_unit_ids)]
                         # 敵ユニットが2ステップ以上動いていない場合はsapする
                         if point_map[sap_pos[1], sap_pos[0]] == 1 or sap_pos in self.prev_opp_unit_positions:
-                            actions[unit_id] = [Action.SAP, sap_pos[0], sap_pos[1]]
+                            dx, dy = calc_relative_pos(unit_pos, sap_pos)
+                            actions[unit_id] = [Action.SAP, dx, dy]
                             break
                         else:
                             # 敵ユニットの隣接セルがポイント位置であればそこに移動すると考える。
                             nearby_point_positions = get_nearby_point_positions(sap_pos, point_map)
                             if len(nearby_point_positions) > 0:
                                 sap_pos = nearby_point_positions[np.random.choice(len(nearby_point_positions))]
-                                actions[unit_id] = [Action.SAP, sap_pos[0], sap_pos[1]]
+                                dx, dy = calc_relative_pos(unit_pos, sap_pos)
+                                actions[unit_id] = [Action.SAP, dx, dy]
                                 break
 
                     policy[Action.SAP] = 0
@@ -179,21 +181,23 @@ def is_within_k_tiles(base_pos: np.ndarray, target_pos: np.ndarray, k: int) -> b
 def get_nearby_point_positions(pos: np.ndarray, point_map: np.ndarray, k: int = 1) -> list[np.ndarray]:
     # posを中心にkマス以内のマスを取得
     nearby_positions = []
-    up_pos = np.array([pos[0], pos[1] - k])
-    if in_map(up_pos[0], up_pos[1]) and point_map[up_pos[1], up_pos[0]] == 1:
+    up_pos = (pos[0], pos[1] - k)
+    if in_map(up_pos) and point_map[up_pos[1], up_pos[0]] == 1:
         nearby_positions.append(up_pos)
-    down_pos = np.array([pos[0], pos[1] + k])
-    if in_map(down_pos[0], down_pos[1]) and point_map[down_pos[1], down_pos[0]] == 1:
+    down_pos = (pos[0], pos[1] + k)
+    if in_map(down_pos) and point_map[down_pos[1], down_pos[0]] == 1:
         nearby_positions.append(down_pos)
-    left_pos = np.array([pos[0] - k, pos[1]])
-    if in_map(left_pos[0], left_pos[1]) and point_map[left_pos[1], left_pos[0]] == 1:
+    left_pos = (pos[0] - k, pos[1])
+    if in_map(left_pos) and point_map[left_pos[1], left_pos[0]] == 1:
         nearby_positions.append(left_pos)
-    right_pos = np.array([pos[0] + k, pos[1]])
-    if in_map(right_pos[0], right_pos[1]) and point_map[right_pos[1], right_pos[0]] == 1:
+    right_pos = (pos[0] + k, pos[1])
+    if in_map(right_pos) and point_map[right_pos[1], right_pos[0]] == 1:
         nearby_positions.append(right_pos)
     return nearby_positions
 
 
 # 自身の周囲kタイル以内にいる敵ユニットを抽出
-def get_nearby_enemy_unit_ids(unit_pos: np.ndarray, opp_unit_positions: np.ndarray, k: int) -> list[int]:
+def get_nearby_enemy_unit_ids(
+    unit_pos: tuple[int, int], opp_unit_positions: list[tuple[int, int]], k: int
+) -> list[int]:
     return [unit_id for unit_id, pos in enumerate(opp_unit_positions) if is_within_k_tiles(unit_pos, pos, k)]
