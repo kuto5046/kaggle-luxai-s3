@@ -668,9 +668,8 @@ def extract_action(actions: dict[str, Any], obs: dict[str, Any], target_team_id:
     return action_map
 
 
-def get_valid_policy_map(obs: dict[str, Any], team_id: int, env_cfg: EnvParams) -> np.ndarray:
+def get_valid_policy_map(obs: dict[str, Any], team_id: int, episode_store: EpisodeStore) -> np.ndarray:
     validate_policy_map = np.zeros((len(Action), EnvParams.map_width, EnvParams.map_height), dtype=np.float32)
-    tile_type_map = np.array(obs["map_features"]["tile_type"]).T  # (24, 24)
     available_unit_ids = np.where(obs["units_mask"][team_id])[0]
     for unit_id in available_unit_ids:
         pos = tuple(obs["units"]["position"][team_id][unit_id])
@@ -680,19 +679,18 @@ def get_valid_policy_map(obs: dict[str, Any], team_id: int, env_cfg: EnvParams) 
         validate_policy_map[:, y, x] = 1  # 行動は一旦全て有効化
 
         for dir in [Action.UP, Action.RIGHT, Action.DOWN, Action.LEFT]:
-            if not can_move(pos, energy, dir, tile_type_map, env_cfg.unit_move_cost):
+            if not can_move(pos, energy, dir, episode_store.tile_type_map, episode_store.unit_move_cost):
                 validate_policy_map[dir, y, x] = 0
 
-        if not can_sap(energy, env_cfg.unit_sap_cost):
+        if not can_sap(x, y, energy, episode_store.unit_sap_cost, episode_store.tile_type_map):
             validate_policy_map[Action.SAP, y, x] = 0
     return validate_policy_map
 
 
-def get_valid_sap_map(obs: dict[str, Any], team_id: int, env_cfg: EnvParams) -> np.ndarray:
+def get_valid_sap_map(obs: dict[str, Any], team_id: int, episode_store: EpisodeStore) -> np.ndarray:
     validate_sap_map = np.zeros((EnvParams.map_width, EnvParams.map_height), dtype=np.float32)
-    tile_type_map = np.array(obs["map_features"]["tile_type"]).T  # (24, 24)
     # tileがASTEROID_TILEの場合はsapできない
-    validate_sap_map[tile_type_map == TileType.ASTEROID] = 0
+    validate_sap_map[episode_store.tile_type_map == TileType.ASTEROID] = 0
     # 味方unitにはsapしてもいいのか？
     return validate_sap_map
 

@@ -23,7 +23,7 @@ LOGGER = logging.getLogger(__name__)
 @dataclass
 class Config:
     exp_name: str = Path(__file__).parent.name
-    notes: str = "policyをmasked bce / sapをmasked focal lossで学習するようにした"
+    notes: str = "policyをmasked bceだとsapが学習できていないのでdice lossに変更"
     seed: int = 2025
     debug: bool = False
     n_splits: int = 5
@@ -35,7 +35,7 @@ class Config:
 
     # trainer
     epoch: int = 30
-    limit_train_batches: float = 0.1
+    limit_train_batches: float = 1.0
     limit_val_batches: float = 1.0
     use_amp: bool = False
     batch_size: int = 1024
@@ -53,7 +53,7 @@ class Config:
     loss_weight_state: float = 1.0
     loss_weight_global_state: float = 1.0
     # loss_weight_value: float = 0.0
-    loss_weight_sap: float = 1.0
+    # loss_weight_sap: float = 1.0
 
     @classmethod
     def from_args(cls) -> "Config":

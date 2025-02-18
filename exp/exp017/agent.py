@@ -11,7 +11,7 @@ from lux.utils import (
     GlobalState,
     HiddenState,
     EpisodeStore,
-    HiddenGlobalState,
+    in_map,
     extract_state,
     get_valid_sap_map,
     extract_global_state,
@@ -39,7 +39,6 @@ class ILAgent:
             global_state_space_size=len(GlobalState),
             action_space_size=len(Action),
             hidden_state_space_size=len(HiddenState),
-            hidden_global_state_space_size=len(HiddenGlobalState),
             n_stack=n_stack,
             res=res,
         )
@@ -69,22 +68,26 @@ class ILAgent:
         with torch.no_grad():
             output = self.model(states)
             policy_map = output["policy"].squeeze().numpy()
-            sap_policy_map = output["sap"].squeeze().numpy()
 
-        policy_map = self.get_legal_policy(obs, policy_map, team_id)
-        sap_policy_map = self.get_legal_sap_policy(obs, sap_policy_map, team_id)
-        return policy_map, sap_policy_map
+        policy_map = self.get_legal_policy(obs, policy_map, team_id, episode_store)
+        point_map = state[State.POINTS]
 
-    def get_legal_policy(self, obs: dict[str, Any], policy_map: np.ndarray, team_id: int) -> np.ndarray:
-        legal_action_map = get_valid_policy_map(obs, team_id, self.env_cfg)
+        return policy_map, point_map
+
+    def get_legal_policy(
+        self, obs: dict[str, Any], policy_map: np.ndarray, team_id: int, episode_store: EpisodeStore
+    ) -> np.ndarray:
+        legal_action_map = get_valid_policy_map(obs, team_id, episode_store)
         action_mask_map = np.ones_like(policy_map) * 1e32
         action_mask_map[legal_action_map > 0] = 0  # legal actionは0でそれ以外は1e32
         # 無効な行動は負の大きな値になるためsoftmax後は0になる。その上で再度無効な行動を0にする
         policy_map = softmax(policy_map - action_mask_map, axis=0) * (action_mask_map == 0) * 1
         return policy_map
 
-    def get_legal_sap_policy(self, obs: dict[str, Any], sap_map: np.ndarray, team_id: int) -> np.ndarray:
-        legal_sap_map = get_valid_sap_map(obs, team_id, self.env_cfg)
+    def get_legal_sap_policy(
+        self, obs: dict[str, Any], sap_map: np.ndarray, team_id: int, episode_store: EpisodeStore
+    ) -> np.ndarray:
+        legal_sap_map = get_valid_sap_map(obs, team_id, episode_store)
         # 無効な場所は0にする
         sap_map *= legal_sap_map
         return sap_map
@@ -105,6 +108,7 @@ class Agent:
         # np.random.seed(self.cfg.seed)
         self.env_cfg = env_cfg
         self.episode_store = EpisodeStore(self.team_id, env_cfg)
+        self.prev_opp_unit_positions = []
 
     def act(self, step: int, obs, remainingOverageTime: int = 60):
         # マッチごとにリセットされる要素をリセット
@@ -112,7 +116,7 @@ class Agent:
             self.episode_store.reset()
         else:
             self.episode_store.update(obs)
-        policy_map, sap_policy_map = imitation_model.predict(obs, self.team_id, self.episode_store)
+        policy_map, point_map = imitation_model.predict(obs, self.team_id, self.episode_store)
 
         unit_mask = np.array(obs["units_mask"][self.team_id])  # shape (max_units, )
         unit_positions = np.array(obs["units"]["position"][self.team_id])  # shape (max_units, 2)
@@ -134,23 +138,30 @@ class Agent:
 
                 # print(policy, file=sys.stderr)
                 if action == Action.SAP:
-                    # sap候補を抽出 sap_policy_map > 0.5以上のマスを抽出
-                    sap_candidate_masks = sap_policy_map > 0.5
-                    _sap_candidate_positions = np.argwhere(sap_candidate_masks)
-                    sap_candidate_positions = [
-                        pos
-                        for pos in _sap_candidate_positions
-                        if is_within_k_tiles(unit_pos, pos, self.env_cfg["unit_sap_range"])
-                    ]
-                    if len(sap_candidate_positions) > 0:
-                        sap_pos = np.random.choice(sap_candidate_positions)
-                        actions[unit_id] = [Action.SAP, sap_pos[0], sap_pos[1]]
-                        break
-                    # sapしない
+                    # 範囲内にいる敵ユニットを取得
+                    nearby_enemy_unit_ids = get_nearby_enemy_unit_ids(
+                        unit_pos, opp_unit_positions, self.env_cfg["unit_sap_range"]
+                    )
+                    if len(nearby_enemy_unit_ids) > 0:
+                        sap_pos = opp_unit_positions[np.random.choice(nearby_enemy_unit_ids)]
+                        # 敵ユニットが2ステップ以上動いていない場合はsapする
+                        if point_map[sap_pos[1], sap_pos[0]] == 1 or sap_pos in self.prev_opp_unit_positions:
+                            actions[unit_id] = [Action.SAP, sap_pos[0], sap_pos[1]]
+                            break
+                        else:
+                            # 敵ユニットの隣接セルがポイント位置であればそこに移動すると考える。
+                            nearby_point_positions = get_nearby_point_positions(sap_pos, point_map)
+                            if len(nearby_point_positions) > 0:
+                                sap_pos = nearby_point_positions[np.random.choice(len(nearby_point_positions))]
+                                actions[unit_id] = [Action.SAP, sap_pos[0], sap_pos[1]]
+                                break
+
                     policy[Action.SAP] = 0
                 else:
                     actions[unit_id] = [action, 0, 0]
                     break
+        # 敵ユニットの位置を更新
+        self.prev_opp_unit_positions = opp_unit_positions
         return actions
 
 
@@ -162,6 +173,25 @@ def calc_relative_pos(base_pos: np.ndarray, target_pos: np.ndarray) -> np.ndarra
 # マスの半径kマス以内に該当するかどうか
 def is_within_k_tiles(base_pos: np.ndarray, target_pos: np.ndarray, k: int) -> bool:
     return np.abs(base_pos[0] - target_pos[0]) <= k and np.abs(base_pos[1] - target_pos[1]) <= k
+
+
+# 隣接するマスにあるポイントマスを取得
+def get_nearby_point_positions(pos: np.ndarray, point_map: np.ndarray, k: int = 1) -> list[np.ndarray]:
+    # posを中心にkマス以内のマスを取得
+    nearby_positions = []
+    up_pos = np.array([pos[0], pos[1] - k])
+    if in_map(up_pos[0], up_pos[1]) and point_map[up_pos[1], up_pos[0]] == 1:
+        nearby_positions.append(up_pos)
+    down_pos = np.array([pos[0], pos[1] + k])
+    if in_map(down_pos[0], down_pos[1]) and point_map[down_pos[1], down_pos[0]] == 1:
+        nearby_positions.append(down_pos)
+    left_pos = np.array([pos[0] - k, pos[1]])
+    if in_map(left_pos[0], left_pos[1]) and point_map[left_pos[1], left_pos[0]] == 1:
+        nearby_positions.append(left_pos)
+    right_pos = np.array([pos[0] + k, pos[1]])
+    if in_map(right_pos[0], right_pos[1]) and point_map[right_pos[1], right_pos[0]] == 1:
+        nearby_positions.append(right_pos)
+    return nearby_positions
 
 
 # 自身の周囲kタイル以内にいる敵ユニットを抽出

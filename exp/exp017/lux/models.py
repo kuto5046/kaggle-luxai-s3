@@ -201,8 +201,8 @@ class LaxLitModel(LightningModule):
             n_stack=cfg.n_stack,
             res=cfg.res,
         )
-        # self.criterion1 = DiceLoss(n_classes=len(Action))
-        self.criterion1 = MaskedBCEWithLogitsLoss()
+        self.criterion1 = DiceLoss(n_classes=len(Action))
+        # self.criterion1 = MaskedBCEWithLogitsLoss()
         self.criterion2 = nn.BCEWithLogitsLoss()
         self.criterion3 = nn.MSELoss()
         self.criterion4 = MaskedFocalLoss()
@@ -226,8 +226,9 @@ class LaxLitModel(LightningModule):
 
         policy_preds = torch.softmax(outputs["policy"], dim=1)
         policy_targets = one_hot_encoder(batch["action"], n_classes=len(Action))
-        policy_mask = (batch["state"][:, -1, State.OWN_UNIT_COUNT] > 0).unsqueeze(1)  # (batch_size, 1, w, h)
-        policy_loss = self.criterion1(policy_preds, policy_targets, policy_mask)
+        # policy_mask = (batch["state"][:, -1, State.OWN_UNIT_COUNT] > 0).unsqueeze(1)  # (batch_size, 1, w, h)
+        # policy_loss = self.criterion1(policy_preds, policy_targets, policy_mask)
+        policy_loss = self.criterion1(policy_preds, policy_targets)
 
         # value_loss = self.criterion2(outputs["value"].flatten(), batch["win"])
         state_loss = self.criterion3(outputs["state"].flatten(), batch["hidden_state"].flatten())
