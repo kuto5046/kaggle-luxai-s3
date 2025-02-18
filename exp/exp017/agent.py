@@ -25,7 +25,7 @@ from scipy.special import softmax
 class Config:
     seed: int = 2025
     # 確率的な行動を取るかどうか
-    stochastic: bool = False  # Falseにするとargmaxで行動を選択する
+    stochastic: bool = True  # Falseにするとargmaxで行動を選択する
     res: bool = True
     n_stack: int = 4
 
@@ -69,28 +69,30 @@ class ILAgent:
             output = self.model(states)
             policy_map = output["policy"].squeeze().numpy()
 
-        policy_map = self.get_legal_policy(obs, policy_map, team_id, episode_store)
+        policy_map = get_legal_policy(obs, policy_map, team_id, episode_store)
         point_map = state[State.POINTS]
 
         return policy_map, point_map
 
-    def get_legal_policy(
-        self, obs: dict[str, Any], policy_map: np.ndarray, team_id: int, episode_store: EpisodeStore
-    ) -> np.ndarray:
-        legal_action_map = get_valid_policy_map(obs, team_id, episode_store)
-        action_mask_map = np.ones_like(policy_map) * 1e32
-        action_mask_map[legal_action_map > 0] = 0  # legal actionは0でそれ以外は1e32
-        # 無効な行動は負の大きな値になるためsoftmax後は0になる。その上で再度無効な行動を0にする
-        policy_map = softmax(policy_map - action_mask_map, axis=0) * (action_mask_map == 0) * 1
-        return policy_map
 
-    def get_legal_sap_policy(
-        self, obs: dict[str, Any], sap_map: np.ndarray, team_id: int, episode_store: EpisodeStore
-    ) -> np.ndarray:
-        legal_sap_map = get_valid_sap_map(obs, team_id, episode_store)
-        # 無効な場所は0にする
-        sap_map *= legal_sap_map
-        return sap_map
+def get_legal_policy(
+    obs: dict[str, Any], policy_map: np.ndarray, team_id: int, episode_store: EpisodeStore
+) -> np.ndarray:
+    legal_action_map = get_valid_policy_map(obs, team_id, episode_store)
+    action_mask_map = np.ones_like(policy_map) * 1e32
+    action_mask_map[legal_action_map > 0] = 0  # legal actionは0でそれ以外は1e32
+    # 無効な行動は負の大きな値になるためsoftmax後は0になる。その上で再度無効な行動を0にする
+    policy_map = softmax(policy_map - action_mask_map, axis=0) * (action_mask_map == 0) * 1
+    return policy_map
+
+
+def get_legal_sap_policy(
+    obs: dict[str, Any], sap_map: np.ndarray, team_id: int, episode_store: EpisodeStore
+) -> np.ndarray:
+    legal_sap_map = get_valid_sap_map(obs, team_id, episode_store)
+    # 無効な場所は0にする
+    sap_map *= legal_sap_map
+    return sap_map
 
 
 cfg = Config()
@@ -132,6 +134,11 @@ class Agent:
 
             while True:
                 if cfg.stochastic:
+                    if policy.sum() == 0:
+                        actions[unit_id] = [Action.CENTER, 0, 0]
+                        break
+
+                    policy = policy / policy.sum()
                     action = np.random.choice(range(6), p=policy)
                 else:
                     action = policy.argmax()
