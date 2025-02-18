@@ -24,7 +24,7 @@ vis exp_name:
 	uv run streamlit run /home/user/work/exp/{{exp_name}}/visualizer.py --server.address 0.0.0.0
 
 # cdコマンドの効果は次のコマンドには引き継がれないので()で囲む
-make_subfile exp_name:
+sub exp_name:
     (cd /home/user/work/exp/{{exp_name}}/ && \
     cp -r /home/user/work/.venv/lib/python3.10/site-packages/lightning ./ && \
     tar -czf submission.tar.gz --exclude="*.tar.gz" *)

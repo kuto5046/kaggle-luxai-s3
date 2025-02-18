@@ -67,7 +67,7 @@ class Config:
     debug: bool = True
     output_dir: str = Path(f"/home/user/work/exp/{exp_name}")
     # runner
-    num_env_runners: int = 1  # actorの数
+    num_env_runners: int = 12  # actorの数
     num_cpus_per_env_runner: int = 1
     # learner
     gamma: float = 0.99
@@ -76,13 +76,13 @@ class Config:
     train_batch_size_per_learner: int = 505 * 10
     num_epochs: int = 2
 
-    def __post_init__(self):
-        if self.debug:
-            self.num_env_runners = 1
-            self.num_cpus_per_env_runner = 1
-            self.minibatch_size = 256
-            self.train_batch_size_per_learner = 505
-            self.num_epochs = 1
+    # def __post_init__(self):
+    #     if self.debug:
+    #         self.num_env_runners = 1
+    #         self.num_cpus_per_env_runner = 1
+    #         self.minibatch_size = 256
+    #         self.train_batch_size_per_learner = 505
+    #         self.num_epochs = 1
 
 
 def env_creator(config: dict[str, Any]) -> MultiAgentEnv:
@@ -257,9 +257,9 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
 
     @override(TorchRLModule)
     def _forward(self, batch, **kwargs):
-        batch_size = batch[Columns.OBS].shape[0]
+        batch_size = batch[Columns.OBS]["state"].shape[0]
         outputs = self.model(batch[Columns.OBS])
-        policy_logits = outputs["own_policy"]
+        policy_logits = outputs["policy"]
         num_actions = policy_logits.shape[1]
         # この時点では(batch, action, height, width)なので(batch, height*width, action)に変換
         policy_logits = policy_logits.reshape(batch_size, num_actions, -1).transpose(2, 1)
@@ -269,9 +269,9 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
 
     @override(TorchRLModule)
     def _forward_train(self, batch, **kwargs):
-        batch_size = batch[Columns.OBS].shape[0]
+        batch_size = batch[Columns.OBS]["state"].shape[0]
         outputs = self.model(batch[Columns.OBS])
-        policy_logits = outputs["own_policy"]
+        policy_logits = outputs["policy"]
         num_actions = policy_logits.shape[1]
         policy_logits = policy_logits.reshape(batch_size, num_actions, -1).transpose(2, 1)
 
@@ -384,7 +384,7 @@ class WandbLoggerCallback(RLlibCallback):
         #     agent_id: single_episode.get_return() for agent_id, single_episode in episode.agent_episodes.items()
         # }
         duration = episode.get_duration_s()
-        print(f"episode {self.episode_count} finished. {reward=} {duration=:0.2f}s")
+        print(f"episode {self.episode_count} finished. {reward=} {duration=:0.2f}s {jax.devices()=}")
         self.episode_count += 1
 
 
@@ -522,11 +522,15 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
         .env_runners(
             num_env_runners=cfg.num_env_runners,
             # num_envs_per_env_runner=cfg.num_envs_per_env_runner,  # multi agentはenv vectorizationが未対応
-            # num_cpus_per_env_runner=cfg.num_cpus_per_env_runner,
+            num_cpus_per_env_runner=cfg.num_cpus_per_env_runner,
             sample_timeout_s=60 * 5,
         )
         # モデルを学習するlearnerの数。gpuの数と合わせる
-        .learners(num_learners=1)
+        .learners(
+            num_learners=1,
+            num_cpus_per_learner=1,
+            num_gpus_per_learner=1,
+        )
         # 学習パラメータ設定
         .training(
             learner_class=CustomPPOTorchLearner,
@@ -541,12 +545,12 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
             train_batch_size_per_learner=cfg.train_batch_size_per_learner,  # 3試合データが集まったら学習する
             num_epochs=cfg.num_epochs,
         )
-        .python_environment(
-            extra_python_environs_for_worker={
-                "XLA_FLAGS": "--xla_force_host_platform_device_count=1",
-                "OMP_NUM_THREADS": "1",
-            }
-        )
+        # .python_environment(
+        #     extra_python_environs_for_worker={
+        #         "XLA_FLAGS": "--xla_force_host_platform_device_count=1",
+        #         "OMP_NUM_THREADS": "1",
+        #     }
+        # )
         # https://docs.ray.io/en/latest/rllib/rllib-rlmodule.html#construction-through-rlmodulespecs
         .rl_module(
             rl_module_spec=MultiRLModuleSpec(
@@ -586,6 +590,7 @@ def setup_wandb(cfg: Config):
 
 
 def main() -> None:
+    print("JAX devices:", jax.devices())
     cfg = Config()
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
     setup_wandb(cfg)
