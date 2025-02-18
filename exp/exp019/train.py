@@ -23,13 +23,13 @@ LOGGER = logging.getLogger(__name__)
 @dataclass
 class Config:
     exp_name: str = Path(__file__).parent.name
-    notes: str = "stack=10"
+    notes: str = "cosine_annealing"
     seed: int = 2025
     debug: bool = False
     n_splits: int = 5
     use_fold: int = 0
     root_dir: Path = Path("/home/user/work")
-    feature_version: str = exp_name
+    feature_version: str = "exp017"
     feature_dir: Path = root_dir / f"output/feature_store/{feature_version}"
     output_dir = root_dir / f"exp/{exp_name}/output"
 
@@ -43,11 +43,10 @@ class Config:
     ckpt_path: str = None
     lr: float = 0.001
     weight_decay: float = 0.01
-    warmup_step_rate: float = 0.1
     # model
     res: bool = True
     aug: bool = True
-    n_stack: int = 10
+    n_stack: int = 4
     # loss
     loss_weight_policy: float = 1.0
     loss_weight_state: float = 1.0

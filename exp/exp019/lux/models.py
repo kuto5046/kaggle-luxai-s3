@@ -12,8 +12,8 @@ from torch import nn, optim
 from lightning import LightningModule, LightningDataModule
 from torchvision import transforms
 from torchmetrics import Accuracy, MetricCollection
-from transformers import get_cosine_schedule_with_warmup
 from torch.utils.data import Dataset, DataLoader
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
 import wandb
 
@@ -359,18 +359,7 @@ class LaxLitModel(LightningModule):
         return optimizer
 
     def get_scheduler(self, optimizer: optim.Optimizer) -> optim.lr_scheduler._LRScheduler | None:
-        num_training_steps = self.trainer.estimated_stepping_batches
-        num_warmup_steps = int(self.cfg.warmup_step_rate * num_training_steps)
-        scheduler = get_cosine_schedule_with_warmup(
-            optimizer,
-            num_warmup_steps=num_warmup_steps,
-            num_training_steps=num_training_steps,
-        )
-        scheduler = {
-            "scheduler": scheduler,
-            "interval": "step",
-            "frequency": 1,
-        }
+        scheduler = CosineAnnealingLR(optimizer, T_max=10)
         return scheduler
 
     def get_metrics(self) -> MetricCollection:
