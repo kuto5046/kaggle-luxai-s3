@@ -27,7 +27,7 @@ class Config:
     # 確率的な行動を取るかどうか
     stochastic: bool = True  # Falseにするとargmaxで行動を選択する
     res: bool = True
-    n_stack: int = 4
+    n_stack: int = 10
 
     checkpoint_path: Path = Path(__file__).parent / "output/best_model.ckpt"
 
