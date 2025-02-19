@@ -18,11 +18,10 @@ from lux.utils import (
     GlobalState,
     HiddenState,
     EpisodeStore,
-    HiddenGlobalState,
     extract_state,
     extract_global_state,
 )
-from lux.models import LuxUNetModel
+from lux.models import LuxUNetModel, LuxValueConvModel
 from lux.params import EnvParams
 from luxai_s3.env import LuxAIS3Env
 from luxai_s3.utils import to_numpy
@@ -67,13 +66,13 @@ class Config:
     debug: bool = True
     output_dir: str = Path(f"/home/user/work/exp/{exp_name}")
     # runner
-    num_env_runners: int = 12  # actorの数
+    num_env_runners: int = 2  # actorの数
     num_cpus_per_env_runner: int = 1
     # learner
     gamma: float = 0.99
     lr: float = 1e-4
     minibatch_size: int = 1024
-    train_batch_size_per_learner: int = 505 * 10
+    train_batch_size_per_learner: int = 505 * 3
     num_epochs: int = 2
 
     # def __post_init__(self):
@@ -239,26 +238,35 @@ class RLLibLuxEnv(MultiAgentEnv):
 class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
     @override(TorchRLModule)
     def setup(self):
-        self.model = LuxUNetModel(
+        self.policy_model = LuxUNetModel(
             state_space_size=len(State),
             global_state_space_size=len(GlobalState),
             action_space_size=len(Action),
             hidden_state_space_size=len(HiddenState),
-            hidden_global_state_space_size=len(HiddenGlobalState),
             n_stack=self.model_config["n_stack"],
-            bilinear=True,
+        )
+
+        self.value_model = LuxValueConvModel(
+            state_space_size=len(State),
+            global_state_space_size=len(GlobalState),
+            n_stack=self.model_config["n_stack"],
         )
 
         # TODO: weight読み込み
         if self.model_config["pretrained_path"]:
-            pass
+            ckpt = torch.load(self.model_config["pretrained_path"], weights_only=True)
+            state_dict = {k.replace("model.", ""): v for k, v in ckpt["state_dict"].items()}
+            self.policy_model.load_state_dict(state_dict)
+
+        self.policy_model.to("cuda")
+        self.value_model.to("cuda")
 
         self._values = None
 
     @override(TorchRLModule)
     def _forward(self, batch, **kwargs):
         batch_size = batch[Columns.OBS]["state"].shape[0]
-        outputs = self.model(batch[Columns.OBS])
+        outputs = self.policy_model(batch[Columns.OBS])
         policy_logits = outputs["policy"]
         num_actions = policy_logits.shape[1]
         # この時点では(batch, action, height, width)なので(batch, height*width, action)に変換
@@ -269,19 +277,11 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
 
     @override(TorchRLModule)
     def _forward_train(self, batch, **kwargs):
-        batch_size = batch[Columns.OBS]["state"].shape[0]
-        outputs = self.model(batch[Columns.OBS])
-        policy_logits = outputs["policy"]
-        num_actions = policy_logits.shape[1]
-        policy_logits = policy_logits.reshape(batch_size, num_actions, -1).transpose(2, 1)
-
-        return {
-            Columns.ACTION_DIST_INPUTS: policy_logits,
-        }
+        return self._forward(batch, **kwargs)
 
     @override(ValueFunctionAPI)
     def compute_values(self, batch: dict[str, Any], embeddings: Any | None = None) -> torch.Tensor:
-        outputs = self.model(batch[Columns.OBS])
+        outputs = self.value_model(batch[Columns.OBS])
         self._values = outputs["value"].tanh().squeeze(dim=1)
         return self._values
 

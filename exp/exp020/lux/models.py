@@ -492,7 +492,7 @@ class LuxUNetModel(nn.Module):
         hidden_state_space_size: int,
         n_stack: int,
         bilinear: bool = True,
-        res: bool = False,
+        res: bool = True,
     ) -> None:
         super().__init__()
         self.bilinear = bilinear
@@ -562,6 +562,57 @@ class LuxUNetModel(nn.Module):
             "state": state_logits,
             "global_state": global_state_logits,
             # "value": value_logits,
+        }
+
+
+class LuxValueConvModel(nn.Module):
+    def __init__(
+        self,
+        state_space_size: int,
+        global_state_space_size: int,
+        n_stack: int,
+        bilinear: bool = True,
+        res: bool = True,
+    ) -> None:
+        super().__init__()
+        self.bilinear = bilinear
+
+        self.inc = DoubleConv(state_space_size, 64, res=res)
+        self.down1 = Down(64, 128, res=res)
+        self.down2 = Down(128, 256, res=res)
+        self.down3 = Down(256, 256, res=res)
+
+        self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.value_net = nn.Sequential(
+            nn.Linear((256 + global_state_space_size) * n_stack, 128),
+            nn.ReLU(),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1),
+        )
+
+    def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        state = batch["state"]
+        global_state = batch["global_state"]
+        _n, _t, _c, _x, _y = state.shape
+        x = state.view(-1, _c, _x, _y)
+        x1 = self.inc(x)
+        x2 = self.down1(x1)
+        x3 = self.down2(x2)
+        x4 = self.down3(x3)
+
+        # sx, syのマップにグローバルステートをブロードキャスト
+        sx, sy = x4.shape[2:]
+        _n, _t, _c = global_state.shape
+        gx = global_state.view(-1, _c, 1, 1)
+        gx = gx.repeat(1, 1, sx, sy)
+
+        x4 = torch.cat([x4, gx], dim=1)
+        x = self.global_avg_pool(x4).view(_n, -1)
+        value_logits = self.value_net(x)
+
+        return {
+            "value": value_logits,
         }
 
 
