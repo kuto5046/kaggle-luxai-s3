@@ -34,4 +34,4 @@ game exp_name:
     uv run luxai-s3 /home/user/work/agents/exp017/main.py /home/user/work/exp/{{exp_name}}/main.py --output replay.json
 
 game2 exp_name:
-    uv run luxai-s3 /home/user/work/agents/exp017/main.py /home/user/work/exp/{{exp_name}}/main.py --tournament --tournament-cfg-concurrent 2
+    uv run luxai-s3 /home/user/work/agents/okumura/main.py /home/user/work/exp/{{exp_name}}/main.py --tournament --tournament-cfg-concurrent 2

@@ -23,7 +23,7 @@ LOGGER = logging.getLogger(__name__)
 @dataclass
 class Config:
     exp_name: str = Path(__file__).parent.name
-    notes: str = "policyをmasked bceだとsapが学習できていないのでdice lossに変更"
+    notes: str = "augを上下左右反転にする"
     seed: int = 2025
     debug: bool = False
     n_splits: int = 5
@@ -98,7 +98,7 @@ class TrainPipeline:
             dirpath=self.output_dir,
             monitor="Loss/valid",
             mode="min",
-            filename="best_model",
+            filename=f"best_model_{self.cfg.use_fold}",
             save_weights_only=True,
             verbose=True,
         )
