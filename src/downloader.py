@@ -22,12 +22,13 @@ def saveEpisode(epid: int, save_path: Path) -> None:
 
 
 def main():
-    df = pl.read_csv("/home/user/work/output/feature_store/episodes/episodes0210.csv")
+    root_dir = Path("/home/kawattataido/デスクトップ/programing/kaggle/kaggle-luxai-s3")
+    df = pl.read_csv(root_dir / "output/feature_store/episodes/episodes.csv")
     start_time = datetime.datetime.now(tz=datetime.timezone.utc)
     episode_count = 0
     for _sub_id, df in df.group_by("SubmissionId"):
         sub_id = _sub_id[0]
-        output_dir = Path(f"/home/user/work/output/feature_store/episodes/{sub_id}")
+        output_dir = Path(root_dir / f"output/feature_store/episodes/{sub_id}")
         output_dir.mkdir(exist_ok=True, parents=True)
         ep_ids = df["EpisodeId"].unique()
         for epid in tqdm(ep_ids):
