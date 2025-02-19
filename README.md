@@ -38,13 +38,23 @@ uv run python ./src/downloader.py
 ```
 
 ③ jsonファイルを特徴量変換してh5ファイルに保存
-https://github.com/kuto5046/kaggle-luxai-s3/blob/main/exp/exp017/data_processor.py
 ```sh
 uv run python exp/exp017/data_processor.py
 ```
 
 
 ## 実験ファイルの実行
+expフォルダに前の実験の結果をコピーして次の実験を実施している。
+```sh
+exp/exp017/
+├── main.py              # kaggle提供のファイル
+├── agent.py             # subに必要なagentファイル
+├── data_processor.py    # 模倣学習用の特徴量生成を行う
+├── train.py             # 模倣学習
+├── rl.py                # 強化学習(Rllib)
+├── visualizer.py        # 実験結果を視覚化する Streamlit アプリ
+└── lux/                 # ここに必要なモジュールやクラスを格納している 
+```
 以下のように実行する。必要に応じて設定ファイルを変更する。
 ```sh
 uv run python exp/exp017/data_processor.py
