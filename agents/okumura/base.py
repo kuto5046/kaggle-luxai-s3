@@ -2,7 +2,7 @@ from enum import IntEnum
 
 
 class Global:
-    DEBUG = True
+    DEBUG = False
     # Game related constants:
 
     SPACE_SIZE = 24

@@ -61,4 +61,4 @@ if __name__ == "__main__":
         i += 1
         actions = agent_fn(observation, dict(env_cfg=env_cfg))
         # send actions to engine
-        # print(json.dumps(actions))
+        print(json.dumps(actions))
