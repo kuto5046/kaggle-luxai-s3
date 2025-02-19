@@ -8,13 +8,10 @@ docker compose up -d --build
 ```
 あとはvscodeのdevcontainerでコンテナに入って作業する
 
-## dataset準備
-
-datasetをdownload
-```bash
-cd input
-kaggle competitions download -c
-unzip lux-ai-season-3.zip -d lux-ai-season-3
+dockerを使わない場合はuvを使って環境構築
+uvをインストールした上で以下を実行
+```
+uv sync
 ```
 
 ## 初めにすること
@@ -24,11 +21,6 @@ uv sync
 uv run pre-commit install
 ```
 
-ツールをinstall
-```sh
-uv pip install -e Lux-Design-S3/src
-```
-
 wandbのprojectをwebから作成
 ターミナルで以下を実行
 ```sh
@@ -36,24 +28,58 @@ wandb login
 ```
 authorizeすることでwandbが利用可能になる
 
-## luxai-s3の実行
+## kaggleからepisodeデータを取得する
+①以下のnotebookで対象のsubmissionのepisode情報をcsvで取得してローカルにダウンロード  
+https://www.kaggle.com/code/kuto0633/fork-of-lux-ai-s3-download-episodes-from-meta-kagg
+
+②以下を実行してepisodeのjsonファイルをローカルに取得する(3000件が2時間くらい)
 ```sh
-uv run luxai-s3 Lux-Design-S3/kits/python/main.py exp/exp001/main.py --output replay.json
+uv run python ./src/downloader.py
 ```
 
-## rayのdebug
-ちょっと面倒
-1. ray start
-```bash
-ray start --head
-```
-実行するとnext stepsで指定すべき`ip:port`が表示される
-
-2.vscodeのray debugger拡張機能をinstallしcluster設定
-clusterは1で表示されたものを使う
-```
-172.19.0.2:6379
+③ jsonファイルを特徴量変換してh5ファイルに保存
+```sh
+uv run python exp/exp017/data_processor.py
 ```
 
-3. 以下のリンクのように初期設定とbreakpointをおいてファイルをターミナルで実行
-https://docs.ray.io/en/latest/ray-observability/ray-distributed-debugger.html#create-a-ray-task
+
+## 実験ファイルの実行
+expフォルダに前の実験の結果をコピーして次の実験を実施している。
+```sh
+exp/exp017/
+├── main.py              # kaggle提供のファイル
+├── agent.py             # subに必要なagentファイル
+├── data_processor.py    # 模倣学習用の特徴量生成を行う
+├── train.py             # 模倣学習
+├── rl.py                # 強化学習(Rllib)
+├── visualizer.py        # 実験結果を視覚化する Streamlit アプリ
+└── lux/                 # ここに必要なモジュールやクラスを格納している 
+```
+以下のように実行する。必要に応じて設定ファイルを変更する。
+```sh
+uv run python exp/exp017/data_processor.py
+uv run python exp/exp017/train.py
+```
+
+## その他便利タスク
+justをタスクランナーとして使用しています  
+justをインストールするとjustfileにあるタスクを簡単に実行できます
+
+### 提出
+```sh
+just sub exp017
+```
+
+### visualizer
+streamlitを使った特徴量や予測の可視化ができる
+```sh
+just vis exp017
+```
+<img width="1425" alt="image" src="https://github.com/user-attachments/assets/dbe8f79d-3296-452b-bb96-7be5c0b211ed" />
+
+### 試合対戦
+luxai-s3環境での対戦
+(justファイルのコマンドを見るとわかるが事前に対戦相手を用意しておく必要がある)
+```sh
+just game exp017
+```
