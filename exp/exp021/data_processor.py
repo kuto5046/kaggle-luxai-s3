@@ -139,7 +139,8 @@ class DataProcessor:
                     episode_store.reset()
                 # リセット時以外はupdateをする
                 else:
-                    episode_store.update(obs)
+                    prev_actions = np.array(step_info[target_team_id]["action"])
+                    episode_store.update(obs, prev_actions)
 
                 if self.cfg.use_gt:
                     state = extract_gt_state(gt_obs, target_team_id)
