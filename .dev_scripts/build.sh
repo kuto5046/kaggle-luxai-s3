@@ -1,5 +1,5 @@
 #!/bin/bash
 
-docker build -f Dockerfile \
+docker build --no-cache -f Dockerfile \
     --build-arg UID=$(id -u) --build-arg USER=$USER \
-    --network host --rm -t $USER/kaggle-luxai-s3-ir .
+    --network host --rm -t $USER/kaggle-luxai-s3 .

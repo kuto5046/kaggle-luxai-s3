@@ -1,0 +1,10 @@
+wandb
+jupyter
+ruff
+jax<0.5
+pynvml
+psutil
+h5py
+lightning
+torchmetrics
+transformers
