@@ -54,31 +54,25 @@ class LuxAugment:
         hidden_state = inputs["hidden_state"].copy()
         action = inputs["action"].copy()
         sap = inputs["sap"].copy()
-        # Flip vertically↑↓(# switch up(1) and down(3))
-        if random.random() < self.p:
+
+        # 原点を自陣とする
+        visit_count = state[:, State.VISIT_COUNT]
+        do_flip = np.sum(visit_count[:, 0, 0]) < np.sum(visit_count[:, -1, -1])
+
+        if do_flip:
+            # Flip vertically↑↓(# switch up(1) and down(3))
             state = np.flip(state, axis=2).copy()
             hidden_state = np.flip(hidden_state, axis=1).copy()
             action = np.flip(action, axis=0).copy()
             action = self.switch_action(action, Action.UP, Action.DOWN)
             sap = np.flip(sap, axis=0).copy()
-        # Flip horizontally →← (switch left(2) and right(4))
-        if random.random() < self.p:
+
+            # Flip horizontally →← (switch left(2) and right(4))
             state = np.flip(state, axis=3).copy()
             hidden_state = np.flip(hidden_state, axis=2).copy()
             action = np.flip(action, axis=1).copy()
             action = self.switch_action(action, Action.LEFT, Action.RIGHT)
             sap = np.flip(sap, axis=1).copy()
-        # # Rotate 90 degrees ↑→ (right->up, up->left left->down down->right)
-        if random.random() < self.p:
-            state = np.rot90(state, axes=(2, 3)).copy()
-            hidden_state = np.rot90(hidden_state, axes=(1, 2)).copy()
-            action = np.rot90(action, axes=(0, 1)).copy()
-            action = self.rotate_action(action)
-            sap = np.rot90(sap, axes=(0, 1)).copy()
-
-        # TODO:
-        # mapをランダムにずらす
-        # 試合のindexを入れ替える
 
         inputs["state"] = state
         inputs["hidden_state"] = hidden_state
@@ -138,8 +132,7 @@ class LaxDataset(Dataset):
             "sap": sap,
             "win": win,
         }
-        if self.mode == "train" and self.aug:
-            inputs = self.transform(inputs)
+        inputs = self.transform(inputs)
 
         return inputs
 

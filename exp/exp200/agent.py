@@ -74,6 +74,11 @@ class ILAgent:
             states = torch.from_numpy(states).float()
             global_states = torch.from_numpy(global_states).float()
         else:
+            # 原点を自陣とする
+            visit_count = states[:, State.VISIT_COUNT]
+            do_flip = np.sum(visit_count[:, 0, 0]) < np.sum(visit_count[:, -1, -1])
+            if do_flip:
+                states = np.flip(np.array(states), axis=(2, 3)).copy()
             # batchの次元を追加
             states = torch.from_numpy(states).unsqueeze(0).float()
             global_states = torch.from_numpy(global_states).unsqueeze(0).float()
@@ -89,6 +94,8 @@ class ILAgent:
 
         if self.tta:
             policy_map = self.tta_for_policy_map(policy_map)
+        elif do_flip:
+            policy_map = np.flip(policy_map, axis=(1, 2)).copy()
 
         policy_map = get_legal_policy(obs, policy_map, team_id, episode_store)
         point_map = state[State.POINTS]
