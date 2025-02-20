@@ -1,6 +1,7 @@
 import json
 import time
 import datetime
+import argparse
 from pathlib import Path
 
 import polars as pl
@@ -22,12 +23,17 @@ def saveEpisode(epid: int, save_path: Path) -> None:
 
 
 def main():
-    df = pl.read_csv("/home/user/work/output/feature_store/episodes/episodes0210.csv")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--episode_path", required=True, type=str)
+    parser.add_argument("--output_dir", default="./data/")
+    args = parser.parse_args()
+
+    df = pl.read_csv(args.episode_path)
     start_time = datetime.datetime.now(tz=datetime.timezone.utc)
     episode_count = 0
     for _sub_id, df in df.group_by("SubmissionId"):
         sub_id = _sub_id[0]
-        output_dir = Path(f"/home/user/work/output/feature_store/episodes/{sub_id}")
+        output_dir = Path(f"{args.output_dir}/episodes/{sub_id}")
         output_dir.mkdir(exist_ok=True, parents=True)
         ep_ids = df["EpisodeId"].unique()
         for epid in tqdm(ep_ids):
