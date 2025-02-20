@@ -38,6 +38,7 @@ class Config:
     episode_dir: Path = root_dir / "output/feature_store/episodes"
     episode_path: Path = episode_dir / "episodes.csv"
     feature_dir: Path = root_dir / f"output/feature_store/{exp_name}"
+    dbg_png_dir: Path = root_dir / f"output/feature_store/{exp_name}/png"
     target_team_name: str = "aDg4b"
     target_sub_ids: list[int] = field(default_factory=lambda: [42683570])
     validation: bool = False
@@ -75,6 +76,13 @@ def valid_episode(json_load: dict[str, Any], target_team_name: str) -> bool:
     # return True
 
 
+def remove_and_mkdir(path: Path) -> None:
+    if path.exists():
+        shutil.rmtree(path)
+        print(f"remove {path}")
+    path.mkdir(parents=True, exist_ok=True)
+
+
 class DataProcessor:
     def __init__(self, cfg: Config) -> None:
         seed_everything(cfg.seed, workers=True)  # data loaderのworkerもseedする
@@ -82,10 +90,9 @@ class DataProcessor:
         self.episode_path = cfg.episode_path
         self.episode_dir = cfg.episode_dir
         self.feature_dir = cfg.feature_dir
-        if self.feature_dir.exists():
-            shutil.rmtree(self.feature_dir)
-            print(f"remove {self.feature_dir}")
-        self.feature_dir.mkdir(parents=True, exist_ok=True)
+        self.dbg_png_dir = cfg.dbg_png_dir
+        remove_and_mkdir(self.feature_dir)
+        remove_and_mkdir(self.dbg_png_dir)
 
     def read_data(self) -> pl.DataFrame:
         episode_df = pl.read_csv(self.episode_path)
@@ -198,6 +205,83 @@ class DataProcessor:
         if not self.cfg.debug:
             df = self.add_fold(df)
         df.write_csv(self.feature_dir / "train.csv")
+
+    def _check_energy_field(self, row) -> bool:
+        sub_id = row["SubmissionId"]
+        episode_id = row["EpisodeId"]
+        episode_path = self.episode_dir / f"{sub_id}/{episode_id}.json"
+        # if episode_id != 66954207:
+        #     return False
+        with open(episode_path) as f:
+            json_load = json.load(f)
+
+        # 無効なepisodeはスキップ(valueも学習したいのでskip)
+        if not valid_episode(json_load, self.cfg.target_team_name):
+            return False
+
+        target_team_id = np.argmax(json_load["rewards"])  # win or tie
+        match_results = get_match_results(json_load, target_team_id)
+
+        # episode内で獲得する情報
+        env_params = EnvParams(**json_load["configuration"]["env_cfg"])
+        episode_store = EpisodeStore(target_team_id, env_params, self.cfg.validation, episode_id)
+        steps = json_load["steps"]
+        # energy_mapの真の値の2dheatmapと推定値の2dheatmapを比較するpngを作成
+        import matplotlib.pyplot as plt
+        from lux.utils import State
+
+        prev_energy_field = None
+        prev_energy_node = None
+        for step_idx in range(len(steps) - 1):  # 505でdoneとなるため-1
+            step_info = steps[step_idx]
+            next_step_info = steps[step_idx + 1]
+            obs = json.loads(step_info[target_team_id]["observation"]["obs"])
+            gt_obs = step_info[0]["info"]["replay"]["observations"][0]
+            if step_idx == 0:
+                params = step_info[0]["info"]["replay"]["params"]
+                print(f"{params['energy_node_drift_speed']=} {params['energy_node_drift_magnitude']=}")
+
+            print(f"true energy_node: {gt_obs['energy_nodes']=}")
+            # マッチごとにリセットされる要素をリセット
+            if obs["match_steps"] == 0:
+                episode_store.reset()
+            # リセット時以外はupdateをする
+            else:
+                episode_store.update(obs)
+                transposed_energy = np.array(gt_obs["map_features"]["energy"]).T
+                guess = episode_store.energy_node_guesser._energy_tile_patterns[
+                    prev_energy_node[0][1], prev_energy_node[0][0]
+                ]
+                for y in range(EnvParams.map_height):
+                    for x in range(EnvParams.map_width):
+                        assert (
+                            guess[y, x] == transposed_energy[y, x]
+                        ), f"at {x=}, {y=}, {guess[y, x]=}, {transposed_energy[y, x]=}"
+                if prev_energy_field is not None and not np.all(prev_energy_field == transposed_energy):
+                    print(f"energy field drifted in {obs['steps']=}")
+                prev_energy_field = transposed_energy
+
+            state = extract_state(obs, target_team_id, episode_store)
+            fig, ax = plt.subplots(1, 2, figsize=(10, 5))
+            ax[0].imshow(transposed_energy)
+            ax[0].set_title("gt_energy_map")
+            ax[1].imshow(state[State.ENERGY])
+            ax[1].imshow(guess)
+            ax[1].set_title("energy_map")
+
+            fig.colorbar(ax[0].imshow(transposed_energy), ax=ax[0])
+            # fig.colorbar(ax[1].imshow(state[State.ENERGY]), ax=ax[1])
+            fig.colorbar(ax[1].imshow(guess), ax=ax[1])
+            plt.savefig(self.dbg_png_dir / f"{episode_id}_{step_idx}.png")
+            print(f"save {self.dbg_png_dir / f'{episode_id}_{step_idx}.png'}")
+
+        return True
+
+    def test(self) -> None:
+        episode_paths = self.read_data()
+        for row in episode_paths.iter_rows(named=True):
+            if self._check_energy_field(row):
+                break
 
 
 def get_match_results(json_load: dict[str, Any], target_team_id: int) -> list[bool]:
