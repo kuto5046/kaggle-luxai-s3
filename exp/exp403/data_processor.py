@@ -116,7 +116,9 @@ class DataProcessor:
         print(f"unique episode_df: {len(episode_df)}")
         if self.cfg.debug:
             episode_df = episode_df.sample(n=5, seed=self.cfg.seed)
-        episode_df = episode_df.filter(pl.col("EpisodeId") != 67293512)
+        no_good_episode_ids = {67293512, 66689412, 66888158}
+        episode_df = episode_df.filter(~pl.col("EpisodeId").is_in(no_good_episode_ids))
+        # episode_df = episode_df.filter(pl.col("EpisodeId") not in no_good_episode_ids)
         return episode_df
 
     def _process_episode(self, row) -> tuple[str, int, int]:
@@ -129,7 +131,7 @@ class DataProcessor:
 
         # 無効なepisodeはスキップ(valueも学習したいのでskip)
         if not valid_episode(json_load, self.cfg.target_team_name):
-            return False
+            return None
 
         target_team_id = get_target_team_id(json_load, self.cfg.target_team_name)
         last_obs = json.loads(json_load["steps"][-1][target_team_id]["observation"]["obs"])
@@ -157,6 +159,7 @@ class DataProcessor:
             env_params = EnvParams(**json_load["configuration"]["env_cfg"])
             episode_store = EpisodeStore(target_team_id, env_params, self.cfg.validation, episode_id)
             steps = json_load["steps"]
+            count_steps = 0
             for step_idx in range(len(steps) - 1):  # 505でdoneとなるため-1
                 step_info = steps[step_idx]
                 next_step_info = steps[step_idx + 1]
@@ -177,6 +180,7 @@ class DataProcessor:
                     state = extract_gt_state(gt_obs, target_team_id)
                 else:
                     state = extract_state(obs, target_team_id, episode_store)
+                count_steps += 1
                 episode_state_group.create_dataset(f"{step_idx}", data=state)
 
                 global_state = extract_global_state(obs, target_team_id, env_params)
@@ -196,7 +200,7 @@ class DataProcessor:
                 # is_win = bo5_result[match_idx]
                 episode_win_group.create_dataset(f"{step_idx}", data=bo5_result)
 
-        return str(episode_id), len(steps) - 1, target_team_id, bo5_result
+        return str(episode_id), count_steps, target_team_id, bo5_result
 
     def preprocess(self, df: pl.DataFrame) -> pl.DataFrame:
         # 並列処理の実行
