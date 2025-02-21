@@ -172,13 +172,14 @@ class EpisodeStore:
         パラメータが未知の場合は-1で埋める
         """
         if self._nebula_energy_reduction is None:
-            return (self.tile_type_map == TileType.NEBULA) * -1
+            return np.zeros((EnvParams.map_height, EnvParams.map_width), dtype=np.float32)
         else:
-            target_map = (
-                (self.tile_type_map == TileType.NEBULA) * self._nebula_energy_reduction / EnvParams.init_unit_energy
+            return (
+                (self.tile_type_map == TileType.NEBULA)
+                * -1
+                * self._nebula_energy_reduction
+                / EnvParams.init_unit_energy
             )
-            target_map = mirroring(target_map, null_value=-1)
-            return target_map
 
     @property
     def vision_power_map(self) -> np.ndarray:
