@@ -159,6 +159,7 @@ imitation_model = ILAgent(EnvParams, cfg.checkpoint_path, cfg.n_stack, cfg.res, 
 
 class Agent:
     def __init__(self, player: str, env_cfg: EnvParams) -> None:
+        torch.set_num_threads(1)
         self.cfg = Config()
         self.player = player
         self.opp_player = "player_1" if self.player == "player_0" else "player_0"
