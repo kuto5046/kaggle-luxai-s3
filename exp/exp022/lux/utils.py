@@ -363,6 +363,9 @@ class EpisodeStore:
             # 絞れていない場合はそのまま
             self._next_tile_type_map = self._tile_type_map.copy()
 
+        self._tile_type_map = mirroring(self._tile_type_map, null_value=-1)
+        self._next_tile_type_map = mirroring(self._next_tile_type_map, null_value=-1)
+
     def _update_relic_map(self, obs: dict[str, Any]) -> None:
         # # relicの情報を記録する関数
         relic_nodes = {(x, y) for x, y in obs["relic_nodes"] if x != -1 and y != -1}
@@ -677,9 +680,7 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
     # map state
     # state_map[State.TILE_TYPE] = np.array(obs["map_features"]["tile_type"]).T
     state_map[State.TILE_TYPE] = episode_store.tile_type_map
-    state_map[State.TILE_TYPE] = mirroring(state_map[State.TILE_TYPE], null_value=-1)
     state_map[State.NEXT_TILE_TYPE] = episode_store.next_tile_type_map
-    state_map[State.NEXT_TILE_TYPE] = mirroring(state_map[State.NEXT_TILE_TYPE], null_value=-1)
     # energy nodesの位置は未知(tileのenergyはvisionで観測可能) energy系は正規化の分母をinit_unit_energyにする
     state_map[State.ENERGY] = np.array(obs["map_features"]["energy"]).T / EnvParams.init_unit_energy
     state_map[State.ENERGY] = mirroring(state_map[State.ENERGY], null_value=-0.1)
