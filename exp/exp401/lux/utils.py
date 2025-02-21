@@ -857,6 +857,18 @@ def extract_hidden_global_state(env_params: dict[str, Any]) -> np.ndarray:
     return hidden_global_states
 
 
+def extract_hidden_global_state2(params: dict[str, Any]) -> np.ndarray:
+    hidden_global_states = np.zeros((len(HiddenGlobalState),), dtype=np.float32)
+    hidden_global_states[HiddenGlobalState.NEBULA_TILE_VISION_REDUCTION] = params["nebula_tile_vision_reduction"]
+    hidden_global_states[HiddenGlobalState.NEBULA_TILE_ENERGY_REDUCTION] = params["nebula_tile_energy_reduction"]
+    hidden_global_states[HiddenGlobalState.UNIT_SAP_DROPOFF_FACTOR] = params["unit_sap_dropoff_factor"]
+    hidden_global_states[HiddenGlobalState.UNIT_ENERGY_VOID_FACTOR] = params["unit_energy_void_factor"]
+    # hidden_global_states[HiddenGlobalState.NEBULA_TILE_DRIFT_SPEED] = env_params.nebula_tile_drift_speed
+    hidden_global_states[HiddenGlobalState.ENERGY_NODE_DRIFT_SPEED] = params["energy_node_drift_magnitude"]
+    hidden_global_states[HiddenGlobalState.ENERGY_NODE_DRIFT_MAGNITUDE] = params["energy_node_drift_speed"]
+    return hidden_global_states
+
+
 def extract_action(actions: dict[str, Any], obs: dict[str, Any], target_team_id: int) -> np.ndarray:
     action_map = np.zeros((2, EnvParams.map_width, EnvParams.map_height), dtype=np.float32)
     # unit state
