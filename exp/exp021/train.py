@@ -23,7 +23,7 @@ LOGGER = logging.getLogger(__name__)
 @dataclass
 class Config:
     exp_name: str = Path(__file__).parent.name
-    notes: str = "nebula energy reductionとvision power_map特徴量追加しglobalのパラメータ推定を一旦やめる"
+    notes: str = "nebula energy reduction特徴量追加しglobalのパラメータ推定を一旦やめる"
     seed: int = 2025
     debug: bool = False
     n_splits: int = 5

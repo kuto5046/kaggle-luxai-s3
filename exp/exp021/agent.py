@@ -31,7 +31,7 @@ class Config:
     tta: bool = False  # 手元の検証では悪化する。90度回転にバグがありそう
     use_fold: int = 0
 
-    checkpoint_path: Path = Path(__file__).parent / f"output/best_model_fold{use_fold}.ckpt"
+    checkpoint_path: Path = Path(__file__).parent / "output/best_model.ckpt"
 
 
 class ILAgent:

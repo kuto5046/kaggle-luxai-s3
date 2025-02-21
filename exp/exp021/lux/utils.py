@@ -14,7 +14,7 @@ class State(IntEnum):
     ENERGY = auto()
     NEBULA_ENERGY_REDUCTION = auto()
     SENSOR_MASK = auto()
-    VISION_POWER_MAP = auto()
+    # VISION_POWER_MAP = auto()
     RELICS = auto()
     POINTS = auto()  # relic nodes周辺のポイントを獲得できるノード
     ENTROPY = auto()
@@ -43,7 +43,6 @@ class GlobalState(IntEnum):
 class HiddenState(IntEnum):
     # OWN_UNIT_COUNT = 0
     OPP_UNIT_COUNT = 0
-    VISION_POWER_MAP = auto()
     POINTS = auto()
     ENERGY = auto()
 
@@ -175,9 +174,11 @@ class EpisodeStore:
         if self._nebula_energy_reduction is None:
             return (self.tile_type_map == TileType.NEBULA) * -1
         else:
-            return (self.tile_type_map == TileType.NEBULA) * (
-                self._nebula_energy_reduction / EnvParams.init_unit_energy
+            target_map = (
+                (self.tile_type_map == TileType.NEBULA) * self._nebula_energy_reduction / EnvParams.init_unit_energy
             )
+            target_map = mirroring(target_map, null_value=-1)
+            return target_map
 
     @property
     def vision_power_map(self) -> np.ndarray:
@@ -281,6 +282,10 @@ class EpisodeStore:
 
     # https://github.com/okumura2997/lux-ai-season-3/blob/69b37bf069c377986004ea083a6e399b88811c7a/src/agent.py#L510
     def _update_vision_power_map(self, obs: dict[str, Any]) -> None:
+        """
+        visionは現在のステップのunit位置と前のステップのタイル位置に基づいて決まる
+        とりあえずここではunit位置に基づくvisionを計算する
+        """
         vision_power_map_padding = self.max_sensor_range
         padded_h = EnvParams.map_height + 2 * vision_power_map_padding
         padded_w = EnvParams.map_width + 2 * vision_power_map_padding
@@ -317,8 +322,18 @@ class EpisodeStore:
         self._vision_power_map = updated_vision_power_map.T
 
     def _update_tile_type_map(self, obs: dict[str, Any]) -> None:
+        """
+        visionは前のtile情報をもとにreductionされる
+        """
         # 新しいタイプマップ（内部規則に合わせ転置済み）
         new_tile_type_map = np.array(obs["map_features"]["tile_type"]).T
+        sensor_mask = np.array(obs["sensor_mask"]).T
+        # vision>0にも関わらず観測できないセルがあれば前のステップにおけるそのはnebulaであると考える
+        self._tile_type_map = np.where(
+            (self._vision_power_map > 0) & (~sensor_mask),
+            TileType.NEBULA,
+            self._tile_type_map,
+        )
 
         # speed候補を絞り込む(移動の可能性のあるstepでのみ行う)
         if (obs["steps"] - 1) % 7 == 0 or (obs["steps"] - 1) % 10 == 0:
@@ -332,13 +347,6 @@ class EpisodeStore:
                 if (obs["steps"] - 1) % self.speed_to_step[abs(speed)] == 0:
                     sign = int(np.sign(speed))
                     self._tile_type_map = np.roll(self._tile_type_map, shift=(1 * sign, -1 * sign), axis=(0, 1))
-        else:
-            # タイル移動の可能性がある時にnebula位置を特定しようとすると矛盾が生じることがあるため暫定対応として移動の可能性がないステップのみnebula位置の特定を行う
-            sensor_mask = np.array(obs["sensor_mask"]).T
-            # vision>0にも関わらず観測できないセルがあればそこはnebulaであると考える
-            new_tile_type_map = np.where(
-                (self._vision_power_map > 0) & (~sensor_mask), TileType.NEBULA, new_tile_type_map
-            )
 
         # 観測値を上書き(未知の場合はそのままでそれ以外は観測値で上書き)
         self._tile_type_map = np.where(new_tile_type_map == TileType.UNKNOWN, self._tile_type_map, new_tile_type_map)
@@ -489,11 +497,12 @@ class EpisodeStore:
 
     def _update_nebula_energy_reduction(self, obs: dict[str, Any], actions: np.ndarray) -> None:
         """
-        nebulaセルに2stepいるunitのエネルギー値を見ることでnebulaセルのエネルギー減少を推定する
+        nebulaセルにいるunitのエネルギー値を見ることでnebulaセルのエネルギー減少を推定する
         """
+        # 一度確定させればあとは計算不要
         if self._nebula_energy_reduction is not None:
             return
-
+        # 0ステップ目は計算できないのでskip
         if self.prev_obs is None:
             return
 
@@ -504,13 +513,13 @@ class EpisodeStore:
         for unit_id, ((x, y), unit_energy) in enumerate(zip(unit_positions, unit_energies)):
             if x == -1 and y == -1:
                 continue
-
             if self._tile_type_map[y, x] != TileType.NEBULA:
                 continue
 
             map_energy = map_energies[y, x]
             prev_unit_energy = prev_unit_energies[unit_id]
 
+            # 前ステップからの行動によってユニットのエネルギーが減少するのでそれを考慮
             action = actions[unit_id][0].item()
             if action == Action.SAP:
                 action_cost = self.unit_sap_cost
@@ -551,7 +560,6 @@ def extract_hidden_state(gt_obs: dict[str, Any], target_team_id: int) -> np.ndar
     state_map[HiddenState.POINTS] = get_gt_point_map(gt_obs)
 
     state_map[HiddenState.ENERGY] = np.array(gt_obs["map_features"]["energy"]).T / 10  # (24, 24)
-    state_map[HiddenState.VISION_POWER_MAP] = np.array(gt_obs["vision_power_map"][target_team_id]).T > 0
     return state_map
 
 
@@ -676,9 +684,8 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
     state_map[State.ENERGY] = np.array(obs["map_features"]["energy"]).T / EnvParams.init_unit_energy
     state_map[State.ENERGY] = mirroring(state_map[State.ENERGY], null_value=-0.1)
     state_map[State.NEBULA_ENERGY_REDUCTION] = episode_store.nebula_energy_reduction
-    state_map[State.NEBULA_ENERGY_REDUCTION] = mirroring(state_map[State.NEBULA_ENERGY_REDUCTION], null_value=-1)
     state_map[State.SENSOR_MASK] = np.array(obs["sensor_mask"]).T
-    state_map[State.VISION_POWER_MAP] = episode_store.vision_power_map
+    # state_map[State.VISION_POWER_MAP] = episode_store.vision_power_map
 
     state_map[State.RELICS] = episode_store.relic_map
     state_map[State.POINTS] = episode_store.point_map
