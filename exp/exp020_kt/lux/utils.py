@@ -91,7 +91,7 @@ class EnergyNodeGuesser:
 
         self._energy_func = lambda d: np.sin(d * 1.2 + 1) * 4
         self._energy_tile_patterns = self.precalculate_energy_tile_pattern()
-        ok_drift_steps = set(
+        ok_drift_steps = {
             # 0.01
             2,
             102,
@@ -175,7 +175,7 @@ class EnergyNodeGuesser:
             462,
             482,
             502,
-        )
+        }
         # ほとんどは上記でカバーされるが、episodeId 66954207でステップ203でdriftが発生するケースがあったので数値誤差を考慮して前後1ステップを追加
         # もし他にも落ちるようであれば毎ターン確認するようにしたほうがいいかも
         self._drift_steps = set()

@@ -241,6 +241,7 @@ class DataProcessor:
                 params = step_info[0]["info"]["replay"]["params"]
                 print(f"{params['energy_node_drift_speed']=} {params['energy_node_drift_magnitude']=}")
 
+            transposed_energy = np.array(gt_obs["map_features"]["energy"]).T
             print(f"true energy_node: {gt_obs['energy_nodes']=}")
             # マッチごとにリセットされる要素をリセット
             if obs["match_steps"] == 0:
@@ -248,7 +249,9 @@ class DataProcessor:
             # リセット時以外はupdateをする
             else:
                 episode_store.update(obs)
-                transposed_energy = np.array(gt_obs["map_features"]["energy"]).T
+            state = extract_state(obs, target_team_id, episode_store)
+
+            if obs["match_steps"] != 0:
                 guess = episode_store.energy_node_guesser._energy_tile_patterns[
                     prev_energy_node[0][1], prev_energy_node[0][0]
                 ]
@@ -260,20 +263,20 @@ class DataProcessor:
                 if prev_energy_field is not None and not np.all(prev_energy_field == transposed_energy):
                     print(f"energy field drifted in {obs['steps']=}")
                 prev_energy_field = transposed_energy
+                fig, ax = plt.subplots(1, 2, figsize=(10, 5))
+                ax[0].imshow(transposed_energy)
+                ax[0].set_title("gt_energy_map")
+                ax[1].imshow(state[State.ENERGY])
+                ax[1].imshow(guess)
+                ax[1].set_title("energy_map")
 
-            state = extract_state(obs, target_team_id, episode_store)
-            fig, ax = plt.subplots(1, 2, figsize=(10, 5))
-            ax[0].imshow(transposed_energy)
-            ax[0].set_title("gt_energy_map")
-            ax[1].imshow(state[State.ENERGY])
-            ax[1].imshow(guess)
-            ax[1].set_title("energy_map")
+                fig.colorbar(ax[0].imshow(transposed_energy), ax=ax[0])
+                # fig.colorbar(ax[1].imshow(state[State.ENERGY]), ax=ax[1])
+                fig.colorbar(ax[1].imshow(guess), ax=ax[1])
+                plt.savefig(self.dbg_png_dir / f"{episode_id}_{step_idx}.png")
+                print(f"save {self.dbg_png_dir / f'{episode_id}_{step_idx}.png'}")
 
-            fig.colorbar(ax[0].imshow(transposed_energy), ax=ax[0])
-            # fig.colorbar(ax[1].imshow(state[State.ENERGY]), ax=ax[1])
-            fig.colorbar(ax[1].imshow(guess), ax=ax[1])
-            plt.savefig(self.dbg_png_dir / f"{episode_id}_{step_idx}.png")
-            print(f"save {self.dbg_png_dir / f'{episode_id}_{step_idx}.png'}")
+            prev_energy_node = gt_obs["energy_nodes"]
 
         return True
 
