@@ -15,9 +15,7 @@ class RankingSystem(ABC):
     def init_rank_state(self) -> Rank:
         pass
 
-    def update(
-        self, rank_1: Rank, rank_2: Rank, rank_1_score: float, rank_2_score: float
-    ):
+    def update(self, rank_1: Rank, rank_2: Rank, rank_1_score: float, rank_2_score: float):
         pass
 
     def _rank_headers(self) -> str:
@@ -46,26 +44,14 @@ class ELO(RankingSystem):
     def update(self, rank_1: ELORank, rank_2: ELORank, rank_1_score, rank_2_score):
         # Only implements win/loss/ties
         if rank_1_score > rank_2_score:
-            rank_1.rating = rank_1.rating + self.K * (
-                1 - self._expected_score(rank_1, rank_2)
-            )
-            rank_2.rating = rank_2.rating + self.K * (
-                0 - self._expected_score(rank_2, rank_1)
-            )
+            rank_1.rating = rank_1.rating + self.K * (1 - self._expected_score(rank_1, rank_2))
+            rank_2.rating = rank_2.rating + self.K * (0 - self._expected_score(rank_2, rank_1))
         elif rank_1_score < rank_2_score:
-            rank_1.rating = rank_1.rating + self.K * (
-                0 - self._expected_score(rank_1, rank_2)
-            )
-            rank_2.rating = rank_2.rating + self.K * (
-                1 - self._expected_score(rank_2, rank_1)
-            )
+            rank_1.rating = rank_1.rating + self.K * (0 - self._expected_score(rank_1, rank_2))
+            rank_2.rating = rank_2.rating + self.K * (1 - self._expected_score(rank_2, rank_1))
         else:
-            rank_1.rating = rank_1.rating + self.K * (
-                0.5 - self._expected_score(rank_1, rank_2)
-            )
-            rank_2.rating = rank_2.rating + self.K * (
-                0.5 - self._expected_score(rank_2, rank_1)
-            )
+            rank_1.rating = rank_1.rating + self.K * (0.5 - self._expected_score(rank_1, rank_2))
+            rank_2.rating = rank_2.rating + self.K * (0.5 - self._expected_score(rank_2, rank_1))
         rank_1.episodes += 1
         rank_2.episodes += 1
 
@@ -92,9 +78,7 @@ class WinLossRank(Rank):
 
 
 class WinLoss(RankingSystem):
-    def __init__(
-        self, win_points=3, tie_points=1, loss_points=0, col_length=10
-    ) -> None:
+    def __init__(self, win_points=3, tie_points=1, loss_points=0, col_length=10) -> None:
         super().__init__()
         self.col_length = col_length
         self.win_points = win_points
@@ -104,9 +88,7 @@ class WinLoss(RankingSystem):
     def init_rank_state(self) -> Rank:
         return WinLossRank(rating=0, episodes=0, wins=0, ties=0, losses=0)
 
-    def update(
-        self, rank_1: WinLossRank, rank_2: WinLossRank, rank_1_score, rank_2_score
-    ):
+    def update(self, rank_1: WinLossRank, rank_2: WinLossRank, rank_1_score, rank_2_score):
         # Only implements win/loss/ties
         if rank_1_score == rank_2_score:
             winner = None

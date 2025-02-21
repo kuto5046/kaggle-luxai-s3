@@ -3,14 +3,14 @@ import time
 
 import flax
 import flax.serialization
-from luxai_s3.params import EnvParams
-from luxai_s3.state import EnvState, serialize_env_actions, serialize_env_states
+from luxai_s3_fast.params import EnvParams
+from luxai_s3_fast.state import EnvState, serialize_env_actions, serialize_env_states
 
 if __name__ == "__main__":
     import jax
     import jax.numpy as jnp
 
-    from luxai_s3.env import LuxAIS3Env
+    from luxai_s3_fast.env import LuxAIS3Env
 
     # from luxai_s3.wrappers import RecordEpisode
 
@@ -30,9 +30,7 @@ if __name__ == "__main__":
     # Step the environment and compile. Not sure why 2 steps? are needed
     for _ in range(2):
         key, subkey = jax.random.split(key)
-        obs, state, reward, terminated, truncated, info = env.step(
-            subkey, state, action, params=env_params
-        )
+        obs, state, reward, terminated, truncated, info = env.step(subkey, state, action, params=env_params)
 
     states = []
     actions = []
@@ -47,9 +45,7 @@ if __name__ == "__main__":
         key, subkey = jax.random.split(key)
         action = env.action_space(env_params).sample(subkey)
         actions.append(action)
-        obs, state, reward, terminated, truncated, info = env.step(
-            subkey, state, action, params=env_params
-        )
+        obs, state, reward, terminated, truncated, info = env.step(subkey, state, action, params=env_params)
         states.append(state)
         # env.render(state, env_params)
     etime = time.time()

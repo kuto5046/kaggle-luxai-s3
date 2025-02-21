@@ -8,10 +8,10 @@ from typing import Any, Callable, Dict, List, Optional
 
 import gymnasium as gym
 import numpy as np
-from luxai_runner.bot import Bot
-from luxai_runner.logger import Logger
-from luxai_runner.utils import to_json
-from luxai_s3.utils import to_numpy
+from luxai_runner_fast.bot import Bot
+from luxai_runner_fast.logger import Logger
+from luxai_runner_fast.utils import to_json
+from luxai_s3_fast.utils import to_numpy
 
 
 @dataclass
@@ -171,9 +171,7 @@ window.episode = {json.dumps(replay)};
                         else:
                             print(f"{agent_id} sent a invalid action {action}")
                     actions[agent_id] = None
-            new_state_obs, rewards, terminations, truncations, infos = self.env.step(
-                actions
-            )
+            new_state_obs, rewards, terminations, truncations, infos = self.env.step(actions)
             i += 1
             # TODO (stao): hard code to avoid using jax structs in the infos and sending those.
             infos = dict(player_0=dict(), player_1=dict())

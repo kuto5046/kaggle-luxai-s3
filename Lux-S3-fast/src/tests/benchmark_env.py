@@ -4,10 +4,11 @@ from typing import Annotated
 import jax
 import jax.numpy as jnp
 import tyro
-from luxai_s3.params import EnvParams
-from luxai_s3.env import LuxAIS3Env
-from luxai_s3.params import env_params_ranges
-from luxai_s3.profiler import Profiler
+from luxai_s3_fast.params import EnvParams
+from luxai_s3_fast.env import LuxAIS3Env
+from luxai_s3_fast.params import env_params_ranges
+from luxai_s3_fast.profiler import Profiler
+
 
 @dataclass
 class Args:
@@ -16,9 +17,11 @@ class Args:
     verbose: Annotated[int, tyro.conf.arg(aliases=["-v"])] = 0
     seed: int = 0
 
+
 if __name__ == "__main__":
     import numpy as np
-    jax.config.update('jax_numpy_dtype_promotion', 'strict')
+
+    jax.config.update("jax_numpy_dtype_promotion", "strict")
     args = tyro.cli(Args)
 
     np.random.seed(args.seed)
@@ -49,21 +52,17 @@ if __name__ == "__main__":
 
     rng_key, subkey = jax.random.split(rng_key)
     env_params = jax.vmap(sample_params)(jax.random.split(subkey, num_envs))
-    action_space = env.action_space() # note that this can generate sap actions beyond range atm
+    action_space = env.action_space()  # note that this can generate sap actions beyond range atm
     sample_action = jax.vmap(action_space.sample)
     obs, state = reset_fn(jax.random.split(subkey, num_envs), env_params)
     obs, state, reward, terminated_dict, truncated_dict, info = step_fn(
-        jax.random.split(subkey, num_envs), 
-        state, 
-        sample_action(jax.random.split(subkey, num_envs)), 
-        env_params
+        jax.random.split(subkey, num_envs), state, sample_action(jax.random.split(subkey, num_envs)), env_params
     )
 
     max_episode_steps = (env.fixed_env_params.max_steps_in_match + 1) * env.fixed_env_params.match_count_per_episode
     rng_key, subkey = jax.random.split(rng_key)
     profiler = Profiler(output_format="stdout")
 
-    
     def benchmark_reset_for_loop_jax_step(rng_key):
         rng_key, subkey = jax.random.split(rng_key)
         states = []
@@ -72,36 +71,42 @@ if __name__ == "__main__":
         for _ in range(max_episode_steps):
             rng_key, subkey = jax.random.split(rng_key)
             obs, state, reward, terminated_dict, truncated_dict, info = step_fn(
-            jax.random.split(subkey, num_envs), 
-            state, 
-            sample_action(jax.random.split(subkey, num_envs)), 
-                env_params
+                jax.random.split(subkey, num_envs), state, sample_action(jax.random.split(subkey, num_envs)), env_params
             )
             jax.block_until_ready(state)
             states.append(state)
-    profiler.profile(partial(benchmark_reset_for_loop_jax_step, rng_key), "reset + for loop jax.step", total_steps=max_episode_steps, num_envs=num_envs, trials=args.trials_per_benchmark)
-    profiler.log_stats("reset + for loop jax.step")
 
+    profiler.profile(
+        partial(benchmark_reset_for_loop_jax_step, rng_key),
+        "reset + for loop jax.step",
+        total_steps=max_episode_steps,
+        num_envs=num_envs,
+        trials=args.trials_per_benchmark,
+    )
+    profiler.log_stats("reset + for loop jax.step")
 
     def run_episode(rng_key, state, env_params):
         def take_step(carry, _):
             rng_key, state = carry
             rng_key, subkey = jax.random.split(rng_key)
             obs, state, reward, terminated_dict, truncated_dict, info = step_fn(
-                jax.random.split(subkey, num_envs), 
-                state, 
-                sample_action(jax.random.split(subkey, num_envs)), 
-                env_params
+                jax.random.split(subkey, num_envs), state, sample_action(jax.random.split(subkey, num_envs)), env_params
             )
             return (rng_key, state), (obs, state, reward, terminated_dict, truncated_dict, info)
-        _, (obs, state, reward, terminated_dict, truncated_dict, info) = jax.lax.scan(take_step, (rng_key, state), length=max_episode_steps, unroll=1)
+
+        _, (obs, state, reward, terminated_dict, truncated_dict, info) = jax.lax.scan(
+            take_step, (rng_key, state), length=max_episode_steps, unroll=1
+        )
         return obs, state, reward, terminated_dict, truncated_dict, info
+
     # compile the scan
-    if args.verbose: print("Compiling run_episode")
+    if args.verbose:
+        print("Compiling run_episode")
     run_episode = jax.jit(run_episode)
     run_episode(subkey, state, env_params)
-    if args.verbose: print("Compiling run_episode done")
-    
+    if args.verbose:
+        print("Compiling run_episode done")
+
     def benchmark_reset_jax_lax_scan_jax_step(rng_key):
         rng_key, subkey = jax.random.split(rng_key)
         obs, state = reset_fn(jax.random.split(subkey, num_envs), env_params)
@@ -109,32 +114,51 @@ if __name__ == "__main__":
         # obs now has shape (max_episode_steps, num_envs, ...)
         obs, state, reward, terminated_dict, truncated_dict, info = run_episode(subkey, state, env_params)
         jax.block_until_ready(state)
-    profiler.profile(partial(benchmark_reset_jax_lax_scan_jax_step, rng_key), "reset + jax.lax.scan(jax.step)", total_steps=max_episode_steps, num_envs=num_envs, trials=args.trials_per_benchmark)
+
+    profiler.profile(
+        partial(benchmark_reset_jax_lax_scan_jax_step, rng_key),
+        "reset + jax.lax.scan(jax.step)",
+        total_steps=max_episode_steps,
+        num_envs=num_envs,
+        trials=args.trials_per_benchmark,
+    )
     profiler.log_stats("reset + jax.lax.scan(jax.step)")
 
     def run_episode_and_reset(rng_key, env_params):
         rng_key, subkey = jax.random.split(rng_key)
         obs, state = reset_fn(jax.random.split(subkey, num_envs), env_params)
+
         def take_step(carry, _):
             rng_key, state = carry
             rng_key, subkey = jax.random.split(rng_key)
             obs, state, reward, terminated_dict, truncated_dict, info = step_fn(
-                jax.random.split(subkey, num_envs), 
-                state, 
-                sample_action(jax.random.split(subkey, num_envs)), 
-                env_params
+                jax.random.split(subkey, num_envs), state, sample_action(jax.random.split(subkey, num_envs)), env_params
             )
             return (rng_key, state), (obs, state, reward, terminated_dict, truncated_dict, info)
-        _, (obs, state, reward, terminated_dict, truncated_dict, info) = jax.lax.scan(take_step, (rng_key, state), length=max_episode_steps)
+
+        _, (obs, state, reward, terminated_dict, truncated_dict, info) = jax.lax.scan(
+            take_step, (rng_key, state), length=max_episode_steps
+        )
         return obs, state, reward, terminated_dict, truncated_dict, info
+
     # compile the scan
-    if args.verbose: print("Compiling run_episode_and_reset")
+    if args.verbose:
+        print("Compiling run_episode_and_reset")
     run_episode_and_reset = jax.jit(run_episode_and_reset)
     run_episode_and_reset(subkey, env_params)
-    if args.verbose: print("Compiling run_episode_and_reset done")
+    if args.verbose:
+        print("Compiling run_episode_and_reset done")
+
     def benchmark_jit_reset_lax_scan_jax_step(rng_key):
         rng_key, subkey = jax.random.split(rng_key)
         obs, state, reward, terminated_dict, truncated_dict, info = run_episode_and_reset(subkey, env_params)
         jax.block_until_ready(state)
-    profiler.profile(partial(benchmark_jit_reset_lax_scan_jax_step, rng_key), "jit(reset + jax.lax.scan(jax.step))", total_steps=max_episode_steps, num_envs=num_envs, trials=args.trials_per_benchmark)
+
+    profiler.profile(
+        partial(benchmark_jit_reset_lax_scan_jax_step, rng_key),
+        "jit(reset + jax.lax.scan(jax.step))",
+        total_steps=max_episode_steps,
+        num_envs=num_envs,
+        trials=args.trials_per_benchmark,
+    )
     profiler.log_stats("jit(reset + jax.lax.scan(jax.step))")

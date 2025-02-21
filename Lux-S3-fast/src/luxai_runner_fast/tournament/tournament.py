@@ -42,9 +42,7 @@ class Tournament:
         for agent in self.cfg.agents:
             self.add_player(agent)
 
-        self.match_making_sys = matchmaking.Random(
-            [x for x in self.players], self.cfg.agents_per_episode
-        )
+        self.match_making_sys = matchmaking.Random([x for x in self.players], self.cfg.agents_per_episode)
 
     def add_player(self, file, name=None):
         if name is None:
@@ -97,19 +95,13 @@ class Tournament:
 
                 lines.append(f"==== {self.cfg.name} ====")
                 # lines.append("")
-                lines.append(
-                    f"{'Player':36.36}| {self.ranking_sys._rank_headers()}| {'Episodes':14.14}"
-                )
+                lines.append(f"{'Player':36.36}| {self.ranking_sys._rank_headers()}| {'Episodes':14.14}")
                 lines.append("-" * line_length)
                 players_sorted = [self.players[p] for p in self.players]
-                players_sorted = sorted(
-                    players_sorted, key=lambda p: p.rank.rating, reverse=True
-                )
+                players_sorted = sorted(players_sorted, key=lambda p: p.rank.rating, reverse=True)
                 for p in players_sorted:
                     rank = p.rank
-                    lines.append(
-                        f"{p.id:36.36}| {self.ranking_sys._rank_info(rank)}| {str(rank.episodes):14.14}"
-                    )
+                    lines.append(f"{p.id:36.36}| {self.ranking_sys._rank_info(rank)}| {str(rank.episodes):14.14}")
                 lines.append("-" * line_length)
                 lines.append(f"{len(episodes)} episodes are running")
 

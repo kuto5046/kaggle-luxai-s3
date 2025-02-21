@@ -1,9 +1,9 @@
 import time
 
 import flax.serialization
-from luxai_s3.params import EnvParams
+from luxai_s3_fast.params import EnvParams
 
-from luxai_s3.wrappers import LuxAIS3GymEnv, RecordEpisode
+from luxai_s3_fast.wrappers import LuxAIS3GymEnv, RecordEpisode
 
 if __name__ == "__main__":
     import numpy as np

@@ -1,4 +1,4 @@
-from luxai_s3.globals import TERM_COLORS
+from luxai_s3_fast.globals import TERM_COLORS
 
 try:
     from termcolor import colored

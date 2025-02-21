@@ -5,12 +5,12 @@ from pathlib import Path
 from typing import Annotated, Dict, List
 
 import numpy as np
-from luxai_runner.bot import Bot
-from luxai_runner.episode import Episode, EpisodeConfig, ReplayConfig
-from luxai_runner.logger import Logger
-from luxai_runner.tournament import Tournament, TournamentConfig
+from luxai_runner_fast.bot import Bot
+from luxai_runner_fast.episode import Episode, EpisodeConfig, ReplayConfig
+from luxai_runner_fast.logger import Logger
+from luxai_runner_fast.tournament import Tournament, TournamentConfig
 
-from luxai_s3.wrappers import LuxAIS3GymEnv, RecordEpisode
+from luxai_s3_fast.wrappers import LuxAIS3GymEnv, RecordEpisode
 import tyro
 from dataclasses import dataclass, field
 from typing import Optional
@@ -69,9 +69,7 @@ def main():
         np.random.seed(args.seed)
     cfg = EpisodeConfig(
         players=args.players,
-        env_cls=lambda **kwargs: RecordEpisode(
-            LuxAIS3GymEnv(numpy_output=True), save_on_close=False
-        ),
+        env_cls=lambda **kwargs: RecordEpisode(LuxAIS3GymEnv(numpy_output=True), save_on_close=False),
         seed=args.seed,
         env_cfg=dict(
             # verbose=args.verbose,
@@ -106,17 +104,12 @@ def main():
         tournament_config = TournamentConfig()
         tournament_config.agents = args.players
 
-        tournament_config.max_concurrent_episodes = getattr(
-            args, "tournament_cfg_concurrent"
-        )
-        tournament_config.ranking_system = getattr(
-            args, "tournament_cfg_ranking_system"
-        )
-        tournament_config.max_episodes = getattr(
-            args, "tournament_cfg_max_episodes"
-        )
+        tournament_config.max_concurrent_episodes = getattr(args, "tournament_cfg_concurrent")
+        tournament_config.ranking_system = getattr(args, "tournament_cfg_ranking_system")
+        tournament_config.max_episodes = getattr(args, "tournament_cfg_max_episodes")
         tourney = Tournament(
-            cfg=tournament_config, episode_cfg=cfg  # the base/default episode config
+            cfg=tournament_config,
+            episode_cfg=cfg,  # the base/default episode config
         )
         # import ipdb;ipdb.set_trace()
         asyncio.run(tourney.run())

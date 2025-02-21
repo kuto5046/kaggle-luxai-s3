@@ -6,9 +6,9 @@ import time
 from argparse import Namespace
 from subprocess import Popen
 
-from luxai_runner.ext_to_command import ext_to_command
-from luxai_runner.logger import Logger
-from luxai_runner.process import BotProcess
+from luxai_runner_fast.ext_to_command import ext_to_command
+from luxai_runner_fast.logger import Logger
+from luxai_runner_fast.process import BotProcess
 
 
 class Bot:
@@ -47,9 +47,7 @@ class Bot:
         self.remainingOverageTime = 600
         self.time_per_step = 9
 
-        self.log = Logger(
-            identifier=f"{self.agent}, {self.main_file_path}", verbosity=verbose
-        )
+        self.log = Logger(identifier=f"{self.agent}, {self.main_file_path}", verbosity=verbose)
 
     async def step(self, obs, step: int, reward: float = 0, info=dict()):
         stime = time.time()
@@ -83,7 +81,9 @@ class Bot:
         except asyncio.TimeoutError:
             action = None
         except:
-            import ipdb;ipdb.set_trace()
+            import ipdb
+
+            ipdb.set_trace()
         time_used = time.time() - stime
         if stderr != "" and stderr is not None:
             self.log.err(f"stderr:\n{stderr}")

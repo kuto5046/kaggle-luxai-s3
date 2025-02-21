@@ -8,7 +8,7 @@ from subprocess import PIPE, STDOUT, Popen
 from threading import Thread
 from typing import IO
 
-from luxai_runner.logger import Logger
+from luxai_runner_fast.logger import Logger
 
 
 class BotProcess:
@@ -54,11 +54,7 @@ class BotProcess:
         base_file_path = os.path.basename(self.file_path)
         if self.is_binary:
             self._agent_process = await asyncio.create_subprocess_exec(
-                (
-                    f"{cwd}\{base_file_path}"
-                    if sys.platform.startswith("win")
-                    else f"./{base_file_path}"
-                ),
+                (f"{cwd}\{base_file_path}" if sys.platform.startswith("win") else f"./{base_file_path}"),
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -108,9 +104,7 @@ class BotProcess:
 
     async def write(self, msg: str):
         self._agent_process.stdin.write(msg.encode())
-        stdout, stderr = await asyncio.gather(
-            self._agent_process.stdout.readline(), self.stderr()
-        )
+        stdout, stderr = await asyncio.gather(self._agent_process.stdout.readline(), self.stderr())
         return stdout.decode(), stderr
 
     async def receive(self) -> str:
