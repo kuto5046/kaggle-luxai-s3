@@ -8,5 +8,5 @@ srun --gpus=1 /bin/bash -c "docker run -i --rm \
     -u \$(id -u):\$(id -g) \
     -v .:/kaggle \
     --gpus all \
-    yuki.okumura/kaggle-luxai-s3-ir \
+    yuki.okumura/kaggle-luxai-s3 \
     /bin/bash -c 'echo \$CUDA_VISIBLE_DEVICES && python -c \"import torch; print(torch.cuda.is_available())\"'"
