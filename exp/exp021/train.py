@@ -23,7 +23,7 @@ LOGGER = logging.getLogger(__name__)
 @dataclass
 class Config:
     exp_name: str = Path(__file__).parent.name
-    notes: str = "nebula energy reductionとvision power_map特徴量追加"
+    notes: str = "nebula energy reductionとvision power_map特徴量追加しglobalのパラメータ推定を一旦やめる"
     seed: int = 2025
     debug: bool = False
     n_splits: int = 5
@@ -51,7 +51,7 @@ class Config:
     # loss
     loss_weight_policy: float = 1.0
     loss_weight_state: float = 1.0
-    loss_weight_global_state: float = 1.0
+    loss_weight_global_state: float = 0.0
     # loss_weight_value: float = 0.0
     # loss_weight_sap: float = 1.0
 

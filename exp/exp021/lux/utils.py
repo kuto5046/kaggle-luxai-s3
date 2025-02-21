@@ -676,6 +676,7 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
     state_map[State.ENERGY] = np.array(obs["map_features"]["energy"]).T / EnvParams.init_unit_energy
     state_map[State.ENERGY] = mirroring(state_map[State.ENERGY], null_value=-0.1)
     state_map[State.NEBULA_ENERGY_REDUCTION] = episode_store.nebula_energy_reduction
+    state_map[State.NEBULA_ENERGY_REDUCTION] = mirroring(state_map[State.NEBULA_ENERGY_REDUCTION], null_value=-1)
     state_map[State.SENSOR_MASK] = np.array(obs["sensor_mask"]).T
     state_map[State.VISION_POWER_MAP] = episode_store.vision_power_map
 

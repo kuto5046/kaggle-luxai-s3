@@ -28,9 +28,10 @@ class Config:
     stochastic: bool = True  # Falseにするとargmaxで行動を選択する
     res: bool = True
     n_stack: int = 4
-    tta: bool = False  # 手元の検証では悪化する。入替のバグがありそう
+    tta: bool = False  # 手元の検証では悪化する。90度回転にバグがありそう
+    use_fold: int = 0
 
-    checkpoint_path: Path = Path(__file__).parent / "output/best_model.ckpt"
+    checkpoint_path: Path = Path(__file__).parent / f"output/best_model_fold{use_fold}.ckpt"
 
 
 class ILAgent:
@@ -103,7 +104,7 @@ class ILAgent:
         # 左右を入れ替えている
         tta_states.append(np.flip(state, axis=3).copy())
         # 90度回転
-        tta_states.append(np.rot90(state, axes=(2, 3)).copy())
+        # tta_states.append(np.rot90(state, axes=(2, 3)).copy())
         return np.stack(tta_states, axis=0)
 
     def switch_action(self, policy_map: np.ndarray, indices: list[int]) -> np.ndarray:
@@ -125,10 +126,10 @@ class ILAgent:
             [Action.CENTER, Action.UP, Action.LEFT, Action.DOWN, Action.RIGHT, Action.SAP],
         )
         # 90度回転(left - down - right - up)
-        policy_map[3] = self.switch_action(
-            np.rot90(policy_map[1], axes=(2, 1)),
-            [Action.CENTER, Action.RIGHT, Action.UP, Action.LEFT, Action.DOWN, Action.SAP],
-        )
+        # policy_map[3] = self.switch_action(
+        #     np.rot90(policy_map[3], axes=(2, 1)),
+        #     [Action.CENTER, Action.RIGHT, Action.UP, Action.LEFT, Action.DOWN, Action.SAP],
+        # )
         return policy_map.mean(axis=0)
 
 
@@ -168,13 +169,14 @@ class Agent:
         self.env_cfg = env_cfg
         self.episode_store = EpisodeStore(self.team_id, env_cfg)
         self.prev_opp_unit_positions = []
+        self.prev_actions = np.zeros((self.env_cfg["max_units"], 3), dtype=int)
 
     def act(self, step: int, obs, remainingOverageTime: int = 60):
         # マッチごとにリセットされる要素をリセット
         if obs["match_steps"] == 0:
             self.episode_store.reset()
         else:
-            self.episode_store.update(obs)
+            self.episode_store.update(obs, self.prev_actions)
         policy_map, point_map = imitation_model.predict(obs, self.team_id, self.episode_store)
 
         unit_mask = np.array(obs["units_mask"][self.team_id])  # shape (max_units, )
@@ -228,6 +230,7 @@ class Agent:
                     break
         # 敵ユニットの位置を更新
         self.prev_opp_unit_positions = opp_unit_positions
+        self.prev_actions = actions
         return actions
 
 
