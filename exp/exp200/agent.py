@@ -96,6 +96,14 @@ class ILAgent:
             policy_map = self.tta_for_policy_map(policy_map)
         elif do_flip:
             policy_map = np.flip(policy_map, axis=(1, 2)).copy()
+            policy_map[Action.UP], policy_map[Action.DOWN] = (
+                policy_map[Action.DOWN].copy(),
+                policy_map[Action.UP].copy(),
+            )
+            policy_map[Action.LEFT], policy_map[Action.RIGHT] = (
+                policy_map[Action.RIGHT].copy(),
+                policy_map[Action.LEFT].copy(),
+            )
 
         policy_map = get_legal_policy(obs, policy_map, team_id, episode_store)
         point_map = state[State.POINTS]
