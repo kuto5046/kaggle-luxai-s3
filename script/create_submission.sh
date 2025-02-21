@@ -4,6 +4,7 @@ sub_name=$1
 exp_dir=$2
 out_file=$sub_name.tar.gz
 
+cd /kaggle
 mkdir ./submissions/$sub_name
 cd $exp_dir
 rsync -av --exclude='__pycache__' --exclude='dataset-metadata.json' . ../../../submissions/$sub_name/
