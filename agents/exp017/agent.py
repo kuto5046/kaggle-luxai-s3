@@ -114,7 +114,6 @@ class Agent:
         self.prev_opp_unit_positions = []
 
     def act(self, step: int, obs, remainingOverageTime: int = 60):
-        print(f"start step=({step}", file=stderr)
         # マッチごとにリセットされる要素をリセット
         if obs["match_steps"] == 0:
             self.episode_store.reset()
