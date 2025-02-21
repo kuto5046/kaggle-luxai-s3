@@ -128,12 +128,17 @@ class DataProcessor:
 
             target_team_id = np.argmax(json_load["rewards"])  # win or tie
             match_results = get_match_results(json_load, target_team_id)
-
+            
+            valid_steps = (np.argmax(np.cumsum(match_results)) + 1) * 101
+            
             # episode内で獲得する情報
             env_params = EnvParams(**json_load["configuration"]["env_cfg"])
             episode_store = EpisodeStore(target_team_id, env_params, self.cfg.validation, episode_id)
             steps = json_load["steps"]
             for step_idx in range(len(steps) - 1):  # 505でdoneとなるため-1
+                if step_idx > valid_steps:
+                    break
+                
                 step_info = steps[step_idx]
                 next_step_info = steps[step_idx + 1]
                 obs = json.loads(step_info[target_team_id]["observation"]["obs"])
@@ -183,7 +188,6 @@ class DataProcessor:
                 joblib.delayed(self._process_episode)(row) for row in tqdm(df.iter_rows(named=True), total=len(df))
             )
 
-
         # 有効なエピソードのみを抽出
         valid_results = [r for r in results if r is not None]
         valid_ids, max_steps, target_team_ids, is_wins = zip(*valid_results)
@@ -215,9 +219,11 @@ def get_match_results(json_load: dict[str, Any], target_team_id: int) -> list[bo
     match_results = []
     for i_match in range(EnvParams.match_count_per_episode):
         final_step_in_match = (i_match + 1) * 100 + i_match  # 100, 201, 302, 403, 504
-        win_team = np.argmax(
-            json_load["steps"][final_step_in_match][0]["info"]["replay"]["observations"][0]["team_points"]
-        )
+
+        teams_wins_after = np.asarray(json_load["steps"][final_step_in_match + 1][0]["info"]["replay"]["observations"][0]["team_wins"])
+        teams_wins_before = np.asarray(json_load["steps"][final_step_in_match][0]["info"]["replay"]["observations"][0]["team_wins"])
+        win_team = np.argmax(teams_wins_after - teams_wins_before)
+
         is_win = win_team == target_team_id
         match_results.append(is_win)
     return match_results
