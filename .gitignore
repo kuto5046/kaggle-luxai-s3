@@ -9,6 +9,9 @@ output
 wandb
 lightning
 
+# exp/bestはignoreしない
+!exp/best
+
 *tar.gz
 *.json
 *.ipynb
