@@ -25,7 +25,7 @@ from scipy.special import softmax
 class Config:
     seed: int = 2025
     # 確率的な行動を取るかどうか
-    stochastic: bool = True  # Falseにするとargmaxで行動を選択する
+    # stochastic: bool = True  # Falseにするとargmaxで行動を選択する
     res: bool = True
     n_stack: int = 4
 
@@ -102,6 +102,7 @@ imitation_model = ILAgent(EnvParams, cfg.checkpoint_path, cfg.n_stack, cfg.res)
 
 class Agent:
     def __init__(self, player: str, env_cfg: EnvParams) -> None:
+        torch.set_num_threads(1)
         self.cfg = Config()
         self.player = player
         self.opp_player = "player_1" if self.player == "player_0" else "player_0"
@@ -111,6 +112,51 @@ class Agent:
         self.env_cfg = env_cfg
         self.episode_store = EpisodeStore(self.team_id, env_cfg)
         self.prev_opp_unit_positions = []
+
+    def _can_sap(
+        self,
+        unit_pos: tuple[int, int],
+        opp_unit_positions: list[tuple[int, int]],
+        point_map: np.ndarray,
+        sapped_points: set,
+    ) -> tuple[bool, tuple[Action, int, int]]:
+        # 範囲内にいる敵ユニットを取得
+        nearby_enemy_unit_ids = get_nearby_enemy_unit_ids(unit_pos, opp_unit_positions, self.env_cfg["unit_sap_range"])
+        # nearby_enemy_unit_idsからsapped_pointsに含まれるユニットを除外
+        nearby_enemy_unit_ids = [
+            unit_id for unit_id in nearby_enemy_unit_ids if opp_unit_positions[unit_id] not in sapped_points
+        ]
+        if len(nearby_enemy_unit_ids) > 0:
+            sap_pos = opp_unit_positions[np.random.choice(nearby_enemy_unit_ids)]
+            # 敵ユニットが2ステップ以上動いていない場合はsapする
+            if point_map[sap_pos[1], sap_pos[0]] == 1 or sap_pos in self.prev_opp_unit_positions:
+                dx, dy = calc_relative_pos(unit_pos, sap_pos)
+                return True, [Action.SAP, dx, dy]
+            else:
+                # 敵ユニットの隣接セルがポイント位置であればそこに移動すると考える。
+                nearby_point_positions = get_nearby_point_positions(sap_pos, point_map)
+                if len(nearby_point_positions) > 0:
+                    sap_pos = nearby_point_positions[np.random.choice(len(nearby_point_positions))]
+                    dx, dy = calc_relative_pos(unit_pos, sap_pos)
+                    return True, [Action.SAP, dx, dy]
+        return False, [Action.CENTER, 0, 0]
+
+    # 確率に応じた重み付きラウンドロビンで、ユニット数分の行動順序（リスト）を作成する関数
+    def weighted_round_robin(self, candidates: list[tuple[int, float]], total: int) -> list[int]:
+        total_weight = sum(weight for _, weight in candidates)
+        # 各候補の現在の値を初期化
+        current = {action: 0.0 for action, _ in candidates}
+        ordering = []
+        for _ in range(total):
+            # 各候補の現在値に重みを加算
+            for action, weight in candidates:
+                current[action] += weight
+            # 現在値が最大の候補を選ぶ
+            chosen = max(candidates, key=lambda x: current[x[0]])[0]
+            ordering.append(chosen)
+            # 選ばれた候補から全候補の重み合計を引く
+            current[chosen] -= total_weight
+        return ordering
 
     def act(self, step: int, obs, remainingOverageTime: int = 60):
         # マッチごとにリセットされる要素をリセット
@@ -127,48 +173,51 @@ class Agent:
         opp_unit_positions = [tuple(pos) for pos in obs["units"]["position"][self.opp_team_id] if pos[0] != -1]
         actions = np.zeros((self.env_cfg["max_units"], 3), dtype=int)
         # unit ids range from 0 to max_units - 1
+        pos_to_unit_id = dict()
+
         for unit_id in available_unit_ids:
             unit_pos = unit_positions[unit_id]
             x, y = unit_pos
-            policy = policy_map[:, y, x]
+            if (x, y) in pos_to_unit_id:
+                pos_to_unit_id[(x, y)].append(unit_id)
+            else:
+                pos_to_unit_id[(x, y)] = [unit_id]
 
-            while True:
-                if cfg.stochastic:
-                    if policy.sum() == 0:
-                        actions[unit_id] = [Action.CENTER, 0, 0]
-                        break
+        sapped_points = set()
 
-                    policy = policy / policy.sum()
-                    action = np.random.choice(range(6), p=policy)
+        actions = np.zeros((self.env_cfg["max_units"], 3), dtype=int)
+        for unit_pos, unit_ids in pos_to_unit_id.items():
+            x, y = unit_pos
+            policy = policy_map[:, y, x].copy()
+
+            # unit_idの分だけpolicyの候補を決めておく
+            action_candidates = []
+            # まず、上位の行動を3つ取得
+            for _ in range(3):
+                action = policy.argmax()
+                if action == Action.SAP and not get_valid_sap_map(obs, self.team_id, self.episode_store)[y, x]:
+                    policy[action] = -1
+                    continue
+                action_candidates.append((action, policy[action]))
+                policy[action] = -1
+
+            # 確率に応じて行動を取得.高いもの先に来るようにしている. A:0.4, B:0.1 の場合、ユニット数が5ならA,A,B,A,Aのようになるはず
+            total_units = len(unit_ids)
+            ordering = self.weighted_round_robin(action_candidates, total_units)
+            # SAPがだめなとき用に確率が高い順に行動を取得
+            sap_alt = action_candidates[0][0] if action_candidates[0][0] != Action.SAP else action_candidates[1][0]
+            assert len(ordering) == total_units
+            for unit_id, act in zip(unit_ids, ordering):
+                if act == Action.SAP:
+                    can_sap, sap_action = self._can_sap(unit_pos, opp_unit_positions, point_map, sapped_points)
+                    if can_sap:
+                        sapped_points.add(tuple(unit_pos))
+                        actions[unit_id] = sap_action
+                    else:
+                        actions[unit_id] = [sap_alt, 0, 0]
                 else:
-                    action = policy.argmax()
+                    actions[unit_id] = [act, 0, 0]
 
-                # print(policy, file=sys.stderr)
-                if action == Action.SAP:
-                    # 範囲内にいる敵ユニットを取得
-                    nearby_enemy_unit_ids = get_nearby_enemy_unit_ids(
-                        unit_pos, opp_unit_positions, self.env_cfg["unit_sap_range"]
-                    )
-                    if len(nearby_enemy_unit_ids) > 0:
-                        sap_pos = opp_unit_positions[np.random.choice(nearby_enemy_unit_ids)]
-                        # 敵ユニットが2ステップ以上動いていない場合はsapする
-                        if point_map[sap_pos[1], sap_pos[0]] == 1 or sap_pos in self.prev_opp_unit_positions:
-                            dx, dy = calc_relative_pos(unit_pos, sap_pos)
-                            actions[unit_id] = [Action.SAP, dx, dy]
-                            break
-                        else:
-                            # 敵ユニットの隣接セルがポイント位置であればそこに移動すると考える。
-                            nearby_point_positions = get_nearby_point_positions(sap_pos, point_map)
-                            if len(nearby_point_positions) > 0:
-                                sap_pos = nearby_point_positions[np.random.choice(len(nearby_point_positions))]
-                                dx, dy = calc_relative_pos(unit_pos, sap_pos)
-                                actions[unit_id] = [Action.SAP, dx, dy]
-                                break
-
-                    policy[Action.SAP] = 0
-                else:
-                    actions[unit_id] = [action, 0, 0]
-                    break
         # 敵ユニットの位置を更新
         self.prev_opp_unit_positions = opp_unit_positions
         return actions
