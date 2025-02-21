@@ -46,6 +46,7 @@ class ILAgent:
         state_dict = {k.replace("model.", ""): v for k, v in ckpt["state_dict"].items()}
         self.model.load_state_dict(state_dict)
         self.model.eval()
+        self.model = self.model.cuda()
         self.player = None
         self.env_cfg = env_cfg
         # n_stack分のstateを保持するqueue
@@ -66,7 +67,11 @@ class ILAgent:
         }
 
         with torch.no_grad():
+            for key, value in states.items():
+                states[key] = value.cuda()
             output = self.model(states)
+            for key, value in output.items():
+                output[key] = value.cpu()
             policy_map = output["policy"].squeeze().numpy()
 
         policy_map = get_legal_policy(obs, policy_map, team_id, episode_store)
@@ -102,6 +107,7 @@ imitation_model = ILAgent(EnvParams, cfg.checkpoint_path, cfg.n_stack, cfg.res)
 
 class Agent:
     def __init__(self, player: str, env_cfg: EnvParams) -> None:
+        torch.set_num_threads(1)
         self.cfg = Config()
         self.player = player
         self.opp_player = "player_1" if self.player == "player_0" else "player_0"
