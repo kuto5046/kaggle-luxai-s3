@@ -103,6 +103,26 @@ class Tournament:
                     rank = p.rank
                     lines.append(f"{p.id:36.36}| {self.ranking_sys._rank_info(rank)}| {str(rank.episodes):14.14}")
                 lines.append("-" * line_length)
+
+                # perform binomtest
+                if len(self.players) == 2 and isinstance(self.ranking_sys, WinLoss):
+                    from scipy.stats import binomtest
+
+                    players = [self.players[p] for p in self.players]
+                    for player in players:
+                        rank = player.rank
+                        total = rank.episodes
+                        wins = rank.wins
+                        loss = rank.losses
+                        draw = rank.ties
+                        assert total == wins + loss + draw
+                        assert draw == 0
+
+                        if total > 0:
+                            result = binomtest(wins, total, p=0.5, alternative="greater")
+                            lines.append(f"{player.id} Win rate: {wins/total:.2f} (p-value: {result.pvalue:.4f})")
+
+                lines.append("-" * line_length)
                 lines.append(f"{len(episodes)} episodes are running")
 
                 for _ in range(len(lines)):
