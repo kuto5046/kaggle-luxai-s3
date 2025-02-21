@@ -2,15 +2,17 @@
 *.html
 *.png
 *.csv
-output
+# output
+
+*.ckpt
+*.h5
 *.pkl
 *.pickle
 *.parquet
 wandb
 lightning
-
 # exp/bestはignoreしない
-!exp/best
+!exp/best/output/*.ckpt
 
 *tar.gz
 *.json
