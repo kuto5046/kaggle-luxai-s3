@@ -151,7 +151,7 @@ class LaxLitDataModule(LightningDataModule):
 
     def setup(self, stage: str | None = None) -> None:
         df = pl.read_csv(self.cfg.feature_dir / "train.csv")
-        df = df.filter(pl.col("Win"))  # 勝利したエピソードのみを使用
+        # df = df.filter(pl.col("Win"))  # 勝利したエピソードのみを使用
         train = df.filter(pl.col("fold") != self.cfg.use_fold)
         valid = df.filter(pl.col("fold") == self.cfg.use_fold)
         self.train_dataset = LaxDataset(train, self.cfg, mode="train")
@@ -230,7 +230,7 @@ class LaxLitModel(LightningModule):
         # policy_loss = self.criterion1(policy_preds, policy_targets, policy_mask)
         policy_loss = self.criterion1(policy_preds, policy_targets)
 
-        # value_loss = self.criterion2(outputs["value"].flatten(), batch["win"])
+        value_loss = self.criterion2(outputs["value"].flatten(), batch["win"])
         state_loss = self.criterion3(outputs["state"].flatten(), batch["hidden_state"].flatten())
         global_state_loss = self.criterion3(outputs["global_state"].flatten(), batch["hidden_global_state"].flatten())
 
@@ -239,7 +239,7 @@ class LaxLitModel(LightningModule):
         loss = (
             policy_loss * self.cfg.loss_weight_policy
             + state_loss * self.cfg.loss_weight_state
-            # + value_loss * self.cfg.loss_weight_value
+            + value_loss * self.cfg.loss_weight_value
             + global_state_loss * self.cfg.loss_weight_global_state
             # + sap_loss * self.cfg.loss_weight_sap
         )
@@ -260,14 +260,14 @@ class LaxLitModel(LightningModule):
         #     prog_bar=False,
         #     logger=True,
         # )
-        # self.log(
-        #     f"ValueLoss/{mode}",
-        #     value_loss,
-        #     on_step=False,
-        #     on_epoch=True,
-        #     prog_bar=False,
-        #     logger=True,
-        # )
+        self.log(
+            f"ValueLoss/{mode}",
+            value_loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+        )
         self.log(
             f"StateLoss/{mode}",
             state_loss,
@@ -511,13 +511,13 @@ class LuxUNetModel(nn.Module):
         # self.sap_net = OutConv(64 * n_stack, 1)
         self.state_net = OutConv(64 * n_stack, hidden_state_space_size)
         self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
-        # self.value_net = nn.Sequential(
-        #     nn.Linear((256 + global_state_space_size) * n_stack, 128),
-        #     nn.ReLU(),
-        #     nn.Linear(128, 64),
-        #     nn.ReLU(),
-        #     nn.Linear(64, 1),
-        # )
+        self.value_net = nn.Sequential(
+            nn.Linear((256 + global_state_space_size) * n_stack, 128),
+            nn.ReLU(),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1),
+        )
         self.global_state_net = nn.Sequential(
             nn.Linear((256 + global_state_space_size) * n_stack, 128),
             nn.ReLU(),
@@ -544,7 +544,7 @@ class LuxUNetModel(nn.Module):
 
         x4 = torch.cat([x4, gx], dim=1)
         x = self.global_avg_pool(x4).view(_n, -1)
-        # value_logits = self.value_net(x)
+        value_logits = self.value_net(x)
         global_state_logits = self.global_state_net(x)
 
         x = self.up1(x4, x3)
@@ -561,7 +561,7 @@ class LuxUNetModel(nn.Module):
             # "sap": sap_logits,
             "state": state_logits,
             "global_state": global_state_logits,
-            # "value": value_logits,
+            "value": value_logits,
         }
 
 

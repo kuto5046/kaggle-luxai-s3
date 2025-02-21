@@ -66,14 +66,26 @@ def get_kfold(train: pl.DataFrame, n_splits: int, seed: int = 0) -> pl.DataFrame
 
 def valid_episode(json_load: dict[str, Any], target_team_name: str) -> bool:
     """対象のチームが勝利してるepisodeのみ有効"""
+    if "rewards" not in json_load:
+        print(f"rewards not in {json_load}")
     for r in json_load["rewards"]:
         if r is None:
             print(f"rewards include None -> {json_load['rewards']}")
             return False
     win_idx = np.argmax([r or 0 for r in json_load["rewards"]])  # win or tie
     win_team = json_load["info"]["TeamNames"][win_idx]
-    return win_team == target_team_name
-    # return True
+    # return win_team == target_team_name
+    return True
+
+
+def get_target_team_id(json_load: dict[str, Any], target_team_name: str) -> int:
+    """対象のチームのidを返す"""
+    assert valid_episode(json_load, target_team_name)
+    if json_load["info"]["TeamNames"][0] == target_team_name:
+        return 0
+    else:
+        assert json_load["info"]["TeamNames"][1] == target_team_name
+        return 1
 
 
 def remove_and_mkdir(path: Path) -> None:
@@ -104,7 +116,7 @@ class DataProcessor:
         print(f"unique episode_df: {len(episode_df)}")
         if self.cfg.debug:
             episode_df = episode_df.sample(n=5, seed=self.cfg.seed)
-            # episode_df = episode_df.filter(pl.col("EpisodeId") == 67293512)
+        episode_df = episode_df.filter(pl.col("EpisodeId") != 67293512)
         return episode_df
 
     def _process_episode(self, row) -> tuple[str, int, int]:
@@ -117,7 +129,18 @@ class DataProcessor:
 
         # 無効なepisodeはスキップ(valueも学習したいのでskip)
         if not valid_episode(json_load, self.cfg.target_team_name):
-            return None
+            return False
+
+        target_team_id = get_target_team_id(json_load, self.cfg.target_team_name)
+        last_obs = json.loads(json_load["steps"][-1][target_team_id]["observation"]["obs"])
+        team_wins = last_obs["team_wins"]
+
+        if team_wins[target_team_id] < team_wins[1 - target_team_id]:
+            bo5_result = 0
+        elif team_wins[target_team_id] > team_wins[1 - target_team_id]:
+            bo5_result = 1
+        else:
+            bo5_result = 0.5
 
         with h5py.File(self.feature_dir / f"temp_{episode_id}.h5", "w") as out_f:
             episode_group = out_f.create_group(f"{episode_id}")
@@ -129,7 +152,6 @@ class DataProcessor:
             episode_win_group = episode_group.create_group("win")
 
             target_team_id = np.argmax(json_load["rewards"])  # win or tie
-            match_results = get_match_results(json_load, target_team_id)
 
             # episode内で獲得する情報
             env_params = EnvParams(**json_load["configuration"]["env_cfg"])
@@ -143,6 +165,9 @@ class DataProcessor:
 
                 # マッチごとにリセットされる要素をリセット
                 if obs["match_steps"] == 0:
+                    if obs["team_wins"][target_team_id] == 3 or obs["team_wins"][1 - target_team_id] == 3:
+                        # 勝ちが決まっている場合はスキップ
+                        break
                     episode_store.reset()
                 # リセット時以外はupdateをする
                 else:
@@ -168,10 +193,10 @@ class DataProcessor:
                 episode_action_group.create_dataset(f"{step_idx}", data=action)
 
                 match_idx = obs["steps"] // (EnvParams.max_steps_in_match + 1)
-                is_win = match_results[match_idx]
-                episode_win_group.create_dataset(f"{step_idx}", data=is_win)
+                # is_win = bo5_result[match_idx]
+                episode_win_group.create_dataset(f"{step_idx}", data=bo5_result)
 
-        return str(episode_id), len(steps) - 1, target_team_id, is_win
+        return str(episode_id), len(steps) - 1, target_team_id, bo5_result
 
     def preprocess(self, df: pl.DataFrame) -> pl.DataFrame:
         # 並列処理の実行
@@ -210,8 +235,6 @@ class DataProcessor:
         sub_id = row["SubmissionId"]
         episode_id = row["EpisodeId"]
         episode_path = self.episode_dir / f"{sub_id}/{episode_id}.json"
-        # if episode_id != 66954207:
-        #     return False
         with open(episode_path) as f:
             json_load = json.load(f)
 
@@ -219,8 +242,16 @@ class DataProcessor:
         if not valid_episode(json_load, self.cfg.target_team_name):
             return False
 
-        target_team_id = np.argmax(json_load["rewards"])  # win or tie
-        match_results = get_match_results(json_load, target_team_id)
+        target_team_id = get_target_team_id(json_load, self.cfg.target_team_name)
+        last_obs = json.loads(json_load["steps"][-1][target_team_id]["observation"]["obs"])
+        team_wins = last_obs["team_wins"]
+
+        if team_wins[target_team_id] < team_wins[1 - target_team_id]:
+            bo5_result = 0
+        elif team_wins[target_team_id] > team_wins[1 - target_team_id]:
+            bo5_result = 1
+        else:
+            bo5_result = 0.5
 
         # episode内で獲得する情報
         env_params = EnvParams(**json_load["configuration"]["env_cfg"])
