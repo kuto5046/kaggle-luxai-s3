@@ -1,3 +1,4 @@
 #!/bin/bash
 
-sh srun.sh 'luxai-s3 ./exp/okumura/exp001/main.py agents/exp017/main.py -o working/replay.json'
+export JAX_TRACEBACK_FILTERING=off 
+luxai-s3 ./exp/okumura/exp001/main.py agents/exp017/main.py --tournament
