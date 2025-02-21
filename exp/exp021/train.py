@@ -23,13 +23,13 @@ LOGGER = logging.getLogger(__name__)
 @dataclass
 class Config:
     exp_name: str = Path(__file__).parent.name
-    notes: str = "augを上下左右反転にする"
+    notes: str = "nebula energy reductionとvision power_map特徴量追加"
     seed: int = 2025
     debug: bool = False
     n_splits: int = 5
     use_fold: int = 0
     root_dir: Path = Path("/home/user/work")
-    feature_version: str = "exp017"
+    feature_version: str = exp_name
     feature_dir: Path = root_dir / f"output/feature_store/{feature_version}"
     output_dir = root_dir / f"exp/{exp_name}/output"
 
@@ -98,7 +98,7 @@ class TrainPipeline:
             dirpath=self.output_dir,
             monitor="Loss/valid",
             mode="min",
-            filename=f"best_model_{self.cfg.use_fold}",
+            filename="best_model",
             save_weights_only=True,
             verbose=True,
         )

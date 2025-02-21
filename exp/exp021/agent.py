@@ -103,7 +103,7 @@ class ILAgent:
         # 左右を入れ替えている
         tta_states.append(np.flip(state, axis=3).copy())
         # 90度回転
-        # tta_states.append(np.rot90(state, axes=(2, 3)).copy())
+        tta_states.append(np.rot90(state, axes=(2, 3)).copy())
         return np.stack(tta_states, axis=0)
 
     def switch_action(self, policy_map: np.ndarray, indices: list[int]) -> np.ndarray:
@@ -125,10 +125,10 @@ class ILAgent:
             [Action.CENTER, Action.UP, Action.LEFT, Action.DOWN, Action.RIGHT, Action.SAP],
         )
         # 90度回転(left - down - right - up)
-        # policy_map[3] = self.switch_action(
-        #     np.rot90(policy_map[3], axes=(2, 1)),
-        #     [Action.CENTER, Action.RIGHT, Action.UP, Action.LEFT, Action.DOWN, Action.SAP],
-        # )
+        policy_map[3] = self.switch_action(
+            np.rot90(policy_map[1], axes=(2, 1)),
+            [Action.CENTER, Action.RIGHT, Action.UP, Action.LEFT, Action.DOWN, Action.SAP],
+        )
         return policy_map.mean(axis=0)
 
 

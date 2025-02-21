@@ -28,15 +28,12 @@ class Config:
     stochastic: bool = True  # Falseにするとargmaxで行動を選択する
     res: bool = True
     n_stack: int = 4
-    tta: bool = False  # 手元の検証では悪化する。入替のバグがありそう
 
     checkpoint_path: Path = Path(__file__).parent / "output/best_model.ckpt"
 
 
 class ILAgent:
-    def __init__(
-        self, env_cfg: EnvParams, checkpoint_path: Path, n_stack: int, res: bool = True, tta: bool = True
-    ) -> None:
+    def __init__(self, env_cfg: EnvParams, checkpoint_path: Path, n_stack: int, res: bool = True) -> None:
         self.model = LuxUNetModel(
             state_space_size=len(State),
             global_state_space_size=len(GlobalState),
@@ -51,7 +48,6 @@ class ILAgent:
         self.model.eval()
         self.player = None
         self.env_cfg = env_cfg
-        self.tta = tta
         # n_stack分のstateを保持するqueue
         self.stack_states = deque(maxlen=n_stack)
         self.stack_global_states = deque(maxlen=n_stack)
@@ -64,72 +60,19 @@ class ILAgent:
         global_state = extract_global_state(obs, team_id, self.env_cfg)
         self.stack_states.append(state)
         self.stack_global_states.append(global_state)
-        states = np.stack(list(self.stack_states), axis=0)
-        global_states = np.stack(list(self.stack_global_states), axis=0)
-
-        # batch方向にstack
-        if self.tta:
-            states = self.tta_for_state(states)
-            global_states = np.stack([global_states for _ in range(states.shape[0])], axis=0)
-            states = torch.from_numpy(states).float()
-            global_states = torch.from_numpy(global_states).float()
-        else:
-            # batchの次元を追加
-            states = torch.from_numpy(states).unsqueeze(0).float()
-            global_states = torch.from_numpy(global_states).unsqueeze(0).float()
-
-        features = {
-            "state": states,
-            "global_state": global_states,
+        states = {
+            "state": torch.from_numpy(np.stack(list(self.stack_states), axis=0)).unsqueeze(0).float(),
+            "global_state": torch.from_numpy(np.stack(list(self.stack_global_states), axis=0)).unsqueeze(0).float(),
         }
 
         with torch.no_grad():
-            output = self.model(features)
+            output = self.model(states)
             policy_map = output["policy"].squeeze().numpy()
-
-        if self.tta:
-            policy_map = self.tta_for_policy_map(policy_map)
 
         policy_map = get_legal_policy(obs, policy_map, team_id, episode_store)
         point_map = state[State.POINTS]
 
         return policy_map, point_map
-
-    def tta_for_state(self, state: np.ndarray) -> np.ndarray:
-        tta_states = []
-        tta_states.append(state.copy())
-        # 上下を入れ替えている
-        tta_states.append(np.flip(state, axis=2).copy())
-        # 左右を入れ替えている
-        tta_states.append(np.flip(state, axis=3).copy())
-        # 90度回転
-        # tta_states.append(np.rot90(state, axes=(2, 3)).copy())
-        return np.stack(tta_states, axis=0)
-
-    def switch_action(self, policy_map: np.ndarray, indices: list[int]) -> np.ndarray:
-        return policy_map[indices, :, :]
-
-    def tta_for_policy_map(self, policy_map: np.ndarray) -> np.ndarray:
-        """
-        policy_map: (num_action, 24, 24)
-        """
-        # center up, right, down, left, sap
-        # 上下を入れ替えている
-        policy_map[1] = self.switch_action(
-            np.flip(policy_map[1], axis=1),
-            [Action.CENTER, Action.DOWN, Action.RIGHT, Action.UP, Action.LEFT, Action.SAP],
-        )
-        # 左右を入れ替えている
-        policy_map[2] = self.switch_action(
-            np.flip(policy_map[2], axis=2),
-            [Action.CENTER, Action.UP, Action.LEFT, Action.DOWN, Action.RIGHT, Action.SAP],
-        )
-        # 90度回転(left - down - right - up)
-        # policy_map[3] = self.switch_action(
-        #     np.rot90(policy_map[3], axes=(2, 1)),
-        #     [Action.CENTER, Action.RIGHT, Action.UP, Action.LEFT, Action.DOWN, Action.SAP],
-        # )
-        return policy_map.mean(axis=0)
 
 
 def get_legal_policy(
@@ -154,7 +97,7 @@ def get_legal_sap_policy(
 
 cfg = Config()
 seed_everything(cfg.seed, workers=True)
-imitation_model = ILAgent(EnvParams, cfg.checkpoint_path, cfg.n_stack, cfg.res, cfg.tta)
+imitation_model = ILAgent(EnvParams, cfg.checkpoint_path, cfg.n_stack, cfg.res)
 
 
 class Agent:
