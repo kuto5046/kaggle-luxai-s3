@@ -42,7 +42,6 @@ class HiddenState(IntEnum):
     # OWN_UNIT_COUNT = 0
     OPP_UNIT_COUNT = 0
     POINTS = auto()
-    ENERGY = auto()
 
 
 # episodeごとに変動する環境パラメータ
@@ -52,8 +51,8 @@ class HiddenGlobalState(IntEnum):
     UNIT_SAP_DROPOFF_FACTOR = auto()
     UNIT_ENERGY_VOID_FACTOR = auto()
     # NEBULA_TILE_DRIFT_SPEED = auto() . # 推定可能なので不要
-    ENERGY_NODE_DRIFT_SPEED = auto()
-    ENERGY_NODE_DRIFT_MAGNITUDE = auto()
+    ENERGY_NODE_DRIFT_SPEED = auto()  # 推定可能だがあまり意味がなさそうなので Auxilary Lossのままにしてある
+    ENERGY_NODE_DRIFT_MAGNITUDE = auto()  # 多分推定できる
 
 
 class Action(IntEnum):
@@ -76,6 +75,134 @@ def to_np(x: torch.Tensor) -> np.ndarray:
     return x.detach().cpu().numpy()
 
 
+class EnergyNodeGuesser:
+    def __init__(self) -> None:
+        self._energy_node_candidates = [
+            (j, i)
+            for i in range(EnvParams.map_height)
+            for j in range(EnvParams.map_width)
+            if i + j <= EnvParams.map_height - 1
+        ]
+        # (bool, int)のタプルで、boolはその場所のエネルギーが取得済みかどうか、intはその場所のエネルギー量 二次元リスト
+        self._energy_map = np.empty((EnvParams.map_height, EnvParams.map_width), dtype=object)
+        for y in range(EnvParams.map_height):
+            for x in range(EnvParams.map_width):
+                self._energy_map[y, x] = (False, 0)
+
+        self._energy_func = lambda d: np.sin(d * 1.2 + 1) * 4
+        self._energy_tile_patterns = self.precalculate_energy_tile_pattern()
+        # fmt: off
+        ok_drift_steps = {
+            2,102,202,302,402,502,2,52,102,152,202,252,302,352,402,452,502,2,69,102,136,169,202,236,269,302,336,369,402,436,469,502,2,27,52,77,102,127,177,202,227,252,277,302,327,352,377,402,427,452,477,502,2,22,42,62,82,102,122,142,162,182,202,222,242,262,282,302,322,342,362,382,402,422,442,462,482,502,
+        }
+        # fmt: on
+        # ほとんどは上記でカバーされるが、episodeId 66954207でステップ203でdriftが発生するケースがあったので数値誤差を考慮して前後1ステップを追加
+        # もし他にも落ちるようであれば毎ターン確認するようにしたほうがいいかも
+        self._drift_steps = set()
+        for i in ok_drift_steps:
+            self._drift_steps.add(i)
+            self._drift_steps.add(i - 1)
+            self._drift_steps.add(i + 1)
+
+    def precalculate_energy_tile_pattern(self):
+        energy_tile_patterns = np.empty((EnvParams.map_height, EnvParams.map_width), dtype=object)
+        for y in range(EnvParams.map_height):
+            for x in range(EnvParams.map_width):
+                energy_field = np.zeros((6, EnvParams.map_height, EnvParams.map_width), dtype=np.float32)
+                for y2 in range(EnvParams.map_height):
+                    for x2 in range(EnvParams.map_width):
+                        d = np.linalg.norm(np.array([x, y]) - np.array([x2, y2]))
+                        opposite = get_opposite(x, y)
+                        d_opposite = np.linalg.norm(np.array(opposite) - np.array([x2, y2]))
+                        energy_field[0, y2, x2] = self._energy_func(d)
+                        energy_field[3, y2, x2] = self._energy_func(d_opposite)
+                        # 他は0のまま
+                mean = energy_field.mean()
+                if mean < 0.25:
+                    energy_field += 0.25 - mean
+                energy_field = np.round(energy_field.sum(axis=0)).astype(np.int16)
+                energy_field = np.clip(energy_field, EnvParams.min_energy_per_tile, EnvParams.max_energy_per_tile)
+                energy_tile_patterns[y, x] = energy_field
+
+        return energy_tile_patterns
+
+    def _will_drift(self, obs: dict[str, Any]) -> bool:
+        return obs["steps"] in self._drift_steps
+
+    def _drift_energy_node(self, obs: dict[str, Any]) -> None:
+        # driftさせる
+        next_energy_node_candidates = []
+        for dx in range(
+            -max(env_params_ranges["energy_node_drift_magnitude"]),
+            max(env_params_ranges["energy_node_drift_magnitude"]) + 1,
+        ):
+            for dy in range(
+                -max(env_params_ranges["energy_node_drift_magnitude"]),
+                max(env_params_ranges["energy_node_drift_magnitude"]) + 1,
+            ):
+                for i, (x, y) in enumerate(self._energy_node_candidates):
+                    nx, ny = x + dx, y + dy
+                    if in_map((nx, ny)) and (nx + ny <= EnvParams.map_height - 1):
+                        next_energy_node_candidates.append((nx, ny))
+        self._energy_node_candidates = next_energy_node_candidates
+
+        # energy_mapを更新
+        for y in range(EnvParams.map_height):
+            for x in range(EnvParams.map_width):
+                self._energy_map[y, x] = (False, 0)
+
+    def get_energy_map(self) -> np.ndarray:
+        return np.array([[value for _, value in row] for row in self._energy_map])
+
+    def update_energy_map(self, obs: dict[str, Any]) -> None:
+        """ """
+        sensor_mask = np.array(obs["sensor_mask"]).T
+        obs_energy_map = np.array(obs["map_features"]["energy"]).T
+        # energy driftが発生しているかどうか
+        # 全ての候補有効な候補でenergy driftが発生するなら今回のステップでenergy driftが発生する
+        # 過去の履歴からenergy driftが発生しているかどうかを判断することも可能だがdx,dy = (0, 0)のドリフトによって外すことがあるので一旦やめている
+        if self._will_drift(obs):
+            self._drift_energy_node(obs)
+
+        # energy nodeの情報を更新
+        # 全ての候補についてまだ正しいかどうか検証
+        # energy_mapが未定でsensor_maskがTrueの場所のみ検証
+        points_to_check = [
+            (x, y)
+            for y in range(EnvParams.map_height)
+            for x in range(EnvParams.map_width)
+            if sensor_mask[y, x] and not self._energy_map[y, x][0]
+        ]
+        next_candidates = set()
+        for energy_node in self._energy_node_candidates:
+            ok = True
+            for check_x, check_y in points_to_check:
+                if (
+                    obs_energy_map[check_y, check_x]
+                    != self._energy_tile_patterns[energy_node[1], energy_node[0]][check_y, check_x]
+                ):
+                    ok = False
+                    break
+            if ok:
+                next_candidates.add(energy_node)
+
+        self._energy_node_candidates = next_candidates
+        assert len(self._energy_node_candidates) > 0
+
+        # energy_mapを更新
+        result_by_node_candidates = np.zeros(len(self._energy_node_candidates), dtype=np.float32)
+        for y in range(EnvParams.map_height):
+            for x in range(EnvParams.map_width):
+                for candidate_idx, (node_x, node_y) in enumerate(self._energy_node_candidates):
+                    result_by_node_candidates[candidate_idx] = self._energy_tile_patterns[node_y, node_x][y, x]
+                # 全部が一致している場合はenergy_mapを更新
+                if all(result_by_node_candidates == result_by_node_candidates[0]):
+                    self._energy_map[y, x] = (True, result_by_node_candidates[0])
+                else:
+                    # 平均
+                    self._energy_map[y, x] = (False, result_by_node_candidates.mean())
+
+
 class EpisodeStore:
     def __init__(
         self,
@@ -94,6 +221,7 @@ class EpisodeStore:
         )
         self._nebula_tile_drift_speed_candidates = set(env_params_ranges["nebula_tile_drift_speed"])
         self.candidate_to_multiple = {0.15: 7, 0.1: 10, 0.05: 20, 0.025: 40}
+        self.energy_node_guesser = EnergyNodeGuesser()
 
         self._visit_count = np.zeros(
             (EnvParams.map_height, EnvParams.map_width), dtype=np.float32
@@ -162,6 +290,7 @@ class EpisodeStore:
         self._update_visit_count(obs)
         self._update_points(obs)
         self._update_point_map(obs)
+        self.energy_node_guesser.update_energy_map(obs)
 
     def _is_finished_relic_search(self) -> bool:
         return self._relic_map.sum() == EnvParams.max_relic_nodes
@@ -437,7 +566,6 @@ def extract_hidden_state(gt_obs: dict[str, Any], target_team_id: int) -> np.ndar
 
     state_map[HiddenState.POINTS] = get_gt_point_map(gt_obs)
 
-    state_map[HiddenState.ENERGY] = np.array(gt_obs["map_features"]["energy"]).T / 10  # (24, 24)
     return state_map
 
 
@@ -559,8 +687,7 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
     state_map[State.NEXT_TILE_TYPE] = episode_store.next_tile_type_map
     state_map[State.NEXT_TILE_TYPE] = mirroring(state_map[State.NEXT_TILE_TYPE], null_value=-1)
     # energy nodesの位置は未知(tileのenergyはvisionで観測可能) energy系は正規化の分母をinit_unit_energyにする
-    state_map[State.ENERGY] = np.array(obs["map_features"]["energy"]).T / EnvParams.init_unit_energy
-    state_map[State.ENERGY] = mirroring(state_map[State.ENERGY], null_value=-0.1)
+    state_map[State.ENERGY] = episode_store.energy_node_guesser.get_energy_map() / EnvParams.init_unit_energy
     state_map[State.SENSOR_MASK] = np.array(obs["sensor_mask"]).T
 
     state_map[State.RELICS] = episode_store.relic_map
@@ -645,6 +772,7 @@ def extract_hidden_global_state(env_params: dict[str, Any]) -> np.ndarray:
     # hidden_global_states[HiddenGlobalState.NEBULA_TILE_DRIFT_SPEED] = env_params.nebula_tile_drift_speed
     hidden_global_states[HiddenGlobalState.ENERGY_NODE_DRIFT_SPEED] = env_params.energy_node_drift_speed
     hidden_global_states[HiddenGlobalState.ENERGY_NODE_DRIFT_MAGNITUDE] = env_params.energy_node_drift_magnitude
+
     return hidden_global_states
 
 
