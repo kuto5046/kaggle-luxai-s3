@@ -7,6 +7,8 @@ ENV TZ=Asia/Tokyo
 ARG UID
 ARG USER
 
+RUN apt update && apt install -y sudo zip
+
 RUN useradd $USER -l -u $UID -G sudo -s /bin/bash -m
 RUN echo 'Defaults visiblepw' >> /etc/sudoers
 RUN echo "$USER ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
