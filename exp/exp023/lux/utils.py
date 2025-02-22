@@ -691,7 +691,7 @@ def extract_hidden_state(gt_obs: dict[str, Any], target_team_id: int) -> np.ndar
 
     state_map[HiddenState.POINTS] = get_gt_point_map(gt_obs)
 
-    state_map[HiddenState.ENERGY] = np.array(gt_obs["map_features"]["energy"]).T / 10  # (24, 24)
+    # state_map[HiddenState.ENERGY] = np.array(gt_obs["map_features"]["energy"]).T / 10  # (24, 24)
     return state_map
 
 

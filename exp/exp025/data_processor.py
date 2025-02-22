@@ -128,8 +128,10 @@ class DataProcessor:
             env_params = EnvParams(**json_load["configuration"]["env_cfg"])
             episode_store = EpisodeStore(target_team_id, env_params, self.cfg.validation, episode_id)
             steps = json_load["steps"]
+            gt_env_params = EnvParams(**steps[0][0]["info"]["replay"]["params"])
             for step_idx in range(len(steps) - 1):  # 505でdoneとなるため-1
                 step_info = steps[step_idx]
+
                 next_step_info = steps[step_idx + 1]
                 obs = json.loads(step_info[target_team_id]["observation"]["obs"])
                 gt_obs = step_info[0]["info"]["replay"]["observations"][0]
@@ -139,7 +141,8 @@ class DataProcessor:
                     episode_store.reset()
                 # リセット時以外はupdateをする
                 else:
-                    episode_store.update(obs)
+                    prev_actions = np.array(step_info[target_team_id]["action"])
+                    episode_store.update(obs, prev_actions)
 
                 if self.cfg.use_gt:
                     state = extract_gt_state(gt_obs, target_team_id)
@@ -147,13 +150,13 @@ class DataProcessor:
                     state = extract_state(obs, target_team_id, episode_store)
                 episode_state_group.create_dataset(f"{step_idx}", data=state)
 
-                global_state = extract_global_state(obs, target_team_id, env_params, episode_store)
+                global_state = extract_global_state(obs, target_team_id, env_params)
                 episode_global_state_group.create_dataset(f"{step_idx}", data=global_state)
 
                 hidden_state = extract_hidden_state(gt_obs, target_team_id)
                 episode_hidden_state_group.create_dataset(f"{step_idx}", data=hidden_state)
 
-                hidden_global_state = extract_hidden_global_state(env_params)
+                hidden_global_state = extract_hidden_global_state(gt_env_params)
                 episode_hidden_global_state_group.create_dataset(f"{step_idx}", data=hidden_global_state)
 
                 next_actions = next_step_info[target_team_id]["action"]
