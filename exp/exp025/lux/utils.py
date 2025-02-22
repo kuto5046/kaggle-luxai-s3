@@ -12,7 +12,6 @@ class State(IntEnum):
     TILE_TYPE = 0  # 0スタート
     NEXT_TILE_TYPE = auto()
     ENERGY = auto()
-    NEBULA_ENERGY_REDUCTION = auto()
     SENSOR_MASK = auto()
     # VISION_POWER_MAP = auto()
     RELICS = auto()
@@ -38,6 +37,7 @@ class GlobalState(IntEnum):
     UNIT_SAP_COST = auto()
     UNIT_SAP_RANGE = auto()
     UNIT_SENSOR_RANGE = auto()
+    NEBULA_ENERGY_REDUCTION = auto()
 
 
 class HiddenState(IntEnum):
@@ -297,15 +297,14 @@ class EpisodeStore:
     def nebula_energy_reduction(self) -> np.ndarray:
         """
         nebula tileによるエネルギ減少を表す
-        パラメータが未知の場合は-1で埋める
+        パラメータが未知の場合は0で埋める
+        エネルギー系なので同じ分母で正規化している
+        スカラー値として扱う
         """
         if self._nebula_energy_reduction is None:
-            return (self.tile_type_map == TileType.NEBULA) * -1
+            return 0
         else:
-            target_map = (
-                (self.tile_type_map == TileType.NEBULA) * self._nebula_energy_reduction / EnvParams.init_unit_energy
-            )
-            return target_map
+            return -self._nebula_energy_reduction / EnvParams.init_unit_energy
 
     @property
     def vision_power_map(self) -> np.ndarray:
@@ -812,7 +811,6 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
     state_map[State.NEXT_TILE_TYPE] = episode_store.next_tile_type_map
     # energy nodesの位置は未知(tileのenergyはvisionで観測可能) energy系は正規化の分母をinit_unit_energyにする
     state_map[State.ENERGY] = episode_store.energy_node_guesser.get_energy_map() / EnvParams.init_unit_energy
-    state_map[State.NEBULA_ENERGY_REDUCTION] = episode_store.nebula_energy_reduction
     state_map[State.SENSOR_MASK] = np.array(obs["sensor_mask"]).T
     # state_map[State.VISION_POWER_MAP] = episode_store.vision_power_map
 
@@ -867,7 +865,9 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
     return state_map
 
 
-def extract_global_state(obs: dict[str, Any], target_team_id: int, env_params: EnvParams) -> np.ndarray:
+def extract_global_state(
+    obs: dict[str, Any], target_team_id: int, env_params: EnvParams, episode_store: EpisodeStore
+) -> np.ndarray:
     enemy_team_id = 1 - target_team_id
     global_states = np.zeros((len(GlobalState),), dtype=np.float32)
     # game state
@@ -886,6 +886,8 @@ def extract_global_state(obs: dict[str, Any], target_team_id: int, env_params: E
     global_states[GlobalState.UNIT_SAP_COST] = env_params.unit_sap_cost / env_params.init_unit_energy
     global_states[GlobalState.UNIT_SAP_RANGE] = env_params.unit_sap_range
     global_states[GlobalState.UNIT_SENSOR_RANGE] = env_params.unit_sensor_range
+    global_states[GlobalState.NEBULA_ENERGY_REDUCTION] = episode_store.nebula_energy_reduction
+
     return global_states
 
 
