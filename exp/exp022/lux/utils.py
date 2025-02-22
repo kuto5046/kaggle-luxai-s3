@@ -172,14 +172,12 @@ class EpisodeStore:
         パラメータが未知の場合は-1で埋める
         """
         if self._nebula_energy_reduction is None:
-            return np.zeros((EnvParams.map_height, EnvParams.map_width), dtype=np.float32)
+            return (self.tile_type_map == TileType.NEBULA) * -1
         else:
-            return (
-                (self.tile_type_map == TileType.NEBULA)
-                * -1
-                * self._nebula_energy_reduction
-                / EnvParams.init_unit_energy
+            target_map = (
+                (self.tile_type_map == TileType.NEBULA) * self._nebula_energy_reduction / EnvParams.init_unit_energy
             )
+            return target_map
 
     @property
     def vision_power_map(self) -> np.ndarray:
@@ -328,6 +326,7 @@ class EpisodeStore:
         """
         # 新しいタイプマップ（内部規則に合わせ転置済み）
         new_tile_type_map = np.array(obs["map_features"]["tile_type"]).T
+        new_tile_type_map = mirroring(new_tile_type_map, null_value=TileType.UNKNOWN)
         sensor_mask = np.array(obs["sensor_mask"]).T
         # vision>0にも関わらず観測できないセルがあれば前のステップにおけるそのはnebulaであると考える
         self._tile_type_map = np.where(
@@ -364,8 +363,8 @@ class EpisodeStore:
             # 絞れていない場合はそのまま
             self._next_tile_type_map = self._tile_type_map.copy()
 
-        self._tile_type_map = mirroring(self._tile_type_map, null_value=-1)
-        self._next_tile_type_map = mirroring(self._next_tile_type_map, null_value=-1)
+        self._tile_type_map = mirroring(self._tile_type_map, null_value=TileType.UNKNOWN)
+        self._next_tile_type_map = mirroring(self._next_tile_type_map, null_value=TileType.UNKNOWN)
 
     def _update_relic_map(self, obs: dict[str, Any]) -> None:
         # # relicの情報を記録する関数
