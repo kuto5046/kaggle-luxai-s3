@@ -555,7 +555,7 @@ class LuxUNetModel(nn.Module):
         res: bool = False,
         norm_layer=nn.BatchNorm2d,
         use_self_attention: bool = True,
-        use_spectral_norm: bool = False,
+        use_spectral_norm: bool = True,
     ) -> None:
         super().__init__()
         self.bilinear = bilinear
