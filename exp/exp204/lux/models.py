@@ -404,6 +404,7 @@ class LaxLitModel(LightningModule):
         )
 
 
+# ユーティリティ：ワンホットエンコーダ（変更なし）
 def one_hot_encoder(input_tensor: torch.Tensor, n_classes: int) -> torch.Tensor:
     tensor_list = []
     for i in range(n_classes):
@@ -412,42 +413,80 @@ def one_hot_encoder(input_tensor: torch.Tensor, n_classes: int) -> torch.Tensor:
     output_tensor = torch.cat(tensor_list, dim=1)
     return output_tensor.float()
 
+# -------------------------------
+# 1. Self-Attention ブロック (2D版)
+# -------------------------------
+class SelfAttention2d(nn.Module):
+    """
+    簡易の自己注意ブロック。SAGAN などで用いられる方式で、
+    入力特徴に対する空間的な相関を捉えます。
+    """
 
-class DoubleConv(nn.Module):
-    """(convolution => [BN] => ReLU) * 2"""
-
-    def __init__(self, in_channels: int, out_channels: int, mid_channels: int | None = None, res: bool = False) -> None:
+    def __init__(self, in_channels: int):
         super().__init__()
-        if not mid_channels:
+        self.query_conv = nn.Conv2d(in_channels, in_channels // 8, kernel_size=1)
+        self.key_conv = nn.Conv2d(in_channels, in_channels // 8, kernel_size=1)
+        self.value_conv = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+        self.gamma = nn.Parameter(torch.zeros(1))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, C, H, W = x.size()
+        proj_query = self.query_conv(x).view(B, -1, H * W)  # (B, C//8, N)
+        proj_key = self.key_conv(x).view(B, -1, H * W)  # (B, C//8, N)
+        energy = torch.bmm(proj_query.permute(0, 2, 1), proj_key)  # (B, N, N)
+        attention = F.softmax(energy, dim=-1)
+        proj_value = self.value_conv(x).view(B, -1, H * W)  # (B, C, N)
+        out = torch.bmm(proj_value, attention.permute(0, 2, 1))  # (B, C, N)
+        out = out.view(B, C, H, W)
+        out = self.gamma * out + x
+        return out
+
+
+# -------------------------------------------
+# 2. 基本ブロック：DoubleConv (Norm 層を柔軟に指定)
+# -------------------------------------------
+class DoubleConv(nn.Module):
+    """(畳み込み → [Norm] → ReLU) を2回適用するブロック"""
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        mid_channels: int | None = None,
+        res: bool = False,
+        norm_layer=nn.BatchNorm2d,
+    ) -> None:
+        super().__init__()
+        if mid_channels is None:
             mid_channels = out_channels
         self.double_conv = nn.Sequential(
             nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(mid_channels),
+            norm_layer(mid_channels),
             nn.ReLU(inplace=True),
             nn.Conv2d(mid_channels, out_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(out_channels),
+            norm_layer(out_channels),
             nn.ReLU(inplace=True),
         )
         self.res = res
-        # 入力と出力のチャンネル数が異なる場合のための1x1 convolution
-        self.skip_conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
+        self.skip_conv = nn.Conv2d(in_channels, out_channels, kernel_size=1) if res else None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.res:
+        if self.res and self.skip_conv is not None:
             return self.double_conv(x) + self.skip_conv(x)
         else:
             return self.double_conv(x)
 
-
+# -------------------------
+# 3. Down ブロック
+# -------------------------
 class Down(nn.Module):
-    """Downscaling with maxpool then double conv"""
+    """MaxPool で空間サイズを半減し、DoubleConv を適用するブロック"""
 
-    def __init__(self, in_channels: int, out_channels: int, res: bool = False) -> None:
+    def __init__(self, in_channels: int, out_channels: int, res: bool = False, norm_layer=nn.BatchNorm2d) -> None:
         super().__init__()
         self.maxpool = nn.MaxPool2d(2)
-        self.conv = DoubleConv(in_channels, out_channels, res=res)
+        self.conv = DoubleConv(in_channels, out_channels, res=res, norm_layer=norm_layer)
         self.res = res
-        # スキップコネクション用の1x1 convとダウンサンプリング
         if self.res:
             self.skip = nn.Sequential(nn.Conv2d(in_channels, out_channels, kernel_size=1), nn.AvgPool2d(2))
 
@@ -458,54 +497,52 @@ class Down(nn.Module):
             return x1 + self.skip(x)
         return x1
 
-
+# -------------------------
+# 4. Up ブロック
+# -------------------------
 class Up(nn.Module):
-    """Upscaling then double conv"""
+    """アップサンプリング後、スキップ接続で結合し、DoubleConv を適用するブロック"""
 
-    def __init__(self, in_channels: int, out_channels: int, bilinear: bool = True) -> None:
+    def __init__(self, in_channels: int, out_channels: int, bilinear: bool = True, norm_layer=nn.BatchNorm2d) -> None:
         super().__init__()
-
-        # if bilinear, use the normal convolutions to reduce the number of channels
         if bilinear:
             self.up = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True)
-            self.conv = DoubleConv(in_channels, out_channels, in_channels // 2)
+            self.conv = DoubleConv(in_channels, out_channels, in_channels // 2, norm_layer=norm_layer)
         else:
             self.up = nn.ConvTranspose2d(in_channels, in_channels // 2, kernel_size=2, stride=2)
-            self.conv = DoubleConv(in_channels, out_channels)
+            self.conv = DoubleConv(in_channels, out_channels, norm_layer=norm_layer)
 
     def forward(self, x1: torch.Tensor, x2: torch.Tensor) -> torch.Tensor:
         x1 = self.up(x1)
-        # input is CHW
         diffY = x2.size()[2] - x1.size()[2]
         diffX = x2.size()[3] - x1.size()[3]
-
-        # x1 = F.pad(x1, [diffX // 2, diffX - diffX // 2,
-        #                 diffY // 2, diffY - diffY // 2])
         x1 = F.pad(
             x1,
-            [
-                torch.div(diffX, 2, rounding_mode="floor"),
-                diffX - torch.div(diffX, 2, rounding_mode="floor"),
-                torch.div(diffY, 2, rounding_mode="floor"),
-                diffY - torch.div(diffY, 2, rounding_mode="floor"),
-            ],
+            [diffX // 2, diffX - diffX // 2, diffY // 2, diffY - diffY // 2],
         )
-        # if you have padding issues, see
-        # https://github.com/HaiyongJiang/U-Net-Pytorch-Unstructured-Buggy/commit/0e854509c2cea854e247a9c615f175f76fbb2e3a
-        # https://github.com/xiaopeng-liao/Pytorch-UNet/commit/8ebac70e633bac59fc22bb5195e513d5832fb3bd
         x = torch.cat([x2, x1], dim=1)
         return self.conv(x)
 
-
+# -------------------------
+# 5. OutConv ブロック (スペクトル正規化オプション付き)
+# -------------------------
 class OutConv(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int) -> None:
+    def __init__(self, in_channels: int, out_channels: int, spectral_norm: bool = False) -> None:
         super().__init__()
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
+        conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
+        if spectral_norm:
+            self.conv = nn.utils.spectral_norm(conv)
+        else:
+            self.conv = conv
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.conv(x)
 
-
+# -------------------------
+# 6. LuxUNetModel (改良版)
+# -------------------------
+# ※ global_state_net 内の "len(HiddenGlobalState)" は、元コードと同様に
+#    別途 HiddenGlobalState 定義がある前提です。
 class LuxUNetModel(nn.Module):
     def __init__(
         self,
@@ -516,37 +553,38 @@ class LuxUNetModel(nn.Module):
         n_stack: int,
         bilinear: bool = True,
         res: bool = False,
+        norm_layer=nn.BatchNorm2d,
+        use_self_attention: bool = True,
+        use_spectral_norm: bool = False,
     ) -> None:
         super().__init__()
         self.bilinear = bilinear
+        self.use_self_attention = use_self_attention
 
-        self.inc = DoubleConv(state_space_size, 64, res=res)
-        self.down1 = Down(64, 128, res=res)
-        self.down2 = Down(128, 256, res=res)
-        self.down3 = Down(256, 256, res=res)
+        # エンコーダ部
+        self.inc = DoubleConv(state_space_size, 64, res=res, norm_layer=norm_layer)
+        self.down1 = Down(64, 128, res=res, norm_layer=norm_layer)
+        self.down2 = Down(128, 256, res=res, norm_layer=norm_layer)
+        self.down3 = Down(256, 256, res=res, norm_layer=norm_layer)
 
-        #
+        # オプション：自己注意ブロックをボトムに適用
+        if self.use_self_attention:
+            self.attn_block = SelfAttention2d(256)
+
         factor = 2 if bilinear else 1
-        self.up1 = Up(256 * 2 + global_state_space_size, 256 // factor, bilinear)
-        self.up2 = Up(256, 128 // factor, bilinear)
-        self.up3 = Up(128, 64, bilinear)
-        self.policy_net = OutConv(64 * n_stack, action_space_size)
-        # self.sap_net = OutConv(64 * n_stack, 1)
-        self.state_net = OutConv(64 * n_stack, hidden_state_space_size)
+        # デコーダ部（グローバル状態統合を考慮）
+        self.up1 = Up(256 * 2 + global_state_space_size, 256 // factor, bilinear, norm_layer=norm_layer)
+        self.up2 = Up(256, 128 // factor, bilinear, norm_layer=norm_layer)
+        self.up3 = Up(128, 64, bilinear, norm_layer=norm_layer)
+        self.policy_net = OutConv(64 * n_stack, action_space_size, spectral_norm=use_spectral_norm)
+        self.state_net = OutConv(64 * n_stack, hidden_state_space_size, spectral_norm=use_spectral_norm)
         self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
-        # self.value_net = nn.Sequential(
-        #     nn.Linear((256 + global_state_space_size) * n_stack, 128),
-        #     nn.ReLU(),
-        #     nn.Linear(128, 64),
-        #     nn.ReLU(),
-        #     nn.Linear(64, 1),
-        # )
         self.global_state_net = nn.Sequential(
             nn.Linear((256 + global_state_space_size) * n_stack, 128),
             nn.ReLU(),
             nn.Linear(128, 64),
             nn.ReLU(),
-            nn.Linear(64, len(HiddenGlobalState)),
+            nn.Linear(64, len(HiddenGlobalState)),  # HiddenGlobalState は外部定義とする前提
         )
 
     def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -559,32 +597,30 @@ class LuxUNetModel(nn.Module):
         x3 = self.down2(x2)
         x4 = self.down3(x3)
 
-        # sx, syのマップにグローバルステートをブロードキャスト
+        if self.use_self_attention:
+            x4 = self.attn_block(x4)
+
+        # グローバル状態をブロードキャストして結合
         sx, sy = x4.shape[2:]
-        _n, _t, _c = global_state.shape
-        gx = global_state.view(-1, _c, 1, 1)
+        _n_global, _t_global, _c_global = global_state.shape
+        gx = global_state.view(-1, _c_global, 1, 1)
         gx = gx.repeat(1, 1, sx, sy)
-
         x4 = torch.cat([x4, gx], dim=1)
-        x = self.global_avg_pool(x4).view(_n, -1)
-        # value_logits = self.value_net(x)
-        global_state_logits = self.global_state_net(x)
+        x_pool = self.global_avg_pool(x4).view(_n, -1)
+        global_state_logits = self.global_state_net(x_pool)
 
+        # デコーダ部
         x = self.up1(x4, x3)
         x = self.up2(x, x2)
         x = self.up3(x, x1)
-
         x = x.view(_n, -1, _x, _y)
         policy_logits = self.policy_net(x)
-        # sap_logits = self.sap_net(x)
         state_logits = self.state_net(x)
 
         return {
             "policy": policy_logits,
-            # "sap": sap_logits,
             "state": state_logits,
             "global_state": global_state_logits,
-            # "value": value_logits,
         }
 
 
