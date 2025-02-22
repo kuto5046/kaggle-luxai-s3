@@ -151,6 +151,9 @@ class LaxLitDataModule(LightningDataModule):
 
     def setup(self, stage: str | None = None) -> None:
         df = pl.read_csv(self.cfg.feature_dir / "train.csv")
+        # データ量を1/5にする
+        df = df.sample(n=int(len(df) * 0.2), seed=self.cfg.seed)
+        # df = df.sample(frac=0.2, random_state=self.cfg.seed)
         # df = df.filter(pl.col("Win"))  # 勝利したエピソードのみを使用
         train = df.filter(pl.col("fold") != self.cfg.use_fold)
         valid = df.filter(pl.col("fold") == self.cfg.use_fold)
@@ -496,30 +499,43 @@ class LuxUNetModel(nn.Module):
     ) -> None:
         super().__init__()
         self.bilinear = bilinear
+        self.n_stack = n_stack
+        self.state_space_size = state_space_size
+        self.global_state_space_size = global_state_space_size
 
-        self.inc = DoubleConv(state_space_size, 64, res=res)
+        self.inc = DoubleConv(state_space_size + global_state_space_size, 64, res=res)
         self.down1 = Down(64, 128, res=res)
         self.down2 = Down(128, 256, res=res)
         self.down3 = Down(256, 256, res=res)
 
         #
         factor = 2 if bilinear else 1
-        self.up1 = Up(256 * 2 + global_state_space_size, 256 // factor, bilinear)
+        self.up1 = Up(256 * 2, 256 // factor, bilinear)
         self.up2 = Up(256, 128 // factor, bilinear)
         self.up3 = Up(128, 64, bilinear)
         self.policy_net = OutConv(64 * n_stack, action_space_size)
         # self.sap_net = OutConv(64 * n_stack, 1)
         self.state_net = OutConv(64 * n_stack, hidden_state_space_size)
-        self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
-        self.value_net = nn.Sequential(
-            nn.Linear((256 + global_state_space_size) * n_stack, 128),
+        # self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.value_net1 = OutConv(64 * n_stack, 1)
+        grid_size = 24
+        self.value_net2 = nn.Sequential(
+            nn.Linear(grid_size * grid_size, 128),
             nn.ReLU(),
             nn.Linear(128, 64),
             nn.ReLU(),
             nn.Linear(64, 1),
         )
-        self.global_state_net = nn.Sequential(
-            nn.Linear((256 + global_state_space_size) * n_stack, 128),
+        # self.value_net = nn.Sequential(
+        #     nn.Linear((256 + global_state_space_size) * n_stack, 128),
+        #     nn.ReLU(),
+        #     nn.Linear(128, 64),
+        #     nn.ReLU(),
+        #     nn.Linear(64, 1),
+        # )
+        self.global_state_net1 = OutConv(64 * n_stack, 1)
+        self.global_state_net2 = nn.Sequential(
+            nn.Linear(grid_size * grid_size, 128),
             nn.ReLU(),
             nn.Linear(128, 64),
             nn.ReLU(),
@@ -530,22 +546,35 @@ class LuxUNetModel(nn.Module):
         state = batch["state"]
         global_state = batch["global_state"]
         _n, _t, _c, _x, _y = state.shape
-        x = state.view(-1, _c, _x, _y)
-        x1 = self.inc(x)
+        assert _t == self.n_stack, f"Expected n_stack {self.n_stack}, but got {_t}"
+        global_state_dim = global_state.shape[-1]
+
+        gs = global_state.unsqueeze(-1).unsqueeze(-1).expand(_n, _t, global_state.shape[-1], _x, _y)
+        state_combine = torch.cat([state, gs], dim=2)
+
+        expected_channels = self.state_space_size + global_state_dim
+        assert (
+            state_combine.shape[2] == expected_channels
+        ), f"Expected concatenated channels to be {expected_channels}, but got {state_combine.shape[2]}"
+
+        x_in = state_combine.view(_n * _t, state_combine.shape[2], _x, _y)
+
+        # x = state.view(-1, _c, _x, _y)
+        x1 = self.inc(x_in)
         x2 = self.down1(x1)
         x3 = self.down2(x2)
         x4 = self.down3(x3)
 
         # sx, syのマップにグローバルステートをブロードキャスト
-        sx, sy = x4.shape[2:]
-        _n, _t, _c = global_state.shape
-        gx = global_state.view(-1, _c, 1, 1)
-        gx = gx.repeat(1, 1, sx, sy)
+        # sx, sy = x4.shape[2:]
+        # _n, _t, _c = global_state.shape
+        # gx = global_state.view(-1, _c, 1, 1)
+        # gx = gx.repeat(1, 1, sx, sy)
 
-        x4 = torch.cat([x4, gx], dim=1)
-        x = self.global_avg_pool(x4).view(_n, -1)
-        value_logits = self.value_net(x)
-        global_state_logits = self.global_state_net(x)
+        # x4 = torch.cat([x4, gx], dim=1)
+        # x = self.global_avg_pool(x4).view(_n, -1)
+        # # value_logits = self.value_net(x)
+        # global_state_logits = self.global_state_net(x)
 
         x = self.up1(x4, x3)
         x = self.up2(x, x2)
@@ -555,6 +584,11 @@ class LuxUNetModel(nn.Module):
         policy_logits = self.policy_net(x)
         # sap_logits = self.sap_net(x)
         state_logits = self.state_net(x)
+        pre_value_logits = self.value_net1(x)
+        value_logits = self.value_net2(pre_value_logits.flatten(start_dim=1))
+
+        pre_global_state_logits = self.global_state_net1(x)
+        global_state_logits = self.global_state_net2(pre_global_state_logits.flatten(start_dim=1))
 
         return {
             "policy": policy_logits,
