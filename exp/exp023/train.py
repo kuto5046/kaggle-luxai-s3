@@ -23,7 +23,7 @@ LOGGER = logging.getLogger(__name__)
 @dataclass
 class Config:
     exp_name: str = Path(__file__).parent.name
-    notes: str = "policyをmasked bceだとsapが学習できていないのでdice lossに変更"
+    notes: str = "stateにneula reductionを考慮"
     seed: int = 2025
     debug: bool = False
     n_splits: int = 5
@@ -51,7 +51,7 @@ class Config:
     # loss
     loss_weight_policy: float = 1.0
     loss_weight_state: float = 1.0
-    loss_weight_global_state: float = 1.0
+    loss_weight_global_state: float = 0.0  # 真のパラメータを予測しようとすると性能が下がるので0にしている
     # loss_weight_value: float = 0.0
     # loss_weight_sap: float = 1.0
 
