@@ -46,6 +46,8 @@ class ILAgent:
         state_dict = {k.replace("model.", ""): v for k, v in ckpt["state_dict"].items()}
         self.model.load_state_dict(state_dict)
         self.model.eval()
+        if torch.cuda.is_available():
+            self.model.cuda()
         self.player = None
         self.env_cfg = env_cfg
         # n_stack分のstateを保持するqueue
@@ -65,9 +67,29 @@ class ILAgent:
             "global_state": torch.from_numpy(np.stack(list(self.stack_global_states), axis=0)).unsqueeze(0).float(),
         }
 
+        # 自陣が(0, 0)になるようにstateを反転
+        do_flip = team_id == 1
+        if do_flip:
+            states["state"] = torch.flip(states["state"], [3, 4])
+
         with torch.no_grad():
+            if torch.cuda.is_available():
+                states = {k: v.cuda() for k, v in states.items()}
             output = self.model(states)
+            if torch.cuda.is_available():
+                output = {k: v.cpu() for k, v in output.items()}
             policy_map = output["policy"].squeeze().numpy()
+
+        if do_flip:
+            policy_map = np.flip(policy_map, axis=(1, 2)).copy()
+            policy_map[Action.UP], policy_map[Action.DOWN] = (
+                policy_map[Action.DOWN].copy(),
+                policy_map[Action.UP].copy(),
+            )
+            policy_map[Action.LEFT], policy_map[Action.RIGHT] = (
+                policy_map[Action.RIGHT].copy(),
+                policy_map[Action.LEFT].copy(),
+            )
 
         policy_map = get_legal_policy(obs, policy_map, team_id, episode_store)
         point_map = state[State.POINTS]
@@ -102,6 +124,7 @@ imitation_model = ILAgent(EnvParams, cfg.checkpoint_path, cfg.n_stack, cfg.res)
 
 class Agent:
     def __init__(self, player: str, env_cfg: EnvParams) -> None:
+        torch.set_num_threads(1)
         self.cfg = Config()
         self.player = player
         self.opp_player = "player_1" if self.player == "player_0" else "player_0"

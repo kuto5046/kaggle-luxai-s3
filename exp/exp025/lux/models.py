@@ -21,7 +21,7 @@ from .utils import State, Action, GlobalState, HiddenState, HiddenGlobalState, t
 from .params import EnvParams
 
 
-class LuxAugment:
+class LuxAugmentBase:
     def __init__(self) -> None:
         self.p = 0.5
 
@@ -48,37 +48,59 @@ class LuxAugment:
         action = np.where(action == -1, 2 + offset, action)
         return action
 
+
+# 自陣を(0,0)にする
+class LuxAugmentStandardize(LuxAugmentBase):
+    def __init__(self) -> None:
+        super().__init__()
+
     def __call__(self, inputs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
         # x,yが実際のmapと行列で異なるので操作を直感的にするために転置後に処理する
         state = inputs["state"].copy()
         hidden_state = inputs["hidden_state"].copy()
         action = inputs["action"].copy()
         sap = inputs["sap"].copy()
-        # Flip vertically↑↓(# switch up(1) and down(3))
-        if random.random() < self.p:
-            state = np.flip(state, axis=2).copy()
-            hidden_state = np.flip(hidden_state, axis=1).copy()
-            action = np.flip(action, axis=0).copy()
-            action = self.switch_action(action, Action.UP, Action.DOWN)
-            sap = np.flip(sap, axis=0).copy()
-        # Flip horizontally →← (switch left(2) and right(4))
-        if random.random() < self.p:
-            state = np.flip(state, axis=3).copy()
-            hidden_state = np.flip(hidden_state, axis=2).copy()
-            action = np.flip(action, axis=1).copy()
-            action = self.switch_action(action, Action.LEFT, Action.RIGHT)
-            sap = np.flip(sap, axis=1).copy()
-        # # Rotate 90 degrees ↑→ (right->up, up->left left->down down->right)
-        if random.random() < self.p:
-            state = np.rot90(state, axes=(2, 3)).copy()
-            hidden_state = np.rot90(hidden_state, axes=(1, 2)).copy()
-            action = np.rot90(action, axes=(0, 1)).copy()
-            action = self.rotate_action(action)
-            sap = np.rot90(sap, axes=(0, 1)).copy()
 
-        # TODO:
-        # mapをランダムにずらす
-        # 試合のindexを入れ替える
+        # 原点を自陣とする
+        # TODO agent_id を用いて自陣を判定する
+        visit_count = state[:, State.VISIT_COUNT]
+        do_flip = np.sum(visit_count[:, 0, 0]) < np.sum(visit_count[:, -1, -1])
+
+        if do_flip:
+            # Flip vertically↑↓(# switch up(1) and down(3))
+            # Flip horizontally →← (switch left(2) and right(4))
+            state = np.flip(state, axis=(2, 3)).copy()
+            hidden_state = np.flip(hidden_state, axis=(1, 2)).copy()
+            action = np.flip(action, axis=(0, 1)).copy()
+            action = self.switch_action(action, Action.UP, Action.DOWN)
+            action = self.switch_action(action, Action.LEFT, Action.RIGHT)
+            sap = np.flip(sap, axis=(0, 1)).copy()
+
+        inputs["state"] = state
+        inputs["hidden_state"] = hidden_state
+        inputs["action"] = action
+        inputs["sap"] = sap
+        return inputs
+
+
+class LuxAugmentTranspose(LuxAugmentBase):
+    def __init__(self) -> None:
+        super().__init__()
+
+    def __call__(self, inputs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+        # x,yが実際のmapと行列で異なるので操作を直感的にするために転置後に処理する
+        state = inputs["state"].copy()
+        hidden_state = inputs["hidden_state"].copy()
+        action = inputs["action"].copy()
+        sap = inputs["sap"].copy()
+
+        if random.random() < self.p:
+            state = np.transpose(state, (0, 1, 3, 2)).copy()
+            hidden_state = np.transpose(hidden_state, (0, 2, 1)).copy()
+            action = np.transpose(action, (1, 0)).copy()
+            action = self.switch_action(action, Action.UP, Action.LEFT)
+            action = self.switch_action(action, Action.DOWN, Action.RIGHT)
+            sap = np.transpose(sap, (1, 0)).copy()
 
         inputs["state"] = state
         inputs["hidden_state"] = hidden_state
@@ -97,7 +119,8 @@ class LaxDataset(Dataset):
             for step_idx in range(1, int(max_step)):  # step_idx=0は初期状態なのでスキップ
                 self.ids.append((episode_id, step_idx))
         self.h5_file = h5py.File(self.cfg.feature_dir / "episodes.h5", "r")
-        self.transform = transforms.Compose([LuxAugment()])
+        self.transform_standardize = transforms.Compose([LuxAugmentStandardize()])
+        self.transform = transforms.Compose([LuxAugmentTranspose()])
         self.aug = cfg.aug
 
     def __len__(self) -> int:
@@ -138,6 +161,7 @@ class LaxDataset(Dataset):
             "sap": sap,
             "win": win,
         }
+        inputs = self.transform_standardize(inputs)
         if self.mode == "train" and self.aug:
             inputs = self.transform(inputs)
 
