@@ -59,7 +59,7 @@ class ILAgent:
 
     def predict(self, obs: dict[str, Any], team_id: int, episode_store: EpisodeStore) -> tuple[np.ndarray, np.ndarray]:
         state = extract_state(obs, team_id, episode_store)
-        global_state = extract_global_state(obs, team_id, self.env_cfg)
+        global_state = extract_global_state(obs, team_id, episode_store, self.env_cfg)
         self.stack_states.append(state)
         self.stack_global_states.append(global_state)
         states = {

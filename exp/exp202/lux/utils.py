@@ -36,6 +36,7 @@ class GlobalState(IntEnum):
     UNIT_SAP_COST = auto()
     UNIT_SAP_RANGE = auto()
     UNIT_SENSOR_RANGE = auto()
+    RELIC_SEARCH = auto()  # 1 if still have to search for relic, 0 otherwise
 
 
 class HiddenState(IntEnum):
@@ -741,7 +742,9 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
     return state_map
 
 
-def extract_global_state(obs: dict[str, Any], target_team_id: int, env_params: EnvParams) -> np.ndarray:
+def extract_global_state(
+    obs: dict[str, Any], target_team_id: int, episode_store: EpisodeStore, env_params: EnvParams
+) -> np.ndarray:
     enemy_team_id = 1 - target_team_id
     global_states = np.zeros((len(GlobalState),), dtype=np.float32)
     # game state
@@ -760,6 +763,12 @@ def extract_global_state(obs: dict[str, Any], target_team_id: int, env_params: E
     global_states[GlobalState.UNIT_SAP_COST] = env_params.unit_sap_cost / env_params.init_unit_energy
     global_states[GlobalState.UNIT_SAP_RANGE] = env_params.unit_sap_range
     global_states[GlobalState.UNIT_SENSOR_RANGE] = env_params.unit_sensor_range
+
+    global_states[GlobalState.RELIC_SEARCH] = (
+        1.0
+        if ((not episode_store._is_popup_relic_in_this_match) and (not episode_store._is_finished_relic_search()))
+        else 0.0
+    )
     return global_states
 
 

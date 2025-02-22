@@ -151,7 +151,7 @@ class DataProcessor:
                     state = extract_state(obs, target_team_id, episode_store)
                 episode_state_group.create_dataset(f"{step_idx}", data=state)
 
-                global_state = extract_global_state(obs, target_team_id, env_params)
+                global_state = extract_global_state(obs, target_team_id, episode_store, env_params)
                 episode_global_state_group.create_dataset(f"{step_idx}", data=global_state)
 
                 hidden_state = extract_hidden_state(gt_obs, target_team_id)
