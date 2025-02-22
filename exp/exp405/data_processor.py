@@ -203,6 +203,88 @@ class DataProcessor:
             df = self.add_fold(df)
         df.write_csv(self.feature_dir / "train.csv")
 
+    def _check_energy_field(self, row) -> bool:
+        sub_id = row["SubmissionId"]
+        episode_id = row["EpisodeId"]
+        episode_path = self.episode_dir / f"{sub_id}/{episode_id}.json"
+        with open(episode_path) as f:
+            json_load = json.load(f)
+
+        # 無効なepisodeはスキップ(valueも学習したいのでskip)
+        if not valid_episode(json_load, self.cfg.target_team_name):
+            return False
+
+        target_team_id = np.argmax(json_load["rewards"])  # win or tie
+
+        # episode内で獲得する情報
+        env_params = EnvParams(**json_load["configuration"]["env_cfg"])
+        episode_store = EpisodeStore(target_team_id, env_params, self.cfg.validation, episode_id)
+        steps = json_load["steps"]
+
+        prev_energy_node = None
+        for step_idx in range(len(steps) - 1):  # 505でdoneとなるため-1
+            step_info = steps[step_idx]
+            obs = json.loads(step_info[target_team_id]["observation"]["obs"])
+            gt_obs = step_info[0]["info"]["replay"]["observations"][0]
+            transposed_energy = np.array(gt_obs["map_features"]["energy"]).T
+            # マッチごとにリセットされる要素をリセット
+            if obs["match_steps"] == 0:
+                episode_store.reset()
+            # リセット時以外はupdateをする
+            else:
+                episode_store.update(obs)
+            extract_state(obs, target_team_id, episode_store)
+
+            if obs["match_steps"] != 0:
+                # energy fieldが一致しているか確認
+                # energy fieldの真値がgt_obs["map_features"]["energy"]に格納されているが
+                # これは前のターンのgt_obs["energy_nodes"]を元に計算されたものである
+
+                # energy_nodeが正しければenergy fieldが一致することの確認
+                guess = episode_store.energy_node_guesser._energy_tile_patterns[
+                    prev_energy_node[0][1], prev_energy_node[0][0]
+                ]
+                for y in range(EnvParams.map_height):
+                    for x in range(EnvParams.map_width):
+                        assert (
+                            guess[y, x] == transposed_energy[y, x]
+                        ), f"at {x=}, {y=}, {guess[y, x]=}, {transposed_energy[y, x]=}"
+
+                # 観測値と真のenergy fieldが一致しているか確認(シミュレータの挙動の確認)
+                transposed_energy_from_obs = np.array(obs["map_features"]["energy"]).T
+                sensor_mask = np.array(obs["sensor_mask"]).T
+                for y in range(EnvParams.map_height):
+                    for x in range(EnvParams.map_width):
+                        if sensor_mask[y, x]:
+                            assert transposed_energy_from_obs[y, x] == transposed_energy[y, x]
+
+                # energy_nodeの推定の確認
+                if episode_store.energy_node_guesser.is_determistic():
+                    tupled_energy_nodes1 = (prev_energy_node[0][0], prev_energy_node[0][1])
+                    tupled_energy_nodes2 = (
+                        prev_energy_node[len(prev_energy_node) // 2][0],
+                        prev_energy_node[len(prev_energy_node) // 2][1],
+                    )
+                    if (
+                        tupled_energy_nodes1 not in episode_store.energy_node_guesser._energy_node_candidates
+                        and tupled_energy_nodes2 not in episode_store.energy_node_guesser._energy_node_candidates
+                    ):
+                        print(
+                            f"energy node miss {tupled_energy_nodes1=}, {tupled_energy_nodes2=}, {episode_store.energy_node_guesser._energy_node_candidates=}"
+                        )
+            prev_energy_node = gt_obs["energy_nodes"]
+
+        return True
+
+    def test(self) -> None:
+        episode_paths = self.read_data()
+        ok_count = 0
+        for row in episode_paths.iter_rows(named=True):
+            if self._check_energy_field(row):
+                ok_count += 1
+            if ok_count == 10:
+                break
+
 
 def get_match_results(json_load: dict[str, Any], target_team_id: int) -> list[bool]:
     match_results = []
@@ -219,7 +301,7 @@ def get_match_results(json_load: dict[str, Any], target_team_id: int) -> list[bo
 def main() -> None:
     cfg = Config()
     data_processor = DataProcessor(cfg)
-    data_processor.run()
+    data_processor.test()
 
 
 if __name__ == "__main__":
