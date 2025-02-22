@@ -67,6 +67,11 @@ class ILAgent:
             "global_state": torch.from_numpy(np.stack(list(self.stack_global_states), axis=0)).unsqueeze(0).float(),
         }
 
+        # 自陣が(0, 0)になるようにstateを反転
+        do_flip = team_id == 1
+        if do_flip:
+            states["state"] = torch.flip(states["state"], [3, 4])
+
         with torch.no_grad():
             if torch.cuda.is_available():
                 states = {k: v.cuda() for k, v in states.items()}
@@ -74,6 +79,17 @@ class ILAgent:
             if torch.cuda.is_available():
                 output = {k: v.cpu() for k, v in output.items()}
             policy_map = output["policy"].squeeze().numpy()
+
+        if do_flip:
+            policy_map = np.flip(policy_map, axis=(1, 2)).copy()
+            policy_map[Action.UP], policy_map[Action.DOWN] = (
+                policy_map[Action.DOWN].copy(),
+                policy_map[Action.UP].copy(),
+            )
+            policy_map[Action.LEFT], policy_map[Action.RIGHT] = (
+                policy_map[Action.RIGHT].copy(),
+                policy_map[Action.LEFT].copy(),
+            )
 
         policy_map = get_legal_policy(obs, policy_map, team_id, episode_store)
         point_map = state[State.POINTS]
