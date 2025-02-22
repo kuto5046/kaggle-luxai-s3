@@ -105,8 +105,12 @@ class DataProcessor:
         episode_id = row["EpisodeId"]
         episode_path = self.episode_dir / f"{sub_id}/{episode_id}.json"
 
-        with open(episode_path) as f:
-            json_load = json.load(f)
+        try:
+            with open(episode_path) as f:
+                json_load = json.load(f)
+        except json.JSONDecodeError as e:
+            print(f"EpisodeId {episode_id}: {e}")
+            return None
 
         # 無効なepisodeはスキップ(valueも学習したいのでskip)
         if not valid_episode(json_load, self.cfg.target_team_name):
