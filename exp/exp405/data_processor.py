@@ -221,7 +221,10 @@ class DataProcessor:
         episode_store = EpisodeStore(target_team_id, env_params, self.cfg.validation, episode_id)
         steps = json_load["steps"]
 
+        params = steps[0][0]["info"]["replay"]["params"]
+        prev_energy_field = None
         prev_energy_node = None
+        drift_speed_diff = 0
         for step_idx in range(len(steps) - 1):  # 505でdoneとなるため-1
             step_info = steps[step_idx]
             obs = json.loads(step_info[target_team_id]["observation"]["obs"])
@@ -234,6 +237,11 @@ class DataProcessor:
             else:
                 episode_store.update(obs)
             extract_state(obs, target_team_id, episode_store)
+
+            drift_speed_diff += abs(
+                params["energy_node_drift_speed"]
+                - episode_store.energy_node_guesser.get_energy_drft_speed_estimate()[0]
+            )
 
             if obs["match_steps"] != 0:
                 # energy fieldが一致しているか確認
@@ -258,6 +266,10 @@ class DataProcessor:
                         if sensor_mask[y, x]:
                             assert transposed_energy_from_obs[y, x] == transposed_energy[y, x]
 
+                if prev_energy_field is not None and not np.all(prev_energy_field == transposed_energy):
+                    pass
+                    # print(f"energy field drifted in {obs['steps']=}")
+
                 # energy_nodeの推定の確認
                 if episode_store.energy_node_guesser.is_determistic():
                     tupled_energy_nodes1 = (prev_energy_node[0][0], prev_energy_node[0][1])
@@ -272,8 +284,14 @@ class DataProcessor:
                         print(
                             f"energy node miss {tupled_energy_nodes1=}, {tupled_energy_nodes2=}, {episode_store.energy_node_guesser._energy_node_candidates=}"
                         )
+            prev_energy_field = transposed_energy
             prev_energy_node = gt_obs["energy_nodes"]
 
+        # print(f"mean drift speed est diff: {drift_speed_diff / len(steps)}, relative: {drift_speed_diff / len(steps) / params['energy_node_drift_speed']} at true value {params['energy_node_drift_speed']}")
+        # 有効数字二桁で出力
+        print(
+            f"mean drift speed est diff: {drift_speed_diff / len(steps):.2e}, relative: {drift_speed_diff / len(steps) / params['energy_node_drift_speed']:.2e} at true value {params['energy_node_drift_speed']:.2e}"
+        )
         return True
 
     def test(self) -> None:

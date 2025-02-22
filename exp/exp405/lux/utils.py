@@ -91,22 +91,28 @@ class EnergyNodeGuesser:
 
         self._energy_func = lambda d: np.sin(d * 1.2 + 1) * 4
         self._energy_tile_patterns = self.precalculate_energy_tile_pattern()
+
+        self._drift_speed_prob = [
+            1 / len(env_params_ranges["energy_node_drift_speed"])
+            for _ in range(len(env_params_ranges["energy_node_drift_speed"]))
+        ]
         # fmt: off
-        ok_drift_steps = {
-            2,102,202,302,402,502,
-            2,52,102,152,202,252,302,352,402,452,502,
-            2,36,69,102,136,169,202,236,269,302,336,369,402,436,469,502,
-            2,27,52,77,102,127,177,202,227,252,277,302,327,352,377,402,427,452,477,502,
-            2,22,42,62,82,102,122,142,162,182,202,222,242,262,282,302,322,342,362,382,402,422,442,462,482,502,
-        }
+        self.ok_drift_steps = [
+            {2,102,202,302,402,502},
+            {2,52,102,152,202,252,302,352,402,452,502},
+            {2,36,69,102,136,169,202,236,269,302,336,369,402,436,469,502},
+            {2,27,52,77,102,127,177,202,227,252,277,302,327,352,377,402,427,452,477,502},
+            {2,22,42,62,82,102,122,142,162,182,202,222,242,262,282,302,322,342,362,382,402,422,442,462,482,502}
+        ]
         # fmt: on
         # ほとんどは上記でカバーされるが、episodeId 66954207でステップ203でdriftが発生するケースがあったので数値誤差を考慮して前後1ステップを追加
         # もし他にも落ちるようであれば毎ターン確認するようにしたほうがいいかも
         self._drift_steps = set()
-        for i in ok_drift_steps:
-            self._drift_steps.add(i)
-            self._drift_steps.add(i - 1)
-            self._drift_steps.add(i + 1)
+        for step_set in self.ok_drift_steps:
+            for i in step_set:
+                self._drift_steps.add(i)
+                self._drift_steps.add(i - 1)
+                self._drift_steps.add(i + 1)
 
     def precalculate_energy_tile_pattern(self):
         energy_tile_patterns = np.empty((EnvParams.map_height, EnvParams.map_width), dtype=object)
@@ -161,8 +167,7 @@ class EnergyNodeGuesser:
     def is_determistic(self) -> bool:
         return len(self._energy_node_candidates) == 1
 
-    def update_energy_map(self, obs: dict[str, Any]) -> None:
-        """ """
+    def _update_energy_map(self, obs: dict[str, Any]) -> None:
         sensor_mask = np.array(obs["sensor_mask"]).T
         obs_energy_map = np.array(obs["map_features"]["energy"]).T
         # energy driftが発生しているかどうか
@@ -208,6 +213,73 @@ class EnergyNodeGuesser:
                 else:
                     # 平均
                     self._energy_map[y, x] = (False, result_by_node_candidates.mean())
+
+    def _bayesian_update(self, priors: list, likelihoods: list) -> list:
+        """
+        ベイズ更新を行います。
+        :param priors: 各候補の事前確率 (shape=(5,), 合計は1)
+        :param likelihoods: 各候補の尤度 (shape=(5,))。各要素は 0, 1, 1/n のいずれか。
+        :return: 更新後の確率分布 (事後確率)
+        """
+        # 事前確率と尤度の積を計算
+        post = priors * likelihoods
+        total = post.sum()
+        # 全候補の尤度がゼロの場合は例外とする（またはそのまま事前を返す）
+        if total == 0:
+            # driftするターンが間違っている場合は稀にここに入る
+            # この場合はそのまま事前を返す
+            return priors
+        return post / total
+
+    def _update_energy_speed(self, obs: dict[str, Any]) -> None:
+        # まずenergyの位置が移動しているかどうかを判断する
+        current_energy_map = np.array(obs["map_features"]["energy"]).T
+        sensor_mask = np.array(obs["sensor_mask"]).T
+        drifted = False
+        for y in range(EnvParams.map_height):
+            for x in range(EnvParams.map_width):
+                if self._energy_map[y, x][0] and sensor_mask[y, x]:
+                    if current_energy_map[y, x] != self._energy_map[y, x][1]:
+                        drifted = True
+                        break
+            if drifted:
+                break
+
+        # 今回の観測が得られた条件下での各候補の確率 = 事前確率 * speedが該当の場合に今回の観測が得られる確率 / normalizing constant
+        likelihoods = np.zeros(len(self._drift_speed_prob))
+        max_magnitude = max(env_params_ranges["energy_node_drift_magnitude"])
+        non_move_prob = 1 / (2 * max_magnitude + 1) ** 2
+        for i in range(len(self._drift_speed_prob)):
+            if obs["steps"] in self.ok_drift_steps[i]:
+                if drifted:
+                    # 動くはずで動いている場合
+                    likelihoods[i] = 1 - non_move_prob
+                else:
+                    # 動くはずで動いていない場合
+                    likelihoods[i] = non_move_prob
+            elif drifted:
+                # 動かないはずで動いている場合
+                likelihoods[i] = 0
+            else:
+                # 動かないはずで動いていない場合
+                likelihoods[i] = 1
+
+        self._drift_speed_prob = self._bayesian_update(self._drift_speed_prob, likelihoods)
+
+    def update_energy(self, obs: dict[str, Any]) -> None:
+        self._update_energy_speed(obs)
+        self._update_energy_map(obs)
+
+    # meanとsigmaを返す
+    def get_energy_drft_speed_estimate(self) -> tuple[float, float]:
+        sum = 0
+        sigma = 0
+        for i, prob in enumerate(self._drift_speed_prob):
+            sum += prob * env_params_ranges["energy_node_drift_speed"][i]
+        for i, prob in enumerate(self._drift_speed_prob):
+            sigma += prob * (env_params_ranges["energy_node_drift_speed"][i] - sum) ** 2
+        sigma = np.sqrt(sigma)
+        return (sum, sigma)
 
 
 class EpisodeStore:
@@ -297,7 +369,7 @@ class EpisodeStore:
         self._update_visit_count(obs)
         self._update_points(obs)
         self._update_point_map(obs)
-        self.energy_node_guesser.update_energy_map(obs)
+        self.energy_node_guesser.update_energy(obs)
 
     def _is_finished_relic_search(self) -> bool:
         return self._relic_map.sum() == EnvParams.max_relic_nodes
