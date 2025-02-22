@@ -4,6 +4,7 @@ from collections import deque
 
 import numpy as np
 import torch
+import networkx as nx
 from lightning import seed_everything
 from lux.utils import (
     State,
@@ -12,6 +13,7 @@ from lux.utils import (
     HiddenState,
     EpisodeStore,
     in_map,
+    calc_next_pos,
     extract_state,
     get_valid_sap_map,
     extract_global_state,
@@ -25,9 +27,11 @@ from scipy.special import softmax
 class Config:
     seed: int = 2025
     # 確率的な行動を取るかどうか
-    stochastic: bool = True  # Falseにするとargmaxで行動を選択する
+    stochastic: bool = False  # Falseにするとargmaxで行動を選択する
     res: bool = True
     n_stack: int = 4
+    # 同じマスに複数のユニットが移動する場合のペナルティ、0=重複を許可(greedy)、1=重複を禁止
+    overlap_penalty: float = 1.0
 
     checkpoint_path: Path = Path(__file__).parent / "output/best_model.ckpt"
 
@@ -148,8 +152,165 @@ class Agent:
         available_unit_ids = np.where(unit_mask)[0]
 
         opp_unit_positions = [tuple(pos) for pos in obs["units"]["position"][self.opp_team_id] if pos[0] != -1]
-        actions = np.zeros((self.env_cfg["max_units"], 3), dtype=int)
-        # unit ids range from 0 to max_units - 1
+
+        if len(available_unit_ids) > 1 and self.cfg.overlap_penalty > 0:
+            actions = self._assign_actions_with_flow(
+                available_unit_ids, unit_positions, policy_map, point_map, obs, opp_unit_positions
+            )
+        else:
+            actions = np.zeros((self.env_cfg["max_units"], 3), dtype=int)
+            self._assign_greedy_actions(
+                actions, available_unit_ids, unit_positions, policy_map, point_map, obs, opp_unit_positions
+            )
+
+        self.prev_opp_unit_positions = opp_unit_positions
+        return actions
+
+    def _assign_actions_with_flow(
+        self, available_unit_ids, unit_positions, policy_map, point_map, obs, opp_unit_positions
+    ):
+        """最小費用流問題としてグリッドへの割り当てを解く"""
+        # start_time = time.time()  # 開始時間を記録
+
+        actions = np.zeros((self.env_cfg["max_units"], 3), dtype=np.int32)
+
+        # 各ユニットの可能なアクションと移動後の位置を列挙
+        unit_actions = []
+        all_next_positions = set()
+
+        for unit_id in available_unit_ids:
+            unit_pos = tuple(unit_positions[unit_id])  # numpy配列をtupleに変換
+            x, y = unit_pos
+            policy = policy_map[:, y, x].copy()
+            policy /= policy.sum()
+
+            valid_actions = []
+            for action in range(len(Action)):
+                if action == Action.SAP:
+                    ok = False
+                    nearby_enemies = get_nearby_enemy_unit_ids(
+                        unit_pos, opp_unit_positions, self.env_cfg["unit_sap_range"]
+                    )
+                    if len(nearby_enemies) > 0:
+                        sap_pos = opp_unit_positions[np.random.choice(nearby_enemies)]
+                        # 敵ユニットが2ステップ以上動いていない場合はsapする
+                        if point_map[sap_pos[1], sap_pos[0]] == 1 or sap_pos in self.prev_opp_unit_positions:
+                            ok = True
+                        else:
+                            # 敵ユニットの隣接セルがポイント位置であればそこに移動すると考える。
+                            nearby_point_positions = get_nearby_point_positions(sap_pos, point_map)
+                            if len(nearby_point_positions) > 0:
+                                ok = True
+                    if not ok:
+                        continue
+                    next_pos = unit_pos  # SAPは現在位置として扱う
+                else:
+                    next_pos = tuple(calc_next_pos(unit_pos, action))  # numpy配列をtupleに変換
+                    if not in_map(next_pos):
+                        continue
+
+                # score = -np.log(policy[action] + 1e-10)
+                score = 1.0 - policy[action]
+                valid_actions.append({"action_id": action, "next_pos": next_pos, "score": score})
+                all_next_positions.add(next_pos)
+
+            unit_actions.append(valid_actions)
+
+        # フローネットワークの構築
+        G = nx.DiGraph()
+
+        n_units = len(available_unit_ids)
+
+        source = "source"
+        sink = "sink"
+        G.add_node(source, demand=-n_units)  # ソースから n_units 分のフローを流す
+        G.add_node(sink, demand=n_units)  # シンクで n_units 分のフローを受け取る
+
+        # ユニットノードの追加
+        for i, unit_id in enumerate(available_unit_ids):
+            unit_node = f"unit_{i}"
+            G.add_node(unit_node, demand=0)  # 中継ノードなのでdemandは0
+            G.add_edge(source, unit_node, capacity=1, weight=0)
+
+        # 位置ノードの追加
+        for pos in all_next_positions:
+            pos_node = f"pos_{pos[0]}_{pos[1]}"
+            G.add_node(pos_node, demand=0)  # 中継ノードなのでdemandは0
+            # 重複ペナルティを調整するためにcapacityを設定
+            if self.cfg.overlap_penalty == 1:
+                capacity = 1  # 完全に重複を禁止
+                G.add_edge(pos_node, sink, capacity=capacity, weight=0)
+            else:
+                capacity = len(available_unit_ids)  # 重複を許可
+                for _ in range(capacity):  # 重複するごとにoverlap_penaltyを加算
+                    G.add_edge(pos_node, sink, capacity=1, weight=self.cfg.overlap_penalty)
+        # ユニットから位置へのエッジを追加
+        for i, unit_actions_list in enumerate(unit_actions):
+            unit_node = f"unit_{i}"
+            for action in unit_actions_list:
+                pos = action["next_pos"]
+                pos_node = f"pos_{pos[0]}_{pos[1]}"
+                base_cost = action["score"]
+                G.add_edge(unit_node, pos_node, capacity=1, weight=base_cost)
+
+        # 最小費用流を解く
+        try:
+            flow_dict = nx.min_cost_flow(G)
+        except nx.NetworkXUnfeasible:
+            # フローが見つからない場合は貪欲な割り当てにフォールバック
+            raise ValueError("フローが見つからない")
+            self._assign_greedy_actions(
+                actions, available_unit_ids, unit_positions, policy_map, point_map, obs, opp_unit_positions
+            )
+            return actions
+
+        # フローから行動を抽出
+        for i, unit_id in enumerate(available_unit_ids):
+            unit_node = f"unit_{i}"
+            unit_flow = flow_dict[unit_node]
+            # 選択された位置を見つける
+            selected_action = None
+            for action in unit_actions[i]:
+                pos = action["next_pos"]
+                pos_node = f"pos_{pos[0]}_{pos[1]}"
+                if pos_node in unit_flow and unit_flow[pos_node] > 0:
+                    selected_action = action
+                    break
+
+            if selected_action is None:
+                actions[unit_id] = [Action.CENTER, 0, 0]
+            elif selected_action["action_id"] == Action.SAP:
+                # 範囲内にいる敵ユニットを取得
+                nearby_enemy_unit_ids = get_nearby_enemy_unit_ids(
+                    unit_pos, opp_unit_positions, self.env_cfg["unit_sap_range"]
+                )
+                if len(nearby_enemy_unit_ids) > 0:
+                    sap_pos = opp_unit_positions[np.random.choice(nearby_enemy_unit_ids)]
+                    # 敵ユニットが2ステップ以上動いていない場合はsapする
+                    if point_map[sap_pos[1], sap_pos[0]] == 1 or sap_pos in self.prev_opp_unit_positions:
+                        dx, dy = calc_relative_pos(unit_pos, sap_pos)
+                        actions[unit_id] = [Action.SAP, dx, dy]
+                        continue
+                    else:
+                        # 敵ユニットの隣接セルがポイント位置であればそこに移動すると考える。
+                        nearby_point_positions = get_nearby_point_positions(sap_pos, point_map)
+                        if len(nearby_point_positions) > 0:
+                            sap_pos = nearby_point_positions[np.random.choice(len(nearby_point_positions))]
+                            dx, dy = calc_relative_pos(unit_pos, sap_pos)
+                            actions[unit_id] = [Action.SAP, dx, dy]
+                            continue
+                raise ValueError("SAP: 敵ユニットが見つからない")
+            else:
+                actions[unit_id] = [selected_action["action_id"], 0, 0]
+
+        # end_time = time.time()  # 終了時間を記録
+        # print(f"Flow assignment took {(end_time - start_time) * 1000:.1f} ms")  # ミリ秒単位で表示
+
+        return actions
+
+    def _assign_greedy_actions(
+        self, actions, available_unit_ids, unit_positions, policy_map, point_map, obs, opp_unit_positions
+    ):
         for unit_id in available_unit_ids:
             unit_pos = unit_positions[unit_id]
             x, y = unit_pos
@@ -192,9 +353,6 @@ class Agent:
                 else:
                     actions[unit_id] = [action, 0, 0]
                     break
-        # 敵ユニットの位置を更新
-        self.prev_opp_unit_positions = opp_unit_positions
-        return actions
 
 
 # 相対位置を計算
