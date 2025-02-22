@@ -37,6 +37,8 @@ class GlobalState(IntEnum):
     UNIT_SAP_RANGE = auto()
     UNIT_SENSOR_RANGE = auto()
     RELIC_SEARCH = auto()  # 1 if still have to search for relic, 0 otherwise
+    RELIC_SEARCH_FINISHED = auto()
+    RELIC_POPUP_IN_THIS_MATCH = auto()
 
 
 class HiddenState(IntEnum):
@@ -769,6 +771,8 @@ def extract_global_state(
         if ((not episode_store._is_popup_relic_in_this_match) and (not episode_store._is_finished_relic_search()))
         else 0.0
     )
+    global_states[GlobalState.RELIC_SEARCH_FINISHED] = 1.0 if episode_store._is_finished_relic_search() else 0.0
+    global_states[GlobalState.RELIC_POPUP_IN_THIS_MATCH] = 1.0 if episode_store._is_popup_relic_in_this_match else 0.0
     return global_states
 
 
