@@ -357,6 +357,7 @@ class Agent:
         # フローから行動を抽出
         for i, unit_id in enumerate(available_unit_ids):
             unit_node = nodes[f"unit_{i}"]
+            unit_pos = unit_positions[unit_id]
             selected_action = None
             for edge in flow.edges[unit_node]:
                 if edge[1] == 0 and edge[4] != -1:
