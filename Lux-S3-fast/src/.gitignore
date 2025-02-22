@@ -1,0 +1,6 @@
+*.egg-info/
+*episode.json
+episodes/
+dist/
+tests/test_agents
+build/
