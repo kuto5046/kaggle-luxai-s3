@@ -23,15 +23,15 @@ LOGGER = logging.getLogger(__name__)
 @dataclass
 class Config:
     exp_name: str = Path(__file__).parent.name
-    notes: str = "Frog Parade"
+    notes: str = "aDg4b remove unnecessary matches"
     seed: int = 2025
     debug: bool = False
     n_splits: int = 5
     use_fold: int = 0
     root_dir: Path = Path("/kaggle")
     feature_version: str = exp_name
-    feature_dir: Path = root_dir / f"output/feature_store/okumura/{feature_version}"
-    output_dir = root_dir / f"exp/okumura/{exp_name}/output"
+    feature_dir: Path = root_dir / f"output/feature_store/aDg4b_42890844"
+    output_dir = root_dir / f"exp/{exp_name}/output"
 
     # trainer
     epoch: int = 30

@@ -129,7 +129,7 @@ class DataProcessor:
             target_team_id = np.argmax(json_load["rewards"])  # win or tie
             match_results = get_match_results(json_load, target_team_id)
             
-            valid_steps = (np.argmax(np.cumsum(match_results)) + 1) * 101
+            valid_steps = (np.argmax(np.cumsum(match_results) == 3) + 1) * 101  # 3勝した後のデータは使わない
             
             # episode内で獲得する情報
             env_params = EnvParams(**json_load["configuration"]["env_cfg"])
