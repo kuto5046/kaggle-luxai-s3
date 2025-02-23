@@ -48,6 +48,7 @@ class LuxAugmentBase:
         action = np.where(action == -1, 2 + offset, action)
         return action
 
+
 # 自陣を(0,0)にする
 class LuxAugmentStandardize(LuxAugmentBase):
     def __init__(self) -> None:
@@ -413,19 +414,74 @@ def one_hot_encoder(input_tensor: torch.Tensor, n_classes: int) -> torch.Tensor:
     return output_tensor.float()
 
 
+# --------------------------------------------------
+# LayerNorm2d: [N, C, H, W] 用の LayerNorm ラッパー
+# --------------------------------------------------
+class LayerNorm2d(nn.Module):
+    def __init__(self, num_features, eps=1e-5, elementwise_affine=True):
+        """
+        入力が [N, C, H, W] の場合、各ピクセル位置ごとにチャンネル正規化を行う。
+        """
+        super().__init__()
+        self.ln = nn.LayerNorm(num_features, eps=eps, elementwise_affine=elementwise_affine)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [N, C, H, W] → [N, H, W, C]
+        x = x.permute(0, 2, 3, 1)
+        x = self.ln(x)
+        # [N, H, W, C] → [N, C, H, W]
+        return x.permute(0, 3, 1, 2)
+
+
+# -------------------------------
+# Self-Attention ブロック (2D版)
+# -------------------------------
+class SelfAttention2d(nn.Module):
+    """
+    簡易の自己注意ブロック。SAGAN などで用いられる方式で、
+    入力特徴に対する空間的な相関を捉えます。
+    """
+
+    def __init__(self, in_channels: int):
+        super().__init__()
+        self.query_conv = nn.Conv2d(in_channels, in_channels // 8, kernel_size=1)
+        self.key_conv = nn.Conv2d(in_channels, in_channels // 8, kernel_size=1)
+        self.value_conv = nn.Conv2d(in_channels, in_channels, kernel_size=1)
+        self.gamma = nn.Parameter(torch.zeros(1))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, C, H, W = x.size()
+        proj_query = self.query_conv(x).view(B, -1, H * W)  # (B, C//8, N)
+        proj_key = self.key_conv(x).view(B, -1, H * W)  # (B, C//8, N)
+        energy = torch.bmm(proj_query.permute(0, 2, 1), proj_key)  # (B, N, N)
+        attention = F.softmax(energy, dim=-1)
+        proj_value = self.value_conv(x).view(B, -1, H * W)  # (B, C, N)
+        out = torch.bmm(proj_value, attention.permute(0, 2, 1))  # (B, C, N)
+        out = out.view(B, C, H, W)
+        out = self.gamma * out + x
+        return out
+
+
 class DoubleConv(nn.Module):
     """(convolution => [BN] => ReLU) * 2"""
 
-    def __init__(self, in_channels: int, out_channels: int, mid_channels: int | None = None, res: bool = False) -> None:
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        mid_channels: int | None = None,
+        res: bool = False,
+        norm_layer: nn.Module = nn.BatchNorm2d,
+    ) -> None:
         super().__init__()
         if not mid_channels:
             mid_channels = out_channels
         self.double_conv = nn.Sequential(
             nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(mid_channels),
+            norm_layer(mid_channels),
             nn.ReLU(inplace=True),
             nn.Conv2d(mid_channels, out_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(out_channels),
+            norm_layer(out_channels),
             nn.ReLU(inplace=True),
         )
         self.res = res
@@ -442,10 +498,12 @@ class DoubleConv(nn.Module):
 class Down(nn.Module):
     """Downscaling with maxpool then double conv"""
 
-    def __init__(self, in_channels: int, out_channels: int, res: bool = False) -> None:
+    def __init__(
+        self, in_channels: int, out_channels: int, res: bool = False, norm_layer: nn.Module = nn.BatchNorm2d
+    ) -> None:
         super().__init__()
         self.maxpool = nn.MaxPool2d(2)
-        self.conv = DoubleConv(in_channels, out_channels, res=res)
+        self.conv = DoubleConv(in_channels, out_channels, res=res, norm_layer=norm_layer)
         self.res = res
         # スキップコネクション用の1x1 convとダウンサンプリング
         if self.res:
@@ -462,16 +520,18 @@ class Down(nn.Module):
 class Up(nn.Module):
     """Upscaling then double conv"""
 
-    def __init__(self, in_channels: int, out_channels: int, bilinear: bool = True) -> None:
+    def __init__(
+        self, in_channels: int, out_channels: int, bilinear: bool = True, norm_layer: nn.Module = nn.BatchNorm2d
+    ) -> None:
         super().__init__()
 
         # if bilinear, use the normal convolutions to reduce the number of channels
         if bilinear:
             self.up = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True)
-            self.conv = DoubleConv(in_channels, out_channels, in_channels // 2)
+            self.conv = DoubleConv(in_channels, out_channels, in_channels // 2, norm_layer=norm_layer)
         else:
             self.up = nn.ConvTranspose2d(in_channels, in_channels // 2, kernel_size=2, stride=2)
-            self.conv = DoubleConv(in_channels, out_channels)
+            self.conv = DoubleConv(in_channels, out_channels, norm_layer=norm_layer)
 
     def forward(self, x1: torch.Tensor, x2: torch.Tensor) -> torch.Tensor:
         x1 = self.up(x1)
@@ -516,20 +576,25 @@ class LuxUNetModel(nn.Module):
         n_stack: int,
         bilinear: bool = True,
         res: bool = False,
+        norm_layer: nn.Module = LayerNorm2d,
+        use_self_attention: bool = True,
     ) -> None:
         super().__init__()
         self.bilinear = bilinear
+        self.use_self_attention = use_self_attention
 
-        self.inc = DoubleConv(state_space_size, 64, res=res)
-        self.down1 = Down(64, 128, res=res)
-        self.down2 = Down(128, 256, res=res)
-        self.down3 = Down(256, 256, res=res)
+        self.inc = DoubleConv(state_space_size, 64, res=res, norm_layer=norm_layer)
+        self.down1 = Down(64, 128, res=res, norm_layer=norm_layer)
+        self.down2 = Down(128, 256, res=res, norm_layer=norm_layer)
+        self.down3 = Down(256, 256, res=res, norm_layer=norm_layer)
 
-        #
+        if self.use_self_attention:
+            self.self_attention = SelfAttention2d(256)
+
         factor = 2 if bilinear else 1
-        self.up1 = Up(256 * 2 + global_state_space_size, 256 // factor, bilinear)
-        self.up2 = Up(256, 128 // factor, bilinear)
-        self.up3 = Up(128, 64, bilinear)
+        self.up1 = Up(256 * 2 + global_state_space_size, 256 // factor, bilinear, norm_layer=norm_layer)
+        self.up2 = Up(256, 128 // factor, bilinear, norm_layer=norm_layer)
+        self.up3 = Up(128, 64, bilinear, norm_layer=norm_layer)
         self.policy_net = OutConv(64 * n_stack, action_space_size)
         # self.sap_net = OutConv(64 * n_stack, 1)
         self.state_net = OutConv(64 * n_stack, hidden_state_space_size)
@@ -559,6 +624,9 @@ class LuxUNetModel(nn.Module):
         x3 = self.down2(x2)
         x4 = self.down3(x3)
 
+        if self.use_self_attention:
+            x4 = self.self_attention(x4)
+
         # sx, syのマップにグローバルステートをブロードキャスト
         sx, sy = x4.shape[2:]
         _n, _t, _c = global_state.shape
@@ -574,7 +642,7 @@ class LuxUNetModel(nn.Module):
         x = self.up2(x, x2)
         x = self.up3(x, x1)
 
-        x = x.view(_n, -1, _x, _y)
+        x = x.reshape(_n, -1, _x, _y)
         policy_logits = self.policy_net(x)
         # sap_logits = self.sap_net(x)
         state_logits = self.state_net(x)
