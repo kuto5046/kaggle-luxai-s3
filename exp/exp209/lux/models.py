@@ -583,7 +583,7 @@ class LuxUNetModel(nn.Module):
         self.bilinear = bilinear
         self.use_self_attention = use_self_attention
 
-        self.inc = DoubleConv(state_space_size, 64, res=res, norm_layer=norm_layer)
+        self.inc = DoubleConv(state_space_size + global_state_space_size, 64, res=res, norm_layer=norm_layer)
         self.down1 = Down(64, 128, res=res, norm_layer=norm_layer)
         self.down2 = Down(128, 256, res=res, norm_layer=norm_layer)
         self.down3 = Down(256, 256, res=res, norm_layer=norm_layer)
@@ -619,6 +619,10 @@ class LuxUNetModel(nn.Module):
         global_state = batch["global_state"]
         _n, _t, _c, _x, _y = state.shape
         x = state.view(-1, _c, _x, _y)
+        _ng, _tg, _cg = global_state.shape
+        gx = global_state.view(-1, _cg, 1, 1)
+        gx = gx.repeat(1, 1, _x, _y)
+        x = torch.cat([x, gx], dim=1)
         x1 = self.inc(x)
         x2 = self.down1(x1)
         x3 = self.down2(x2)
