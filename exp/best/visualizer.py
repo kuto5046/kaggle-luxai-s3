@@ -233,13 +233,10 @@ def main():
     st.title(f"Episode Data Visualizer in {cfg.exp_name}")
 
     # jsonファイルをupload
-    # json_load = st.file_uploader("jsonファイルをupload", type="json")
-    episode_path = "/home/user/work/replay.json"
-    with open(episode_path) as f:
-        json_load = json.load(f)
+    json_load = st.file_uploader("jsonファイルをupload", type="json")
     if json_load is not None:
         usage()
-        # json_load = json.load(json_load)
+        json_load = json.load(json_load)
         episode_id = json_load["info"]["EpisodeId"]
         target_team_id = json_load["info"]["TeamNames"].index(cfg.team_name)
         link = f"https://s3vis.lux-ai.org/#/visualizer?input={episode_id}"
