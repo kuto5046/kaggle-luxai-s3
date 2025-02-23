@@ -133,7 +133,7 @@ class DataProcessor:
         match_results = get_match_results(json_load, target_team_id)
         
         # experimental
-        if match_results[-1] is False:
+        if not match_results[-1]:
             return None
         
         final_step_in_match = [(i_match + 1) * EnvParams.max_steps_in_match + i_match for i_match in range(EnvParams.match_count_per_episode)]
