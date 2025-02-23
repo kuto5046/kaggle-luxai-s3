@@ -868,6 +868,16 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
                 state_map[State.OPP_UNIT_COUNT, y, x] += 1 / EnvParams.max_units
                 state_map[State.OPP_UNIT_ENERGY, y, x] += unit_energy / EnvParams.init_unit_energy
                 # state_map[State.OPP_UNIT_MASK, y, x] = unit_mask
+
+    # clamp state_map[State.OWN_UNIT_COUNT] to [0, 5 / EnvParams.max_units]
+    own_unit_count_new = np.minimum(state_map[State.OWN_UNIT_COUNT], 5 / EnvParams.max_units)
+    state_map[State.OWN_UNIT_ENERGY] = (
+        state_map[State.OWN_UNIT_ENERGY]
+        * own_unit_count_new
+        / np.maximum(state_map[State.OWN_UNIT_COUNT], 1 / EnvParams.max_units)
+    )
+    state_map[State.OWN_UNIT_COUNT] = own_unit_count_new
+
     return state_map
 
 
