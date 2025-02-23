@@ -334,16 +334,8 @@ class NebulaTileVisionReductionGuesser:
                     0,
                 ).astype(np.int16)
                 update[i : max_sensor_range * 2 + 1 - i, i : max_sensor_range * 2 + 1 - i] = val
-                # update = update.at[
-                #     i : max_sensor_range * 2 + 1 - i,
-                #     i : max_sensor_range * 2 + 1 - i,
-                # ].set(val)
             # vision of position at center of update has an extra 10
             update[max_sensor_range, max_sensor_range] += 10
-            # update = update.at[
-            #     max_sensor_range,
-            #     max_sensor_range,
-            # ].add(10)
             new_region = existing_vision_power + update
             vision_power_map[start_x : start_x + slice_size, start_y : start_y + slice_size] = new_region
             return vision_power_map
@@ -380,25 +372,25 @@ class NebulaTileVisionReductionGuesser:
             for x in range(EnvParams.map_width):
                 if len(self._nebula_tile_vision_reduction_candidates) == 1:
                     break
+                new_candidates = set()
                 if sensor_mask[y, x]:
                     # 前のターンのtile_type_mapに基づいて視界が決まることに注意
                     if self._prev_tile_type_obs[y, x] == TileType.NEBULA:
                         # nebulaの影響があっても見える
                         max_vision_reduction = vision_power_map[y, x] - 1
                         # 候補をしぼる
-                        new_candidates = set()
                         for candidate in self._nebula_tile_vision_reduction_candidates:
                             if max_vision_reduction >= candidate:
                                 new_candidates.add(candidate)
-                        self._nebula_tile_vision_reduction_candidates = new_candidates
                 elif vision_power_map[y, x] > 0:
                     # 本来は見えるはずの場所が見えない場合はそこにnebula tileがあるとわかる
                     min_vision_reduction = vision_power_map[y, x]
                     # 候補をしぼる
-                    new_candidates = set()
                     for candidate in self._nebula_tile_vision_reduction_candidates:
                         if min_vision_reduction <= candidate:
                             new_candidates.add(candidate)
+                # TODO: 100試合に1回程度(バグっていて？)0になるので直す
+                if len(new_candidates) != 0:
                     self._nebula_tile_vision_reduction_candidates = new_candidates
 
         self._prev_tile_type_obs = np.array(obs["map_features"]["tile_type"]).T
@@ -434,9 +426,6 @@ class EpisodeStore:
         self._nebula_tile_drift_speed_candidates = set(env_params_ranges["nebula_tile_drift_speed"])
         self.candidate_to_multiple = {0.15: 7, 0.1: 10, 0.05: 20, 0.025: 40}
         self.energy_node_guesser = EnergyNodeGuesser()
-        self.nebula_tile_vision_reduction_guesser = NebulaTileVisionReductionGuesser(
-            target_team_id, env_cfg.unit_sensor_range
-        )
 
         self._visit_count = np.zeros(
             (EnvParams.map_height, EnvParams.map_width), dtype=np.float32
@@ -453,6 +442,9 @@ class EpisodeStore:
         self.unit_move_cost = env_cfg["unit_move_cost"]
         self.unit_sap_cost = env_cfg["unit_sap_cost"]
         self.unit_sap_range = env_cfg["unit_sap_range"]
+        self.nebula_tile_vision_reduction_guesser = NebulaTileVisionReductionGuesser(
+            target_team_id, env_cfg["unit_sensor_range"]
+        )
         self.reset()
 
     def reset(self) -> None:
