@@ -160,6 +160,7 @@ class LaxDataset(Dataset):
             "action": action,
             "sap": sap,
             "win": win,
+            "turn": step_idx,
         }
         inputs = self.transform_standardize(inputs)
         if self.mode == "train" and self.aug:
@@ -224,6 +225,7 @@ class LaxLitModel(LightningModule):
             hidden_state_space_size=len(HiddenState),
             n_stack=cfg.n_stack,
             res=cfg.res,
+            num_turn_groups=EnvParams.match_count_per_episode * 2,
         )
         self.criterion1 = DiceLoss(n_classes=len(Action))
         # self.criterion1 = MaskedBCEWithLogitsLoss()
@@ -510,18 +512,23 @@ class OutConv(nn.Module):
 class LuxUNetModel(nn.Module):
     def __init__(
         self,
-        state_space_size: int,
+        state_space_size: int,  # 例: len(State)
         global_state_space_size: int,
         action_space_size: int,
         hidden_state_space_size: int,
         n_stack: int,
+        num_turn_groups: int,  # 追加：ターンのグループ数（例：10など）
         bilinear: bool = True,
         res: bool = False,
     ) -> None:
         super().__init__()
         self.bilinear = bilinear
+        self.n_stack = n_stack
+        self.num_turn_groups = num_turn_groups
 
-        self.inc = DoubleConv(state_space_size, 64, res=res)
+        # もともとの state に加え、"turn" の one-hot 分のチャネルを追加する
+        in_channels = state_space_size + self.num_turn_groups
+        self.inc = DoubleConv(in_channels, 64, res=res)
         self.down1 = Down(64, 128, res=res)
         self.down2 = Down(128, 256, res=res)
         self.down3 = Down(256, 256, res=res)
@@ -554,16 +561,35 @@ class LuxUNetModel(nn.Module):
         state = batch["state"]
         global_state = batch["global_state"]
         _n, _t, _c, _x, _y = state.shape
-        x = state.view(-1, _c, _x, _y)
-        x1 = self.inc(x)
+
+        # one-hot 化してブロードキャスト
+        # batch["turn"] をテンソルに変換（shape: (_n,)）
+        turn = batch["turn"].to(state.device).long()  # 例: step_idx
+        # ターングループ = turn // 50
+        # 0-50, 51-100, 101-151, ... 455-504 の 10 グループに分ける
+        turn_group = turn // 101 * 2 + (turn % 101) // 51
+        # assert turn >= 0 and turn < 505
+        # one-hot 化：shape (_n, num_turn_groups)
+        one_hot_turn = F.one_hot(turn_group, num_classes=self.num_turn_groups).float()
+        # ここで、one_hot_turn は各サンプルの情報なので、ここで時間軸はstackしない
+        # そのため、1枚分の盤面全体にブロードキャストする:
+        one_hot_turn = one_hot_turn.unsqueeze(1).unsqueeze(-1).unsqueeze(-1)  # shape: (_n, 1, num_turn_groups, 1, 1)
+        one_hot_turn = one_hot_turn.expand(_n, _t, self.num_turn_groups, _x, _y)  # replicate for each time slice
+        # state と連結
+        state = torch.cat([state, one_hot_turn], dim=2)
+        # 連結後のチャンネル数は state_space_size + num_turn_groups
+
+        # ここで state の shape は (_n, n_stack, state_space_size + num_turn_groups, _x, _y)
+        x_in = state.view(_n * _t, state.shape[2], _x, _y)
+        x1 = self.inc(x_in)
         x2 = self.down1(x1)
         x3 = self.down2(x2)
         x4 = self.down3(x3)
 
         # sx, syのマップにグローバルステートをブロードキャスト
         sx, sy = x4.shape[2:]
-        _n, _t, _c = global_state.shape
-        gx = global_state.view(-1, _c, 1, 1)
+        _n2, _t2, _c_global = global_state.shape
+        gx = global_state.view(-1, _c_global, 1, 1)
         gx = gx.repeat(1, 1, sx, sy)
 
         x4 = torch.cat([x4, gx], dim=1)
