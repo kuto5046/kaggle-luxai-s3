@@ -132,6 +132,7 @@ class DataProcessor:
             env_params = EnvParams(**json_load["configuration"]["env_cfg"])
             episode_store = EpisodeStore(target_team_id, env_params, self.cfg.validation, episode_id)
             steps = json_load["steps"]
+            gt_env_params = EnvParams(**steps[0][0]["info"]["replay"]["params"])
             for step_idx in range(len(steps) - 1):  # 505でdoneとなるため-1
                 step_info = steps[step_idx]
                 next_step_info = steps[step_idx + 1]
@@ -143,7 +144,8 @@ class DataProcessor:
                     episode_store.reset()
                 # リセット時以外はupdateをする
                 else:
-                    episode_store.update(obs)
+                    prev_actions = np.array(step_info[target_team_id]["action"])
+                    episode_store.update(obs, prev_actions)
 
                 if self.cfg.use_gt:
                     state = extract_gt_state(gt_obs, target_team_id)
@@ -157,7 +159,7 @@ class DataProcessor:
                 hidden_state = extract_hidden_state(gt_obs, target_team_id)
                 episode_hidden_state_group.create_dataset(f"{step_idx}", data=hidden_state)
 
-                hidden_global_state = extract_hidden_global_state(env_params)
+                hidden_global_state = extract_hidden_global_state(gt_env_params)
                 episode_hidden_global_state_group.create_dataset(f"{step_idx}", data=hidden_global_state)
 
                 next_actions = next_step_info[target_team_id]["action"]
@@ -208,9 +210,11 @@ def get_match_results(json_load: dict[str, Any], target_team_id: int) -> list[bo
     match_results = []
     for i_match in range(EnvParams.match_count_per_episode):
         final_step_in_match = (i_match + 1) * 100 + i_match  # 100, 201, 302, 403, 504
-        win_team = np.argmax(
-            json_load["steps"][final_step_in_match][0]["info"]["replay"]["observations"][0]["team_points"]
-        )
+
+        teams_wins_after = np.asarray(json_load["steps"][final_step_in_match + 1][0]["info"]["replay"]["observations"][0]["team_wins"])
+        teams_wins_before = np.asarray(json_load["steps"][final_step_in_match][0]["info"]["replay"]["observations"][0]["team_wins"])
+        win_team = np.argmax(teams_wins_after - teams_wins_before)
+
         is_win = win_team == target_team_id
         match_results.append(is_win)
     return match_results
