@@ -23,22 +23,22 @@ LOGGER = logging.getLogger(__name__)
 @dataclass
 class Config:
     exp_name: str = Path(__file__).parent.name
-    notes: str = "policyをmasked bceだとsapが学習できていないのでdice lossに変更"
+    notes: str = "exp405で更新したbest model"
     seed: int = 2025
     debug: bool = False
     n_splits: int = 5
     use_fold: int = 0
-    root_dir: Path = Path("/home/kawattataido/デスクトップ/programing/kaggle/kaggle-luxai-s3/")
+    root_dir: Path = Path("/home/user/work")
     feature_version: str = exp_name
     feature_dir: Path = root_dir / f"output/feature_store/{feature_version}"
     output_dir = root_dir / f"exp/{exp_name}/output"
 
     # trainer
-    epoch: int = 30
+    epoch: int = 20
     limit_train_batches: float = 1.0
     limit_val_batches: float = 1.0
     use_amp: bool = False
-    batch_size: int = 256
+    batch_size: int = 1024
     num_workers: int = 20
     ckpt_path: str = None
     lr: float = 0.001
@@ -51,7 +51,7 @@ class Config:
     # loss
     loss_weight_policy: float = 1.0
     loss_weight_state: float = 1.0
-    loss_weight_global_state: float = 1.0
+    loss_weight_global_state: float = 0.0
     # loss_weight_value: float = 0.0
     # loss_weight_sap: float = 1.0
 
