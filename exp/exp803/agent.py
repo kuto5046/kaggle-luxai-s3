@@ -274,24 +274,26 @@ class Agent:
 
             valid_actions = []
             for action in range(len(Action)):
+                sap_pos_relative = None
                 if action == Action.SAP:
-                    ok = False
-                    nearby_enemies = get_nearby_enemy_unit_ids(
+                    # 範囲内にいる敵ユニットを取得
+                    nearby_enemy_unit_ids = get_nearby_enemy_unit_ids(
                         unit_pos, opp_unit_positions, self.env_cfg["unit_sap_range"]
                     )
-                    if len(nearby_enemies) > 0:
-                        sap_pos = opp_unit_positions[np.random.choice(nearby_enemies)]
+                    if len(nearby_enemy_unit_ids) > 0:
+                        sap_pos = opp_unit_positions[np.random.choice(nearby_enemy_unit_ids)]
                         # 敵ユニットが2ステップ以上動いていない場合はsapする
                         if point_map[sap_pos[1], sap_pos[0]] == 1 or sap_pos in self.prev_opp_unit_positions:
-                            ok = True
+                            sap_pos_relative = calc_relative_pos(np.array(unit_pos), np.array(sap_pos))
                         else:
                             # 敵ユニットの隣接セルがポイント位置であればそこに移動すると考える。
                             nearby_point_positions = get_nearby_point_positions(sap_pos, point_map)
                             if len(nearby_point_positions) > 0:
-                                ok = True
-                    if not ok:
-                        continue
+                                sap_pos = nearby_point_positions[np.random.choice(len(nearby_point_positions))]
+                                sap_pos_relative = calc_relative_pos(np.array(unit_pos), np.array(sap_pos))
                     next_pos = unit_pos  # SAPは現在位置として扱う
+                    if sap_pos_relative is None:
+                        continue
                 else:
                     next_pos = calc_next_pos(unit_pos, action)
                     if not in_map(next_pos):
@@ -299,7 +301,9 @@ class Agent:
 
                 # score = -np.log(policy[action] + 1e-10)
                 score = 1.0 - policy[action]
-                valid_actions.append({"action_id": action, "next_pos": next_pos, "score": score})
+                valid_actions.append(
+                    {"action_id": action, "next_pos": next_pos, "score": score, "sap_pos": sap_pos_relative}
+                )
                 all_next_positions.add(next_pos)
 
             unit_actions.append(valid_actions)
@@ -366,29 +370,7 @@ class Agent:
             if selected_action is None:
                 actions[unit_id] = [Action.CENTER, 0, 0]
             elif selected_action["action_id"] == Action.SAP:
-                # 範囲内にいる敵ユニットを取得
-                nearby_enemy_unit_ids = get_nearby_enemy_unit_ids(
-                    unit_pos, opp_unit_positions, self.env_cfg["unit_sap_range"]
-                )
-                if len(nearby_enemy_unit_ids) > 0:
-                    for nearby_enemy_unit_id in nearby_enemy_unit_ids:
-                        sap_pos = opp_unit_positions[nearby_enemy_unit_id]
-                        # 敵ユニットが2ステップ以上動いていない場合はsapする
-                        if point_map[sap_pos[1], sap_pos[0]] == 1 or sap_pos in self.prev_opp_unit_positions:
-                            dx, dy = calc_relative_pos(np.array(unit_pos), np.array(sap_pos))
-                            actions[unit_id] = [Action.SAP, dx, dy]
-                            break
-                        else:
-                            # 敵ユニットの隣接セルがポイント位置であればそこに移動すると考える。
-                            nearby_point_positions = get_nearby_point_positions(np.array(sap_pos), point_map)
-                            if len(nearby_point_positions) > 0:
-                                sap_pos = nearby_point_positions[np.random.choice(len(nearby_point_positions))]
-                                dx, dy = calc_relative_pos(np.array(unit_pos), np.array(sap_pos))
-                                actions[unit_id] = [Action.SAP, dx, dy]
-                                break
-                    else:
-                        # raise ValueError("SAP: 敵ユニットが見つからない")
-                        actions[unit_id] = [Action.CENTER, 0, 0]
+                actions[unit_id] = [Action.SAP, selected_action["sap_pos"][0], selected_action["sap_pos"][1]]
             else:
                 actions[unit_id] = [selected_action["action_id"], 0, 0]
 
