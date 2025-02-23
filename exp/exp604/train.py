@@ -28,7 +28,7 @@ class Config:
     debug: bool = False
     n_splits: int = 5
     use_fold: int = 0
-    root_dir: Path = Path("/home/user/work")
+    root_dir: Path = Path("/kaggle")
     feature_version: str = exp_name
     feature_dir: Path = root_dir / f"output/feature_store/{feature_version}"
     output_dir = root_dir / f"exp/{exp_name}/output"
@@ -115,7 +115,7 @@ class TrainPipeline:
     def setup_logger(self) -> None:
         self.pl_logger = WandbLogger(
             project="kaggle-luxai-s3",
-            entity="cnumber",
+            entity="okumura",
             # name=f"{self.cfg.exp_name}",
             group=self.cfg.exp_name,
             mode="disabled" if self.cfg.debug else "online",

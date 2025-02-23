@@ -33,10 +33,10 @@ class Config:
     debug: bool = False
     use_gt: bool = False
     n_splits: int = 5
-    root_dir: Path = Path("/home/user/work")
+    root_dir: Path = Path("/kaggle")
     input_dir: Path = root_dir / "input"
-    episode_dir: Path = root_dir / "output/feature_store/episodes"
-    episode_path: Path = episode_dir / "episodes0210.csv"
+    episode_dir: Path = root_dir / "data/42683570/episodes"
+    episode_path: Path = root_dir / "data/42683570/episodes.csv"
     feature_dir: Path = root_dir / f"output/feature_store/{exp_name}"
     target_team_name: str = "aDg4b"
     target_sub_ids: list[int] = field(default_factory=lambda: [42683570])
