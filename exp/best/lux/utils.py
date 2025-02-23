@@ -662,19 +662,10 @@ def extract_gt_state(obs: dict[str, Any], target_team_id: int) -> np.ndarray:
                 # 重複はそんなに発生しないだろうということで正規化はしない
                 state_map[State.OWN_UNIT_COUNT, y, x] += 1
                 state_map[State.OWN_UNIT_ENERGY, y, x] += unit_energy / EnvParams.init_unit_energy
-                state_map[State.OWN_UNIT_MASK, y, x] = unit_mask
             else:
                 state_map[State.OPP_UNIT_COUNT, y, x] += 1
                 state_map[State.OPP_UNIT_ENERGY, y, x] += unit_energy / EnvParams.init_unit_energy
-                state_map[State.OPP_UNIT_MASK, y, x] = unit_mask
 
-    # game state
-    state_map[State.MATCH_STEPS] = obs["match_steps"] / EnvParams.max_steps_in_match  # そのマッチの進行度
-    state_map[State.MATCH_COUNT] = obs["steps"] // EnvParams.max_steps_in_match  # 何試合目か
-    state_map[State.TEAM_POINTS] = (obs["team_points"][target_team_id] - obs["team_points"][enemy_team_id]) / 100
-    state_map[State.TEAM_WINS] = (
-        obs["team_wins"][target_team_id] - obs["team_wins"][enemy_team_id]
-    ) / EnvParams.match_count_per_episode
     return state_map
 
 
