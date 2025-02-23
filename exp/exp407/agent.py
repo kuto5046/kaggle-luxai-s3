@@ -41,6 +41,7 @@ class ILAgent:
             hidden_state_space_size=len(HiddenState),
             n_stack=n_stack,
             res=res,
+            num_turn_groups=10,
         )
         ckpt = torch.load(checkpoint_path, weights_only=True, map_location="cpu")
         state_dict = {k.replace("model.", ""): v for k, v in ckpt["state_dict"].items()}
@@ -65,6 +66,7 @@ class ILAgent:
         states = {
             "state": torch.from_numpy(np.stack(list(self.stack_states), axis=0)).unsqueeze(0).float(),
             "global_state": torch.from_numpy(np.stack(list(self.stack_global_states), axis=0)).unsqueeze(0).float(),
+            "turn": torch.tensor([int(obs["steps"])]),
         }
 
         # 自陣が(0, 0)になるようにstateを反転
