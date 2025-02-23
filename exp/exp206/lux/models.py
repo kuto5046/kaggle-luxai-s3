@@ -413,6 +413,26 @@ def one_hot_encoder(input_tensor: torch.Tensor, n_classes: int) -> torch.Tensor:
     output_tensor = torch.cat(tensor_list, dim=1)
     return output_tensor.float()
 
+
+# --------------------------------------------------
+# LayerNorm2d: [N, C, H, W] 用の LayerNorm ラッパー
+# --------------------------------------------------
+class LayerNorm2d(nn.Module):
+    def __init__(self, num_features, eps=1e-5, elementwise_affine=True):
+        """
+        入力が [N, C, H, W] の場合、各ピクセル位置ごとにチャンネル正規化を行う。
+        """
+        super().__init__()
+        self.ln = nn.LayerNorm(num_features, eps=eps, elementwise_affine=elementwise_affine)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [N, C, H, W] → [N, H, W, C]
+        x = x.permute(0, 2, 3, 1)
+        x = self.ln(x)
+        # [N, H, W, C] → [N, C, H, W]
+        return x.permute(0, 3, 1, 2)
+
+
 # -------------------------------
 # 1. Self-Attention ブロック (2D版)
 # -------------------------------
@@ -553,9 +573,9 @@ class LuxUNetModel(nn.Module):
         n_stack: int,
         bilinear: bool = True,
         res: bool = False,
-        norm_layer=nn.BatchNorm2d,
+        norm_layer=LayerNorm2d,
         use_self_attention: bool = True,
-        use_spectral_norm: bool = True,
+        use_spectral_norm: bool = False,
     ) -> None:
         super().__init__()
         self.bilinear = bilinear
@@ -613,7 +633,7 @@ class LuxUNetModel(nn.Module):
         x = self.up1(x4, x3)
         x = self.up2(x, x2)
         x = self.up3(x, x1)
-        x = x.view(_n, -1, _x, _y)
+        x = x.reshape(_n, -1, _x, _y)
         policy_logits = self.policy_net(x)
         state_logits = self.state_net(x)
 
