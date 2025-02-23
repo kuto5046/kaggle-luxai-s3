@@ -23,7 +23,7 @@ LOGGER = logging.getLogger(__name__)
 @dataclass
 class Config:
     exp_name: str = Path(__file__).parent.name
-    notes: str = "policyをmasked bceだとsapが学習できていないのでdice lossに変更"
+    notes: str = "aDg4b -> Frog Parade"
     seed: int = 2025
     debug: bool = False
     n_splits: int = 5
@@ -37,10 +37,10 @@ class Config:
     epoch: int = 30
     limit_train_batches: float = 1.0
     limit_val_batches: float = 1.0
-    use_amp: bool = False
+    use_amp: bool = True
     batch_size: int = 1024
-    num_workers: int = 20
-    ckpt_path: str = None
+    num_workers: int = 24
+    ckpt_path: str = "exp/exp605/output/best_model.ckpt"
     lr: float = 0.001
     weight_decay: float = 0.01
     warmup_step_rate: float = 0.1
@@ -123,8 +123,11 @@ class TrainPipeline:
         )
 
     def setup_model(self) -> None:
-        self.model = LaxLitModel(self.cfg)
-
+        if self.cfg.ckpt_path:
+            self.model = LaxLitModel.load_from_checkpoint(self.cfg.ckpt_path, cfg=self.cfg)
+        else:
+            self.model = LaxLitModel(self.cfg)
+        
     def train(self) -> None:
         self.trainer = Trainer(
             # default_root_dir=Path.cwd(),
@@ -139,7 +142,7 @@ class TrainPipeline:
             limit_val_batches=self.cfg.limit_val_batches,
             deterministic=True,  # for reproducibility
         )
-        self.trainer.fit(self.model, datamodule=self.datamodule, ckpt_path=self.cfg.ckpt_path)
+        self.trainer.fit(self.model, datamodule=self.datamodule)
 
     def run(self) -> None:
         self.setup_logger()

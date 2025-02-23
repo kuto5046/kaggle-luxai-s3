@@ -37,15 +37,15 @@ class Config:
     stratify: bool = False
     root_dir: Path = Path("/kaggle")
     input_dir: Path = root_dir / "input"
-    episode_dir: Path = root_dir / "data/42683570/episodes"
-    episode_path: Path = root_dir / "data/42683570/episodes.csv"
+    episode_dir: Path = root_dir / "data/42704976/episodes"
+    episode_path: Path = root_dir / "data/42704976/episodes.csv"
     feature_dir: Path = root_dir / f"output/feature_store/{exp_name}"
-    target_team_name: str = "aDg4b"
-    target_sub_ids: list[int] = field(default_factory=lambda: [42683570])
+    target_team_name: str = "Frog Parade"
+    target_sub_ids: list[int] = field(default_factory=lambda: [42704976])
     validation: bool = False
 
     use_only_win_data: bool = True
-    ignore_after_3_wins: bool = True
+    ignore_after_3_wins: bool = False
 
 
 def get_fold(_train: pl.DataFrame, cv: list[tuple[np.ndarray, np.ndarray]]) -> pl.DataFrame:
