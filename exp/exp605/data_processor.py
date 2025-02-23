@@ -208,9 +208,11 @@ def get_match_results(json_load: dict[str, Any], target_team_id: int) -> list[bo
     match_results = []
     for i_match in range(EnvParams.match_count_per_episode):
         final_step_in_match = (i_match + 1) * 100 + i_match  # 100, 201, 302, 403, 504
-        win_team = np.argmax(
-            json_load["steps"][final_step_in_match][0]["info"]["replay"]["observations"][0]["team_points"]
-        )
+
+        teams_wins_after = np.asarray(json_load["steps"][final_step_in_match + 1][0]["info"]["replay"]["observations"][0]["team_wins"])
+        teams_wins_before = np.asarray(json_load["steps"][final_step_in_match][0]["info"]["replay"]["observations"][0]["team_wins"])
+        win_team = np.argmax(teams_wins_after - teams_wins_before)
+
         is_win = win_team == target_team_id
         match_results.append(is_win)
     return match_results
