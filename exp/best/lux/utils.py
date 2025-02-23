@@ -358,13 +358,9 @@ class EpisodeStore:
             ]
 
             if len(candidates) == 0:
-                if self.validation:
-                    raise ValueError(
-                        f"矛盾が発生しているが条件を満たす候補が無い: {self.episode_id=} {steps=} {self._nebula_tile_drift_speed_candidates=}"
-                    )
-                else:
-                    # 矛盾が発生しているが条件を満たす候補が無い場合はスキップ(たまにある)
-                    return
+                raise ValueError(
+                    f"矛盾が発生しているが条件を満たす候補が無い: {self.episode_id=} {steps=} {self._nebula_tile_drift_speed_candidates=}"
+                )
 
             if self.validation:
                 # どちらかは一致しているはず
