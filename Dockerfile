@@ -89,10 +89,10 @@ WORKDIR ${HOME}/work/
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 RUN echo 'eval "$(uv generate-shell-completion zsh)"' >> ~/.zshrc
 ENV PATH ${HOME}/.local/bin/:$PATH
-# マウント前なので、pyproject.tomlをコピーしてuv syncを実行
-# COPY pyproject.toml uv.lock ./
+
+# COPY pyproject.toml uv.lock Lux-S3-fast ./
 # RUN uv sync
-# 後ほどマウントするため、pyproject.tomlとuv.lockを削除
 # RUN rm pyproject.toml uv.lock
+
 # pre-commit install
 # RUN uv run pre-commit install
