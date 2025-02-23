@@ -1,4 +1,4 @@
 #!/bin/bash 
 
 cd /kaggle
-python exp/exp603/train.py
+python exp/exp605/train.py
