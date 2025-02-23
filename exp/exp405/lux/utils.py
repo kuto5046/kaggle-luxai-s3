@@ -36,6 +36,10 @@ class GlobalState(IntEnum):
     UNIT_SAP_COST = auto()
     UNIT_SAP_RANGE = auto()
     UNIT_SENSOR_RANGE = auto()
+    NEBULA_TILE_VISION_REDUCTION_MEAN = auto()  # 推定値
+    NEBULA_TILE_VISION_REDUCTION_SIGMA = auto()  # 推定精度
+    ENERGY_NODE_DRIFT_SPEED_MEAN = auto()  # 推定値
+    ENERGY_NODE_DRIFT_SPEED_SIGMA = auto()  # 推定精度
 
 
 class HiddenState(IntEnum):
@@ -46,12 +50,12 @@ class HiddenState(IntEnum):
 
 # episodeごとに変動する環境パラメータ
 class HiddenGlobalState(IntEnum):
-    NEBULA_TILE_VISION_REDUCTION = 0
-    NEBULA_TILE_ENERGY_REDUCTION = auto()
+    # NEBULA_TILE_VISION_REDUCTION = 0
+    NEBULA_TILE_ENERGY_REDUCTION = 0
     UNIT_SAP_DROPOFF_FACTOR = auto()
     UNIT_ENERGY_VOID_FACTOR = auto()
     # NEBULA_TILE_DRIFT_SPEED = auto() . # 推定可能なので不要
-    ENERGY_NODE_DRIFT_SPEED = auto()  # 推定可能だがあまり意味がなさそうなので Auxilary Lossのままにしてある
+    # ENERGY_NODE_DRIFT_SPEED = auto()  # 推定可能だがあまり意味がなさそうなので Auxilary Lossのままにしてある
     ENERGY_NODE_DRIFT_MAGNITUDE = auto()  # 多分推定できる
 
 
@@ -282,6 +286,135 @@ class EnergyNodeGuesser:
         return (sum, sigma)
 
 
+class NebulaTileVisionReductionGuesser:
+    def __init__(self, target_team_id: int, unit_sensor_range: int) -> None:
+        self._nebula_tile_vision_reduction_candidates = env_params_ranges["nebula_tile_vision_reduction"]
+        self._target_team_id = target_team_id
+        self._unit_sensor_range = unit_sensor_range
+        self._prev_tile_type_obs = None
+
+    def compute_sensor_masks(self, obs: dict[str, Any]):
+        """Compute the vision power and sensor mask for both teams
+
+        Algorithm:
+
+        generate a integer vision power array over the map.
+        For each unit, add unit sensor range value (its kind of like the units sensing power/depth) to each tile the unit's sensor range
+        Clamp the vision power array to range [0, unit_sensing_range].
+
+        With 2 vision power maps, take the nebula vision mask * nebula vision power and subtract it from the vision power maps.
+        This forms the sensor mask
+        """
+
+        max_sensor_range = self._unit_sensor_range
+        vision_power_map_padding = max_sensor_range
+        vision_power_map = np.zeros(
+            shape=(
+                EnvParams.map_height + 2 * vision_power_map_padding,
+                EnvParams.map_width + 2 * vision_power_map_padding,
+            ),
+            dtype=np.int16,
+        )
+
+        # Update sensor mask based on the sensor range
+        def update_vision_power_map(unit_pos, vision_power_map):
+            x, y = unit_pos
+            start_x = x - max_sensor_range + vision_power_map_padding
+            start_y = y - max_sensor_range + vision_power_map_padding
+            # 対象領域のサイズは (max_sensor_range * 2 + 1) × (max_sensor_range * 2 + 1)
+            slice_size = max_sensor_range * 2 + 1
+            # Python のスライスを用いて、対象領域を抽出
+            existing_vision_power = vision_power_map[start_x : start_x + slice_size, start_y : start_y + slice_size]
+
+            update = np.zeros_like(existing_vision_power)
+            for i in range(max_sensor_range + 1):
+                val = np.where(
+                    i > max_sensor_range - self._unit_sensor_range - 1,
+                    i + 1 - (max_sensor_range - self._unit_sensor_range),
+                    0,
+                ).astype(np.int16)
+                update[i : max_sensor_range * 2 + 1 - i, i : max_sensor_range * 2 + 1 - i] = val
+                # update = update.at[
+                #     i : max_sensor_range * 2 + 1 - i,
+                #     i : max_sensor_range * 2 + 1 - i,
+                # ].set(val)
+            # vision of position at center of update has an extra 10
+            update[max_sensor_range, max_sensor_range] += 10
+            # update = update.at[
+            #     max_sensor_range,
+            #     max_sensor_range,
+            # ].add(10)
+            new_region = existing_vision_power + update
+            vision_power_map[start_x : start_x + slice_size, start_y : start_y + slice_size] = new_region
+            return vision_power_map
+
+        own_unit_positions = np.array(obs["units"]["position"][self._target_team_id])
+
+        for unit_id in range(EnvParams.max_units):
+            pos = own_unit_positions[unit_id]
+            if pos[0] != -1 and pos[1] != -1:
+                # 転置しているのでx,yが逆
+                pos = (pos[1], pos[0])
+                vision_power_map = update_vision_power_map(pos, vision_power_map)
+
+        vision_power_map = vision_power_map[
+            vision_power_map_padding:-vision_power_map_padding,
+            vision_power_map_padding:-vision_power_map_padding,
+        ]
+        return vision_power_map
+
+    def _update_nebula_tile_vision_reduction(self, obs: dict[str, Any]) -> None:
+        if self._nebula_tile_vision_reduction_candidates == 1:
+            return
+        if self._prev_tile_type_obs is None:
+            self._prev_tile_type_obs = np.array(obs["map_features"]["tile_type"]).T
+            return
+
+        vision_power_map = self.compute_sensor_masks(
+            obs,
+        )
+
+        sensor_mask = np.array(obs["sensor_mask"]).T
+
+        for y in range(EnvParams.map_height):
+            for x in range(EnvParams.map_width):
+                if len(self._nebula_tile_vision_reduction_candidates) == 1:
+                    break
+                if sensor_mask[y, x]:
+                    # 前のターンのtile_type_mapに基づいて視界が決まることに注意
+                    if self._prev_tile_type_obs[y, x] == TileType.NEBULA:
+                        # nebulaの影響があっても見える
+                        max_vision_reduction = vision_power_map[y, x] - 1
+                        # 候補をしぼる
+                        new_candidates = set()
+                        for candidate in self._nebula_tile_vision_reduction_candidates:
+                            if max_vision_reduction >= candidate:
+                                new_candidates.add(candidate)
+                        self._nebula_tile_vision_reduction_candidates = new_candidates
+                elif vision_power_map[y, x] > 0:
+                    # 本来は見えるはずの場所が見えない場合はそこにnebula tileがあるとわかる
+                    min_vision_reduction = vision_power_map[y, x]
+                    # 候補をしぼる
+                    new_candidates = set()
+                    for candidate in self._nebula_tile_vision_reduction_candidates:
+                        if min_vision_reduction <= candidate:
+                            new_candidates.add(candidate)
+                    self._nebula_tile_vision_reduction_candidates = new_candidates
+
+        self._prev_tile_type_obs = np.array(obs["map_features"]["tile_type"]).T
+
+    def get_nebula_tile_vision_reduction_estimate(self) -> tuple[float, float]:
+        sum = 0
+        for candidate in self._nebula_tile_vision_reduction_candidates:
+            sum += candidate
+        mean = sum / len(self._nebula_tile_vision_reduction_candidates)
+        sigma = 0
+        for candidate in self._nebula_tile_vision_reduction_candidates:
+            sigma += (candidate - mean) ** 2
+        sigma = np.sqrt(sigma / len(self._nebula_tile_vision_reduction_candidates))
+        return (mean, sigma)
+
+
 class EpisodeStore:
     def __init__(
         self,
@@ -301,6 +434,9 @@ class EpisodeStore:
         self._nebula_tile_drift_speed_candidates = set(env_params_ranges["nebula_tile_drift_speed"])
         self.candidate_to_multiple = {0.15: 7, 0.1: 10, 0.05: 20, 0.025: 40}
         self.energy_node_guesser = EnergyNodeGuesser()
+        self.nebula_tile_vision_reduction_guesser = NebulaTileVisionReductionGuesser(
+            target_team_id, env_cfg.unit_sensor_range
+        )
 
         self._visit_count = np.zeros(
             (EnvParams.map_height, EnvParams.map_width), dtype=np.float32
@@ -370,6 +506,7 @@ class EpisodeStore:
         self._update_points(obs)
         self._update_point_map(obs)
         self.energy_node_guesser.update_energy(obs)
+        self.nebula_tile_vision_reduction_guesser._update_nebula_tile_vision_reduction(obs)
 
     def _is_finished_relic_search(self) -> bool:
         return self._relic_map.sum() == EnvParams.max_relic_nodes
@@ -824,7 +961,9 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
     return state_map
 
 
-def extract_global_state(obs: dict[str, Any], target_team_id: int, env_params: EnvParams) -> np.ndarray:
+def extract_global_state(
+    obs: dict[str, Any], target_team_id: int, env_params: EnvParams, episode_store: EpisodeStore
+) -> np.ndarray:
     enemy_team_id = 1 - target_team_id
     global_states = np.zeros((len(GlobalState),), dtype=np.float32)
     # game state
@@ -843,17 +982,35 @@ def extract_global_state(obs: dict[str, Any], target_team_id: int, env_params: E
     global_states[GlobalState.UNIT_SAP_COST] = env_params.unit_sap_cost / env_params.init_unit_energy
     global_states[GlobalState.UNIT_SAP_RANGE] = env_params.unit_sap_range
     global_states[GlobalState.UNIT_SENSOR_RANGE] = env_params.unit_sensor_range
+    (vision_reduction_mean, vision_reduction_std) = (
+        episode_store.nebula_tile_vision_reduction_guesser.get_nebula_tile_vision_reduction_estimate()
+    )
+    global_states[GlobalState.NEBULA_TILE_VISION_REDUCTION_MEAN] = vision_reduction_mean / max(
+        env_params_ranges["nebula_tile_vision_reduction"]
+    )
+    global_states[GlobalState.NEBULA_TILE_VISION_REDUCTION_SIGMA] = vision_reduction_std / max(
+        env_params_ranges["nebula_tile_vision_reduction"]
+    )
+    (energy_drift_speed_mean, energy_drift_speed_std) = (
+        episode_store.energy_node_guesser.get_energy_drft_speed_estimate()
+    )
+    global_states[GlobalState.ENERGY_NODE_DRIFT_SPEED_MEAN] = energy_drift_speed_mean / max(
+        env_params_ranges["energy_node_drift_speed"]
+    )
+    global_states[GlobalState.ENERGY_NODE_DRIFT_SPEED_SIGMA] = energy_drift_speed_std / max(
+        env_params_ranges["energy_node_drift_speed"]
+    )
     return global_states
 
 
 def extract_hidden_global_state(env_params: dict[str, Any]) -> np.ndarray:
     hidden_global_states = np.zeros((len(HiddenGlobalState),), dtype=np.float32)
-    hidden_global_states[HiddenGlobalState.NEBULA_TILE_VISION_REDUCTION] = env_params.nebula_tile_vision_reduction
+    # hidden_global_states[HiddenGlobalState.NEBULA_TILE_VISION_REDUCTION] = env_params.nebula_tile_vision_reduction
     hidden_global_states[HiddenGlobalState.NEBULA_TILE_ENERGY_REDUCTION] = env_params.nebula_tile_energy_reduction
     hidden_global_states[HiddenGlobalState.UNIT_SAP_DROPOFF_FACTOR] = env_params.unit_sap_dropoff_factor
     hidden_global_states[HiddenGlobalState.UNIT_ENERGY_VOID_FACTOR] = env_params.unit_energy_void_factor
     # hidden_global_states[HiddenGlobalState.NEBULA_TILE_DRIFT_SPEED] = env_params.nebula_tile_drift_speed
-    hidden_global_states[HiddenGlobalState.ENERGY_NODE_DRIFT_SPEED] = env_params.energy_node_drift_speed
+    # hidden_global_states[HiddenGlobalState.ENERGY_NODE_DRIFT_SPEED] = env_params.energy_node_drift_speed
     hidden_global_states[HiddenGlobalState.ENERGY_NODE_DRIFT_MAGNITUDE] = env_params.energy_node_drift_magnitude
 
     return hidden_global_states

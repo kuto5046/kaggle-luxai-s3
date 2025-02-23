@@ -151,7 +151,7 @@ class DataProcessor:
                     state = extract_state(obs, target_team_id, episode_store)
                 episode_state_group.create_dataset(f"{step_idx}", data=state)
 
-                global_state = extract_global_state(obs, target_team_id, env_params)
+                global_state = extract_global_state(obs, target_team_id, env_params, episode_store)
                 episode_global_state_group.create_dataset(f"{step_idx}", data=global_state)
 
                 hidden_state = extract_hidden_state(gt_obs, target_team_id)
@@ -203,9 +203,11 @@ class DataProcessor:
             df = self.add_fold(df)
         df.write_csv(self.feature_dir / "train.csv")
 
-    def _check_energy_field(self, row) -> bool:
+    def _check_guess(self, row) -> bool:
         sub_id = row["SubmissionId"]
         episode_id = row["EpisodeId"]
+        # if episode_id != 66503529:
+        #     return False
         episode_path = self.episode_dir / f"{sub_id}/{episode_id}.json"
         with open(episode_path) as f:
             json_load = json.load(f)
@@ -213,6 +215,7 @@ class DataProcessor:
         # 無効なepisodeはスキップ(valueも学習したいのでskip)
         if not valid_episode(json_load, self.cfg.target_team_name):
             return False
+        print(f"check {sub_id=}, {episode_id=}")
 
         target_team_id = np.argmax(json_load["rewards"])  # win or tie
 
@@ -225,6 +228,7 @@ class DataProcessor:
         prev_energy_field = None
         prev_energy_node = None
         drift_speed_diff = 0
+        vision_reduction_diff = 0
         for step_idx in range(len(steps) - 1):  # 505でdoneとなるため-1
             step_info = steps[step_idx]
             obs = json.loads(step_info[target_team_id]["observation"]["obs"])
@@ -284,21 +288,30 @@ class DataProcessor:
                         print(
                             f"energy node miss {tupled_energy_nodes1=}, {tupled_energy_nodes2=}, {episode_store.energy_node_guesser._energy_node_candidates=}"
                         )
+                # nebula tile vision reductionの確認
+                mean, std = (
+                    episode_store.nebula_tile_vision_reduction_guesser.get_nebula_tile_vision_reduction_estimate()
+                )
+                # print(f"mean: {mean:.2f}, std: {std:.2f} candidate: {episode_store.nebula_tile_vision_reduction_guesser._nebula_tile_vision_reduction_candidates}, true: {params['nebula_tile_vision_reduction']}")
+                vision_reduction_diff += abs(mean - params["nebula_tile_vision_reduction"])
+
             prev_energy_field = transposed_energy
             prev_energy_node = gt_obs["energy_nodes"]
 
-        # print(f"mean drift speed est diff: {drift_speed_diff / len(steps)}, relative: {drift_speed_diff / len(steps) / params['energy_node_drift_speed']} at true value {params['energy_node_drift_speed']}")
-        # 有効数字二桁で出力
-        print(
-            f"mean drift speed est diff: {drift_speed_diff / len(steps):.2e}, relative: {drift_speed_diff / len(steps) / params['energy_node_drift_speed']:.2e} at true value {params['energy_node_drift_speed']:.2e}"
+        # vision reductionが大きい場合推定は難しいので簡易的な確認
+        assert (
+            params["nebula_tile_vision_reduction"]
+            in episode_store.nebula_tile_vision_reduction_guesser._nebula_tile_vision_reduction_candidates
         )
+        # print(f"mean vision reduction est diff: {vision_reduction_diff / len(steps)}, relative: {vision_reduction_diff / len(steps) / max(1,params['nebula_tile_vision_reduction'])} at true value {params['nebula_tile_vision_reduction']}")
+        assert drift_speed_diff / len(steps) / params["energy_node_drift_speed"] < 0.2
         return True
 
     def test(self) -> None:
         episode_paths = self.read_data()
         ok_count = 0
         for row in episode_paths.iter_rows(named=True):
-            if self._check_energy_field(row):
+            if self._check_guess(row):
                 ok_count += 1
             if ok_count == 10:
                 break
@@ -319,7 +332,8 @@ def get_match_results(json_load: dict[str, Any], target_team_id: int) -> list[bo
 def main() -> None:
     cfg = Config()
     data_processor = DataProcessor(cfg)
-    data_processor.test()
+    # data_processor.test()
+    data_processor.run()
 
 
 if __name__ == "__main__":
