@@ -23,7 +23,7 @@ LOGGER = logging.getLogger(__name__)
 @dataclass
 class Config:
     exp_name: str = Path(__file__).parent.name
-    notes: str = "aDg4b -> Frog Parade"
+    notes: str = "Frog Parade from scratch"
     seed: int = 2025
     debug: bool = False
     n_splits: int = 5
@@ -40,10 +40,10 @@ class Config:
     use_amp: bool = True
     batch_size: int = 1024
     num_workers: int = 24
-    ckpt_path: str = "exp/exp605/output/best_model.ckpt"
+    ckpt_path: str = None
     lr: float = 0.001
     weight_decay: float = 0.01
-    warmup_step_rate: float = 0.1
+    warmup_step_rate: float = 0.0  # no warmup
     # model
     res: bool = True
     aug: bool = True
