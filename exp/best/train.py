@@ -23,7 +23,7 @@ LOGGER = logging.getLogger(__name__)
 @dataclass
 class Config:
     exp_name: str = Path(__file__).parent.name
-    notes: str = "exp023で更新したbest model"
+    notes: str = "exp405で更新したbest model"
     seed: int = 2025
     debug: bool = False
     n_splits: int = 5
@@ -34,7 +34,7 @@ class Config:
     output_dir = root_dir / f"exp/{exp_name}/output"
 
     # trainer
-    epoch: int = 30
+    epoch: int = 20
     limit_train_batches: float = 1.0
     limit_val_batches: float = 1.0
     use_amp: bool = False
@@ -115,7 +115,7 @@ class TrainPipeline:
     def setup_logger(self) -> None:
         self.pl_logger = WandbLogger(
             project="kaggle-luxai-s3",
-            entity="cnumber",
+            entity="kawattataido",
             # name=f"{self.cfg.exp_name}",
             group=self.cfg.exp_name,
             mode="disabled" if self.cfg.debug else "online",
