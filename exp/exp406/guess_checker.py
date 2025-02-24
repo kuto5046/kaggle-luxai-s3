@@ -158,7 +158,7 @@ class GuessChecker:
     def _check_guess(self, row) -> bool:
         sub_id = row["SubmissionId"]
         episode_id = row["EpisodeId"]
-        # if episode_id != 67081075:
+        # if episode_id != 67233652:
         #     return False
         episode_path = self.episode_dir / f"{sub_id}/{episode_id}.json"
         with open(episode_path) as f:

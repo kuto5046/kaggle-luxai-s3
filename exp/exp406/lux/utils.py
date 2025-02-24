@@ -42,8 +42,8 @@ class GlobalState(IntEnum):
     NEBULA_TILE_VISION_REDUCTION_SIGMA = auto()  # 推定精度
     ENERGY_NODE_DRIFT_SPEED_MEAN = auto()  # 推定値
     ENERGY_NODE_DRIFT_SPEED_SIGMA = auto()  # 推定精度
-    ENERGY_VOID_FACTOR_MEAN = auto()  # 推定値
-    ENERGY_VOID_FACTOR_SIGMA = auto()  # 推定精度
+    # ENERGY_VOID_FACTOR_MEAN = auto()  # 推定値 推定可能だが未実装
+    # ENERGY_VOID_FACTOR_SIGMA = auto()  # 推定精度
     NEBULA_TILE_ENERGY_REDUCTION_MEAN = auto()  # 推定値 二次元特徴量とは別に渡しているが必要かは不明
     NEBULA_TILE_ENERGY_REDUCTION_SIGMA = auto()  # 推定精度
     UNIT_SAP_DROPOFF_FACTOR_MEAN = auto()  # 推定値
@@ -433,6 +433,7 @@ def get_action_cost(action: Action, unit_energy: int, unit_sap_cost: int, unit_m
 # sap dropoff factor/energy void factorの推定
 class EnergyAttackFactorGuesser:
     def __init__(self, target_team_id: int, unit_sap_cost: int, unit_move_cost: int) -> None:
+        # TODO: ロジックの確認が終わったら、すべての候補を覚えておいて平均を使う方が安全かもしれない
         self._sap_dropoff_factor = None
         self._unit_energy_void_factor_candidates = env_params_ranges["unit_energy_void_factor"]
         self._target_team_id = target_team_id
@@ -446,8 +447,8 @@ class EnergyAttackFactorGuesser:
     def _update_energy_drop_factor(
         self, obs: dict[str, Any], prev_obs: dict[str, Any], actions: np.ndarray, energy_node_guesser: EnergyNodeGuesser
     ) -> None:
-        # if self._sap_dropoff_factor is not None:
-        #     return
+        if self._sap_dropoff_factor is not None:
+            return
 
         unit_positions = np.array(obs["units"]["position"])  # (max_units, 2)
         prev_unit_positions = np.array(prev_obs["units"]["position"])
@@ -457,10 +458,18 @@ class EnergyAttackFactorGuesser:
         prev_energy_map = np.array(prev_obs["map_features"]["energy"]).T
 
         unit_positions_set = set()
+        prev_unit_positions_set = set()
         for unit_id in range(EnvParams.max_units):
             if unit_positions[self._target_team_id][unit_id][0] != -1:
                 unit_positions_set.add(
                     (unit_positions[self._target_team_id][unit_id][0], unit_positions[self._target_team_id][unit_id][1])
+                )
+            if prev_unit_positions[self._target_team_id][unit_id][0] != -1:
+                prev_unit_positions_set.add(
+                    (
+                        prev_unit_positions[self._target_team_id][unit_id][0],
+                        prev_unit_positions[self._target_team_id][unit_id][1],
+                    )
                 )
 
         my_sap_count = np.zeros_like(tile_type_map)
@@ -473,6 +482,9 @@ class EnergyAttackFactorGuesser:
 
             if action[0] == Action.SAP and prev_unit_energies[self._target_team_id][unit_id] >= self._unit_sap_cost:
                 sap_pos = (prev_x + action[1], prev_y + action[2])
+                # env.pyのl.333-334相当
+                if not in_map(sap_pos):
+                    continue
                 my_sap_count[sap_pos[1], sap_pos[0]] += 1
                 for dx, dy in self._adj_8_vec:
                     nx = sap_pos[0] + dx
@@ -496,15 +508,20 @@ class EnergyAttackFactorGuesser:
             # 隣接にsapしてないとわからない
             if my_adj_sap_count[y, x] == 0:
                 continue
-            # energy void の影響がない
-            # 移動 -> sap -> voidの順で適用されるので移動後の位置で判定
+            # energy void の影響がない(移動後の位置で判定)
+            # 衝突の可能性がない(移動前の位置で判定)
             adjacent = False
             for dx in [-1, 1]:
                 if (x + dx, y) in unit_positions_set:
                     adjacent = True
+                if (prev_x + dx, prev_y) in prev_unit_positions_set:
+                    adjacent = True
             for dy in [-1, 1]:
                 if (x, y + dy) in unit_positions_set:
                     adjacent = True
+                if (prev_x, prev_y + dy) in prev_unit_positions_set:
+                    adjacent = True
+
             if adjacent:
                 continue
 
@@ -544,6 +561,14 @@ class EnergyAttackFactorGuesser:
             # assert min_diff < 1e-1, f"guess {sap_dropoff_factor=} is too far"
             return
 
+    def _update_energy_void_factor(
+        self, obs: dict[str, Any], prev_obs: dict[str, Any], actions: np.ndarray, energy_node_guesser: EnergyNodeGuesser
+    ) -> None:
+        # 0ステップ目は計算できないのでskip
+        if prev_obs is None:
+            return
+        # TODO
+
     def update(
         self, obs: dict[str, Any], prev_obs: dict[str, Any], actions: np.ndarray, energy_node_guesser: EnergyNodeGuesser
     ) -> None:
@@ -552,19 +577,7 @@ class EnergyAttackFactorGuesser:
             return
 
         self._update_energy_drop_factor(obs, prev_obs, actions, energy_node_guesser)
-
-        # 前後で位置が確定している相手ユニットでsapが間接で打たれていない相手ユニットからeneryg void factorを推定
-
-        # 相手のactionわかるっけ？
-
-        # # 前ステップからの行動によってユニットのエネルギーが減少するのでそれを考慮
-        # action = actions[unit_id][0].item()
-        # if action == Action.SAP:
-        #     action_cost = self._unit_sap_cost
-        # elif action == Action.CENTER:
-        #     action_cost = 0
-        # else:
-        #     action_cost = self._unit_move_cost
+        self._update_energy_void_factor(obs, prev_obs, actions, energy_node_guesser)
 
     def get_sap_dropoff_factor_estimate(self) -> tuple[float, float]:
         if self._sap_dropoff_factor is None:
@@ -1298,17 +1311,17 @@ def extract_global_state(
         env_params_ranges["energy_node_drift_speed"]
     )
     global_states[GlobalState.NEBULA_TILE_ENERGY_REDUCTION_MEAN] = (
-        episode_store.nebula_energy_reduction
-        if episode_store.nebula_energy_reduction is not None
+        episode_store._nebula_energy_reduction
+        if episode_store._nebula_energy_reduction is not None
         else np.mean(env_params_ranges["nebula_tile_energy_reduction"])
     ) / max(env_params_ranges["nebula_tile_energy_reduction"])
     global_states[GlobalState.NEBULA_TILE_ENERGY_REDUCTION_SIGMA] = (
         0
-        if episode_store.nebula_energy_reduction is not None
+        if episode_store._nebula_energy_reduction is not None
         else np.std(env_params_ranges["nebula_tile_energy_reduction"])
     ) / max(env_params_ranges["nebula_tile_energy_reduction"])
     (unit_sap_dropoff_factor_mean, unit_sap_dropoff_factor_std) = (
-        episode_store.energy_attack_guesser.get_unit_sap_dropoff_factor_estimate()
+        episode_store.energy_attack_guesser.get_sap_dropoff_factor_estimate()
     )
     global_states[GlobalState.UNIT_SAP_DROPOFF_FACTOR_MEAN] = unit_sap_dropoff_factor_mean / max(
         env_params_ranges["unit_sap_dropoff_factor"]
