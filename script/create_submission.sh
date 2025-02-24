@@ -7,9 +7,9 @@ out_file=$sub_name.tar.gz
 cd /kaggle
 mkdir ./submissions/$sub_name
 cd $exp_dir
-rsync -av --exclude='__pycache__' --exclude='dataset-metadata.json' . ../../../submissions/$sub_name/
-cd ../../../submissions/$sub_name
-cp -r /usr/local/lib/python3.12/dist-packages/lightning .
+rsync -av --exclude='__pycache__' --exclude='dataset-metadata.json' . ../../submissions/$sub_name/
+cd ../../submissions/$sub_name
+cp -r /home/yuki.okumura/.local/lib/python3.12/site-packages/lightning .
 tar -czvf $out_file \
     --exclude='*/__pycache__'  \
     --exclude='__pycache__' \
