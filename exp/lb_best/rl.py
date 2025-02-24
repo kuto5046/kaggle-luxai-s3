@@ -183,8 +183,8 @@ class RLLibLuxEnv(MultiAgentEnv):
 
         agent0_state = extract_state(obs["player_0"], 0, self.episode_store1)
         agent1_state = extract_state(obs["player_1"], 1, self.episode_store2)
-        agent0_global_state = extract_global_state(obs["player_0"], 0, self.env_params, self.episode_store1)
-        agent1_global_state = extract_global_state(obs["player_1"], 1, self.env_params, self.episode_store2)
+        agent0_global_state = extract_global_state(obs["player_0"], 0, self.env_params)
+        agent1_global_state = extract_global_state(obs["player_1"], 1, self.env_params)
 
         self.agent0_states.append(agent0_state)
         self.agent1_states.append(agent1_state)

@@ -142,7 +142,7 @@ class ILAgent:
 
     def predict(self, obs: dict[str, Any], team_id: int, episode_store: EpisodeStore) -> tuple[np.ndarray, np.ndarray]:
         state = extract_state(obs, team_id, episode_store)
-        global_state = extract_global_state(obs, team_id, self.env_cfg)
+        global_state = extract_global_state(obs, team_id, self.env_cfg, episode_store)
         self.stack_states.append(state)
         self.stack_global_states.append(global_state)
         states = {
@@ -217,13 +217,14 @@ class Agent:
         self.env_cfg = env_cfg
         self.episode_store = EpisodeStore(self.team_id, env_cfg)
         self.prev_opp_unit_positions = []
+        self.prev_actions = None
 
     def act(self, step: int, obs, remainingOverageTime: int = 60):
         # マッチごとにリセットされる要素をリセット
         if obs["match_steps"] == 0:
             self.episode_store.reset()
         else:
-            self.episode_store.update(obs)
+            self.episode_store.update(obs, self.prev_actions)
         policy_map, point_map = imitation_model.predict(obs, self.team_id, self.episode_store)
 
         unit_mask = np.array(obs["units_mask"][self.team_id])  # shape (max_units, )
@@ -244,6 +245,7 @@ class Agent:
             )
 
         self.prev_opp_unit_positions = opp_unit_positions
+        self.prev_actions = actions
         return actions
 
     def _assign_actions_with_flow(
