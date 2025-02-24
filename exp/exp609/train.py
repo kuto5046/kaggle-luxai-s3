@@ -23,27 +23,27 @@ LOGGER = logging.getLogger(__name__)
 @dataclass
 class Config:
     exp_name: str = Path(__file__).parent.name
-    notes: str = "exp405で更新したbest model"
+    notes: str = "Frog Parade from scratch"
     seed: int = 2025
     debug: bool = False
     n_splits: int = 5
     use_fold: int = 0
-    root_dir: Path = Path("/home/user/work")
+    root_dir: Path = Path("/kaggle")
     feature_version: str = exp_name
     feature_dir: Path = root_dir / f"output/feature_store/{feature_version}"
     output_dir = root_dir / f"exp/{exp_name}/output"
 
     # trainer
-    epoch: int = 20
+    epoch: int = 30
     limit_train_batches: float = 1.0
     limit_val_batches: float = 1.0
-    use_amp: bool = False
+    use_amp: bool = True
     batch_size: int = 1024
-    num_workers: int = 20
+    num_workers: int = 24
     ckpt_path: str = None
     lr: float = 0.001
     weight_decay: float = 0.01
-    warmup_step_rate: float = 0.1
+    warmup_step_rate: float = 0.0  # no warmup
     # model
     res: bool = True
     aug: bool = True
@@ -115,7 +115,7 @@ class TrainPipeline:
     def setup_logger(self) -> None:
         self.pl_logger = WandbLogger(
             project="kaggle-luxai-s3",
-            entity="kawattataido",
+            entity="okumura",
             # name=f"{self.cfg.exp_name}",
             group=self.cfg.exp_name,
             mode="disabled" if self.cfg.debug else "online",
@@ -123,8 +123,11 @@ class TrainPipeline:
         )
 
     def setup_model(self) -> None:
-        self.model = LaxLitModel(self.cfg)
-
+        if self.cfg.ckpt_path:
+            self.model = LaxLitModel.load_from_checkpoint(self.cfg.ckpt_path, cfg=self.cfg)
+        else:
+            self.model = LaxLitModel(self.cfg)
+        
     def train(self) -> None:
         self.trainer = Trainer(
             # default_root_dir=Path.cwd(),
@@ -139,7 +142,7 @@ class TrainPipeline:
             limit_val_batches=self.cfg.limit_val_batches,
             deterministic=True,  # for reproducibility
         )
-        self.trainer.fit(self.model, datamodule=self.datamodule, ckpt_path=self.cfg.ckpt_path)
+        self.trainer.fit(self.model, datamodule=self.datamodule)
 
     def run(self) -> None:
         self.setup_logger()
