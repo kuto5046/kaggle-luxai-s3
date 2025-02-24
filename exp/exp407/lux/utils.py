@@ -504,10 +504,10 @@ class EpisodeStore:
     def nebula_energy_reduction(self) -> np.ndarray:
         """
         nebula tileによるエネルギ減少を表す
-        パラメータが未知の場合は-1で埋める
+        パラメータが未知の場合は平均で埋める
         """
         if self._nebula_energy_reduction is None:
-            return (self.tile_type_map == TileType.NEBULA) * -1
+            return (self.tile_type_map == TileType.NEBULA) * np.mean(env_params_ranges["nebula_energy_reduction"])
         else:
             target_map = (
                 (self.tile_type_map == TileType.NEBULA) * self._nebula_energy_reduction / EnvParams.init_unit_energy
@@ -852,12 +852,14 @@ class EpisodeStore:
 
         unit_positions = np.array(obs["units"]["position"][self._target_team_id])  # (max_units, 2)
         unit_energies = np.array(obs["units"]["energy"][self._target_team_id])  # (max_units, 1)
-        map_energies = np.array(obs["map_features"]["energy"]).T
+        map_energies = np.array(self.prev_obs["map_features"]["energy"]).T
         prev_unit_energies = self.prev_obs["units"]["energy"][self._target_team_id]
+        prev_tile_type_map = np.array(self.prev_obs["map_features"]["tile_type"]).T
+        # TODO: eneryg voidとかsapされることを考慮してない. ほとんど場合には相手と会う前に決まるので問題ない
         for unit_id, ((x, y), unit_energy) in enumerate(zip(unit_positions, unit_energies)):
             if x == -1 and y == -1:
                 continue
-            if self._tile_type_map[y, x] != TileType.NEBULA:
+            if prev_tile_type_map[y, x] != TileType.NEBULA:
                 continue
 
             map_energy = map_energies[y, x]
