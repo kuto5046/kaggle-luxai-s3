@@ -144,14 +144,21 @@ class GuessChecker:
         # print(f"mean: {mean:.2f}, std: {std:.2f} candidate: {episode_store.nebula_tile_vision_reduction_guesser._nebula_tile_vision_reduction_candidates}, true: {params['nebula_tile_vision_reduction']}")
         return abs(mean - params["nebula_tile_vision_reduction"])
 
-    def _check_nebula_tile_enery_reduction(self, episode_store: EpisodeStore, params: dict[str, Any]) -> None:
+    def _check_nebula_tile_enegry_reduction(self, episode_store: EpisodeStore, params: dict[str, Any]) -> None:
         if episode_store._nebula_energy_reduction is not None:
-            assert episode_store._nebula_energy_reduction == params["nebula_tile_energy_reduction"]
+            assert (
+                episode_store._nebula_energy_reduction == params["nebula_tile_energy_reduction"]
+            ), f"{episode_store._nebula_energy_reduction=}, {params['nebula_tile_energy_reduction']=}"
+
+    def _check_energy_attack(self, episode_store: EpisodeStore, params: dict[str, Any]):
+        (mean, std) = episode_store.energy_attack_guesser.get_sap_dropoff_factor_estimate()
+        if std == 0:
+            assert mean == params["unit_sap_dropoff_factor"], f"{mean=}, {params['unit_sap_dropoff_factor']=}"
 
     def _check_guess(self, row) -> bool:
         sub_id = row["SubmissionId"]
         episode_id = row["EpisodeId"]
-        # if episode_id != 66503529:
+        # if episode_id != 67081075:
         #     return False
         episode_path = self.episode_dir / f"{sub_id}/{episode_id}.json"
         with open(episode_path) as f:
@@ -174,6 +181,7 @@ class GuessChecker:
         prev_energy_node = None
         drift_speed_diff = 0
         vision_reduction_diff = 0
+        reveal_dropoff_factor = False
         for step_idx in range(len(steps) - 1):  # 505でdoneとなるため-1
             step_info = steps[step_idx]
             obs = json.loads(step_info[target_team_id]["observation"]["obs"])
@@ -197,7 +205,12 @@ class GuessChecker:
             if obs["match_steps"] != 0:
                 self._check_energy_node(episode_store, obs, prev_energy_node, transposed_energy, prev_energy_field)
                 vision_reduction_diff += self._check_nebula_tile_vision_reduction(episode_store, params)
-                self._check_nebula_tile_enery_reduction(episode_store, params)
+                self._check_nebula_tile_enegry_reduction(episode_store, params)
+                self._check_energy_attack(episode_store, params)
+                (mean, std) = episode_store.energy_attack_guesser.get_sap_dropoff_factor_estimate()
+                if std == 0 and not reveal_dropoff_factor:
+                    print(f"reveal_dropoff_factor at {step_idx=}, {mean=}, {params['unit_sap_dropoff_factor']=}")
+                    reveal_dropoff_factor = True
 
             prev_energy_field = transposed_energy
             prev_energy_node = gt_obs["energy_nodes"]
@@ -209,6 +222,11 @@ class GuessChecker:
         )
         # print(f"mean vision reduction est diff: {vision_reduction_diff / len(steps)}, relative: {vision_reduction_diff / len(steps) / max(1,params['nebula_tile_vision_reduction'])} at true value {params['nebula_tile_vision_reduction']}")
         assert drift_speed_diff / len(steps) / params["energy_node_drift_speed"] < 0.2
+        # nebulaがない場合もある. 66776844
+        assert (
+            episode_store._nebula_energy_reduction is None
+            or episode_store._nebula_energy_reduction == params["nebula_tile_energy_reduction"]
+        ), f"{episode_store._nebula_energy_reduction=}, {params['nebula_tile_energy_reduction']=}"
         return True
 
     def test(self) -> None:
@@ -217,7 +235,7 @@ class GuessChecker:
         for row in episode_paths.iter_rows(named=True):
             if self._check_guess(row):
                 ok_count += 1
-            if ok_count == 10:
+            if ok_count == 100:
                 break
 
 

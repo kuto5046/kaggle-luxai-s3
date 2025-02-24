@@ -42,6 +42,12 @@ class GlobalState(IntEnum):
     NEBULA_TILE_VISION_REDUCTION_SIGMA = auto()  # 推定精度
     ENERGY_NODE_DRIFT_SPEED_MEAN = auto()  # 推定値
     ENERGY_NODE_DRIFT_SPEED_SIGMA = auto()  # 推定精度
+    ENERGY_VOID_FACTOR_MEAN = auto()  # 推定値
+    ENERGY_VOID_FACTOR_SIGMA = auto()  # 推定精度
+    NEBULA_TILE_ENERGY_REDUCTION_MEAN = auto()  # 推定値 二次元特徴量とは別に渡しているが必要かは不明
+    NEBULA_TILE_ENERGY_REDUCTION_SIGMA = auto()  # 推定精度
+    UNIT_SAP_DROPOFF_FACTOR_MEAN = auto()  # 推定値
+    UNIT_SAP_DROPOFF_FACTOR_SIGMA = auto()  # 推定精度
 
 
 class HiddenState(IntEnum):
@@ -53,12 +59,12 @@ class HiddenState(IntEnum):
 # episodeごとに変動する環境パラメータ
 class HiddenGlobalState(IntEnum):
     # NEBULA_TILE_VISION_REDUCTION = 0
-    NEBULA_TILE_ENERGY_REDUCTION = 0
-    UNIT_SAP_DROPOFF_FACTOR = auto()
-    UNIT_ENERGY_VOID_FACTOR = auto()
+    # NEBULA_TILE_ENERGY_REDUCTION = 0
+    # UNIT_SAP_DROPOFF_FACTOR = auto()
+    # UNIT_ENERGY_VOID_FACTOR = auto()
     # NEBULA_TILE_DRIFT_SPEED = auto() . # 推定可能なので不要
     # ENERGY_NODE_DRIFT_SPEED = auto()
-    ENERGY_NODE_DRIFT_MAGNITUDE = auto()  # 多分推定できる
+    ENERGY_NODE_DRIFT_MAGNITUDE = 0  # 多分推定できるが重要度は低いと想定
 
 
 class Action(IntEnum):
@@ -409,6 +415,167 @@ class NebulaTileVisionReductionGuesser:
         return (mean, sigma)
 
 
+def get_action_cost(action: Action, unit_energy: int, unit_sap_cost: int, unit_move_cost: int) -> int:
+    if action == Action.SAP:
+        if unit_energy >= unit_sap_cost:
+            action_cost = unit_sap_cost
+        else:
+            action_cost = 0
+    elif action == Action.CENTER:
+        action_cost = 0
+    elif unit_energy >= unit_move_cost:
+        action_cost = unit_move_cost
+    else:
+        action_cost = 0
+    return action_cost
+
+
+# sap dropoff factor/energy void factorの推定
+class EnergyAttackFactorGuesser:
+    def __init__(self, target_team_id: int, unit_sap_cost: int, unit_move_cost: int) -> None:
+        self._sap_dropoff_factor = None
+        self._unit_energy_void_factor_candidates = env_params_ranges["unit_energy_void_factor"]
+        self._target_team_id = target_team_id
+        self._unit_sap_cost = unit_sap_cost
+        self._unit_move_cost = unit_move_cost
+        # fmt off
+        self._adj_8_vec = [[-1, -1], [0, -1], [1, -1], [-1, 0], [1, 0], [-1, 1], [0, 1], [1, 1]]
+
+    # fmt on
+
+    def _update_energy_drop_factor(
+        self, obs: dict[str, Any], prev_obs: dict[str, Any], actions: np.ndarray, energy_node_guesser: EnergyNodeGuesser
+    ) -> None:
+        # if self._sap_dropoff_factor is not None:
+        #     return
+
+        unit_positions = np.array(obs["units"]["position"])  # (max_units, 2)
+        prev_unit_positions = np.array(prev_obs["units"]["position"])
+        unit_energies = np.array(obs["units"]["energy"])  # (max_units, 1)
+        prev_unit_energies = prev_obs["units"]["energy"]
+        tile_type_map = np.array(prev_obs["map_features"]["tile_type"]).T
+        prev_energy_map = np.array(prev_obs["map_features"]["energy"]).T
+
+        unit_positions_set = set()
+        for unit_id in range(EnvParams.max_units):
+            if unit_positions[self._target_team_id][unit_id][0] != -1:
+                unit_positions_set.add(
+                    (unit_positions[self._target_team_id][unit_id][0], unit_positions[self._target_team_id][unit_id][1])
+                )
+
+        my_sap_count = np.zeros_like(tile_type_map)
+        my_adj_sap_count = np.zeros_like(tile_type_map)
+        for unit_id, action in enumerate(actions):
+            (prev_x, prev_y) = prev_unit_positions[self._target_team_id][unit_id]
+            # 有効なshipである (今のターンはいなくてもよい)
+            if prev_x == -1 or prev_y == -1:
+                continue
+
+            if action[0] == Action.SAP and prev_unit_energies[self._target_team_id][unit_id] >= self._unit_sap_cost:
+                sap_pos = (prev_x + action[1], prev_y + action[2])
+                my_sap_count[sap_pos[1], sap_pos[0]] += 1
+                for dx, dy in self._adj_8_vec:
+                    nx = sap_pos[0] + dx
+                    ny = sap_pos[1] + dy
+                    if in_map((nx, ny)):
+                        my_adj_sap_count[ny, nx] += 1
+
+        # energy void の影響がなく、前後で位置が確定している相手ユニットからsap drop off factorを推定
+        for unit_id in range(EnvParams.max_units):
+            # 位置が確定している
+            (x, y) = unit_positions[1 - self._target_team_id][unit_id]
+            (prev_x, prev_y) = prev_unit_positions[1 - self._target_team_id][unit_id]
+            if x == -1 or y == -1 or prev_x == -1 or prev_y == -1:
+                continue
+            # respawnしてない
+            if (x == 0 and y == 0) or (x == EnvParams.map_width - 1 and y == EnvParams.map_height - 1):
+                continue
+            # 移動してないと行動コストがわからないので無視
+            if (x, y) == (prev_x, prev_y):
+                continue
+            # 隣接にsapしてないとわからない
+            if my_adj_sap_count[y, x] == 0:
+                continue
+            # energy void の影響がない
+            # 移動 -> sap -> voidの順で適用されるので移動後の位置で判定
+            adjacent = False
+            for dx in [-1, 1]:
+                if (x + dx, y) in unit_positions_set:
+                    adjacent = True
+            for dy in [-1, 1]:
+                if (x, y + dy) in unit_positions_set:
+                    adjacent = True
+            if adjacent:
+                continue
+
+            # nebula energy reductionの影響があるところは一旦無視
+            # TODO: あった方が正確かもしれない (energy reductionの精度次第)
+            if tile_type_map[y, x] == TileType.NEBULA:
+                continue
+
+            if energy_node_guesser._energy_map[y, x][0] is False:
+                assert prev_energy_map[y, x] == -1
+                continue
+
+            # 今のエネルギー - 前のエネルギー = energy_map (-nebula reduction) - sap(中央)*回数 - sap(8隣接)*回数 - 行動のコスト
+            # sap(8隣接)*回数 = energ_map (- nebula reduction) - sap(中央)*回数 - 行動のコスト + 前のエネルギー - 今のエネルギー
+            prev_energy_field = energy_node_guesser._energy_map[y, x][1]
+            sap_adj_sum = (
+                -my_sap_count[y, x] * self._unit_sap_cost
+                - self._unit_move_cost
+                + prev_unit_energies[1 - self._target_team_id][unit_id]
+                - unit_energies[1 - self._target_team_id][unit_id]
+            )
+
+            # 0未満のものはfieldからenergyを得られない
+            if unit_energies[1 - self._target_team_id][unit_id] >= 0:
+                sap_adj_sum += prev_energy_field
+
+            # print(f"{sap_adj_sum=} {obs['steps']=} {x=}, {y=}, {prev_energy_field=}, {my_sap_count[y, x]=}, {self._unit_sap_cost=}, {self._unit_move_cost=}, {prev_unit_energies[1 - self._target_team_id][unit_id]=}, {unit_energies[1 - self._target_team_id][unit_id]=} {my_adj_sap_count[y, x]=}")
+            sap_dropoff_factor = sap_adj_sum / (self._unit_sap_cost * my_adj_sap_count[y, x])
+
+            # candidateから一番近いものを選ぶ
+            min_diff = 1e9
+            for candidate in env_params_ranges["unit_sap_dropoff_factor"]:
+                diff = abs(candidate - sap_dropoff_factor)
+                if diff < min_diff:
+                    min_diff = diff
+                    self._sap_dropoff_factor = candidate
+            # assert min_diff < 1e-1, f"guess {sap_dropoff_factor=} is too far"
+            return
+
+    def update(
+        self, obs: dict[str, Any], prev_obs: dict[str, Any], actions: np.ndarray, energy_node_guesser: EnergyNodeGuesser
+    ) -> None:
+        # 0ステップ目は計算できないのでskip
+        if prev_obs is None:
+            return
+
+        self._update_energy_drop_factor(obs, prev_obs, actions, energy_node_guesser)
+
+        # 前後で位置が確定している相手ユニットでsapが間接で打たれていない相手ユニットからeneryg void factorを推定
+
+        # 相手のactionわかるっけ？
+
+        # # 前ステップからの行動によってユニットのエネルギーが減少するのでそれを考慮
+        # action = actions[unit_id][0].item()
+        # if action == Action.SAP:
+        #     action_cost = self._unit_sap_cost
+        # elif action == Action.CENTER:
+        #     action_cost = 0
+        # else:
+        #     action_cost = self._unit_move_cost
+
+    def get_sap_dropoff_factor_estimate(self) -> tuple[float, float]:
+        if self._sap_dropoff_factor is None:
+            return (
+                np.mean(env_params_ranges["unit_sap_dropoff_factor"]),
+                np.std(env_params_ranges["unit_sap_dropoff_factor"]),
+            )
+        else:
+            return (self._sap_dropoff_factor, 0)
+
+
 class EpisodeStore:
     def __init__(
         self,
@@ -451,6 +618,7 @@ class EpisodeStore:
         self.nebula_tile_vision_reduction_guesser = NebulaTileVisionReductionGuesser(
             target_team_id, env_cfg["unit_sensor_range"]
         )
+        self.energy_attack_guesser = EnergyAttackFactorGuesser(target_team_id, self.unit_sap_cost, self.unit_move_cost)
         self.max_sensor_range = env_params_ranges["unit_sensor_range"][-1]
         self.unit_sensor_range = env_cfg["unit_sensor_range"]
         self.reset()
@@ -528,6 +696,7 @@ class EpisodeStore:
         self._update_point_map(obs)
         self.energy_node_guesser.update_energy(obs)
         self.nebula_tile_vision_reduction_guesser._update_nebula_tile_vision_reduction(obs)
+        self.energy_attack_guesser.update(obs, self.prev_obs, actions, self.energy_node_guesser)
         self.prev_obs = obs
 
     def _is_finished_relic_search(self) -> bool:
@@ -851,15 +1020,27 @@ class EpisodeStore:
             return
 
         unit_positions = np.array(obs["units"]["position"][self._target_team_id])  # (max_units, 2)
+        prev_unit_positions = np.array(self.prev_obs["units"]["position"][self._target_team_id])  # (max_units, 2)
         unit_energies = np.array(obs["units"]["energy"][self._target_team_id])  # (max_units, 1)
-        map_energies = np.array(self.prev_obs["map_features"]["energy"]).T
+        map_energies = np.array(obs["map_features"]["energy"]).T
         prev_unit_energies = self.prev_obs["units"]["energy"][self._target_team_id]
         prev_tile_type_map = np.array(self.prev_obs["map_features"]["tile_type"]).T
-        # TODO: eneryg voidとかsapされることを考慮してない. ほとんど場合には相手と会う前に決まるので問題ない
-        for unit_id, ((x, y), unit_energy) in enumerate(zip(unit_positions, unit_energies)):
+        # TODO: energy voidとかsapされることを考慮してない. ほとんど場合には相手と会う前に決まるので問題ない
+        for unit_id, ((x, y), (prev_x, prev_y), unit_energy) in enumerate(
+            zip(unit_positions, prev_unit_positions, unit_energies)
+        ):
             if x == -1 and y == -1:
                 continue
+            # このターンspawnしたunitにもactionを送れるが無効なので取り除く
+            if prev_x == -1 and prev_y == -1:
+                continue
+            if abs(x - prev_x) + abs(y - prev_y) > 1:
+                continue
             if prev_tile_type_map[y, x] != TileType.NEBULA:
+                continue
+            # sap等の相手からの干渉なしでは0未満にならないようになっている. 負の場合は相手から干渉されている.
+            # どちらのケースもnebula_energy_reductionを計算することができないのでスキップ
+            if unit_energy <= 0:
                 continue
 
             map_energy = map_energies[y, x]
@@ -867,16 +1048,12 @@ class EpisodeStore:
 
             # 前ステップからの行動によってユニットのエネルギーが減少するのでそれを考慮
             action = actions[unit_id][0].item()
-            if action == Action.SAP:
-                action_cost = self.unit_sap_cost
-            elif action == Action.CENTER:
-                action_cost = 0
-            else:
-                action_cost = self.unit_move_cost
+            action_cost = get_action_cost(action, unit_energy, self.unit_sap_cost, self.unit_move_cost)
 
             # 現在のエネルギ = 前stepのエネルギ - 移動コスト + マップのエネルギ - nebulaによるエネルギ減少
             # unit_energy = prev_unit_energy - action_cost + map_energy - nebula_energy_reduction
             nebula_energy_reduction = (prev_unit_energy - action_cost + map_energy) - unit_energy
+            # print(f"{obs['steps']=} {nebula_energy_reduction=} {prev_unit_energy=} {unit_energy=} {action_cost=} {map_energy=} {unit_id=}")
             if nebula_energy_reduction in env_params_ranges["nebula_tile_energy_reduction"]:
                 self._nebula_energy_reduction = nebula_energy_reduction
                 return
@@ -1120,15 +1297,34 @@ def extract_global_state(
     global_states[GlobalState.ENERGY_NODE_DRIFT_SPEED_SIGMA] = energy_drift_speed_std / max(
         env_params_ranges["energy_node_drift_speed"]
     )
+    global_states[GlobalState.NEBULA_TILE_ENERGY_REDUCTION_MEAN] = (
+        episode_store.nebula_energy_reduction
+        if episode_store.nebula_energy_reduction is not None
+        else np.mean(env_params_ranges["nebula_tile_energy_reduction"])
+    ) / max(env_params_ranges["nebula_tile_energy_reduction"])
+    global_states[GlobalState.NEBULA_TILE_ENERGY_REDUCTION_SIGMA] = (
+        0
+        if episode_store.nebula_energy_reduction is not None
+        else np.std(env_params_ranges["nebula_tile_energy_reduction"])
+    ) / max(env_params_ranges["nebula_tile_energy_reduction"])
+    (unit_sap_dropoff_factor_mean, unit_sap_dropoff_factor_std) = (
+        episode_store.energy_attack_guesser.get_unit_sap_dropoff_factor_estimate()
+    )
+    global_states[GlobalState.UNIT_SAP_DROPOFF_FACTOR_MEAN] = unit_sap_dropoff_factor_mean / max(
+        env_params_ranges["unit_sap_dropoff_factor"]
+    )
+    global_states[GlobalState.UNIT_SAP_DROPOFF_FACTOR_SIGMA] = unit_sap_dropoff_factor_std / max(
+        env_params_ranges["unit_sap_dropoff_factor"]
+    )
     return global_states
 
 
 def extract_hidden_global_state(env_params: dict[str, Any]) -> np.ndarray:
     hidden_global_states = np.zeros((len(HiddenGlobalState),), dtype=np.float32)
     # hidden_global_states[HiddenGlobalState.NEBULA_TILE_VISION_REDUCTION] = env_params.nebula_tile_vision_reduction
-    hidden_global_states[HiddenGlobalState.NEBULA_TILE_ENERGY_REDUCTION] = env_params.nebula_tile_energy_reduction
-    hidden_global_states[HiddenGlobalState.UNIT_SAP_DROPOFF_FACTOR] = env_params.unit_sap_dropoff_factor
-    hidden_global_states[HiddenGlobalState.UNIT_ENERGY_VOID_FACTOR] = env_params.unit_energy_void_factor
+    # hidden_global_states[HiddenGlobalState.NEBULA_TILE_ENERGY_REDUCTION] = env_params.nebula_tile_energy_reduction
+    # hidden_global_states[HiddenGlobalState.UNIT_SAP_DROPOFF_FACTOR] = env_params.unit_sap_dropoff_factor
+    # hidden_global_states[HiddenGlobalState.UNIT_ENERGY_VOID_FACTOR] = env_params.unit_energy_void_factor
     # hidden_global_states[HiddenGlobalState.NEBULA_TILE_DRIFT_SPEED] = env_params.nebula_tile_drift_speed
     # hidden_global_states[HiddenGlobalState.ENERGY_NODE_DRIFT_SPEED] = env_params.energy_node_drift_speed
     hidden_global_states[HiddenGlobalState.ENERGY_NODE_DRIFT_MAGNITUDE] = env_params.energy_node_drift_magnitude
