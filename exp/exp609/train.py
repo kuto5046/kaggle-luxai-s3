@@ -23,7 +23,7 @@ LOGGER = logging.getLogger(__name__)
 @dataclass
 class Config:
     exp_name: str = Path(__file__).parent.name
-    notes: str = "Frog Parade from scratch"
+    notes: str = "Frog Parade"
     seed: int = 2025
     debug: bool = False
     n_splits: int = 5
