@@ -26,6 +26,10 @@ class State(IntEnum):
     # OPP_UNIT_MASK = auto()
     VISIT_COUNT = auto()
     SAP_AVAILABLE_AREA = auto()  # sapを使用できるエリア
+    POINTS_WITH_OWN_UNIT = auto()  # POINTS[OWN_UNIT_COUNT > low_prob]
+    POINTS_WITHOUT_OWN_UNIT = auto()  # POINTS[OWN_UNIT_COUNT <= low_prob]
+    POINTS_WITH_OPP_UNIT = auto()  # POINTS[OPP_UNIT_COUNT > low_prob]
+    POINTS_WITHOUT_OPP_UNIT = auto()  # POINTS[OPP_UNIT_COUNT <= low_prob]
 
 
 class GlobalState(IntEnum):
@@ -410,6 +414,9 @@ class NebulaTileVisionReductionGuesser:
 
 
 class EpisodeStore:
+    # params
+    _init_low_prob = 0.1
+
     def __init__(
         self,
         target_team_id: int,
@@ -417,7 +424,7 @@ class EpisodeStore:
         validation: bool = False,
         episode_id: int | None = None,
     ) -> None:
-        self._init_low_prob = 0.1  # マップ全体に設定されるpoint発生確率
+        # self._init_low_prob = 0.1 # マップ全体に設定されるpoint発生確率
         self._init_high_prob = 0.5  # 可能性があるところに設定されるpoint発生確率
         self._relic_map = np.zeros((EnvParams.map_height, EnvParams.map_width), dtype=np.float32)
         self._point_map = np.ones((EnvParams.map_height, EnvParams.map_width), dtype=np.float32) * self._init_low_prob
@@ -1000,6 +1007,11 @@ def extract_gt_state(obs: dict[str, Any], target_team_id: int) -> np.ndarray:
                 state_map[State.OPP_UNIT_COUNT, y, x] += 1
                 state_map[State.OPP_UNIT_ENERGY, y, x] += unit_energy / EnvParams.init_unit_energy
 
+    state_map[State.POINTS_WITH_OWN_UNIT] = state_map[State.POINTS] * (state_map[State.OWN_UNIT_COUNT] > 0)
+    state_map[State.POINTS_WITHOUT_OWN_UNIT] = state_map[State.POINTS] * (state_map[State.OWN_UNIT_COUNT] == 0)
+    state_map[State.POINTS_WITH_OPP_UNIT] = state_map[State.POINTS] * (state_map[State.OPP_UNIT_COUNT] > 0)
+    state_map[State.POINTS_WITHOUT_OPP_UNIT] = state_map[State.POINTS] * (state_map[State.OPP_UNIT_COUNT] == 0)
+
     return state_map
 
 
@@ -1067,6 +1079,20 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
                 state_map[State.OPP_UNIT_COUNT, y, x] += 1 / EnvParams.max_units
                 state_map[State.OPP_UNIT_ENERGY, y, x] += unit_energy / EnvParams.init_unit_energy
                 # state_map[State.OPP_UNIT_MASK, y, x] = unit_mask
+
+    state_map[State.POINTS_WITH_OWN_UNIT] = (state_map[State.POINTS] > EpisodeStore._init_low_prob) * (
+        state_map[State.OWN_UNIT_COUNT] > 0
+    )
+    state_map[State.POINTS_WITHOUT_OWN_UNIT] = (state_map[State.POINTS] > EpisodeStore._init_low_prob) * (
+        state_map[State.OWN_UNIT_COUNT] == 0
+    )
+    state_map[State.POINTS_WITH_OPP_UNIT] = (state_map[State.POINTS] > EpisodeStore._init_low_prob) * (
+        state_map[State.OPP_UNIT_COUNT] > 0
+    )
+    state_map[State.POINTS_WITHOUT_OPP_UNIT] = (state_map[State.POINTS] > EpisodeStore._init_low_prob) * (
+        state_map[State.OPP_UNIT_COUNT] == 0
+    )
+
     return state_map
 
 
