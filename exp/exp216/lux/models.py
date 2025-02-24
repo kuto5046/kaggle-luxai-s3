@@ -2,6 +2,7 @@ import random
 from typing import Any
 from pathlib import Path
 from dataclasses import dataclass
+from collections.abc import Callable
 
 import h5py
 import numpy as np
@@ -47,6 +48,7 @@ class LuxAugmentBase:
         # down(3) -> right(2)
         action = np.where(action == -1, 2 + offset, action)
         return action
+
 
 # 自陣を(0,0)にする
 class LuxAugmentStandardize(LuxAugmentBase):
@@ -506,6 +508,201 @@ class OutConv(nn.Module):
         return self.conv(x)
 
 
+# https://github.com/IsaiahPressman/Kaggle_Lux_AI_2021/blob/main/lux_ai/nns/conv_blocks.py
+class SELayer(nn.Module):
+    def __init__(self, n_channels: int, reduction: int = 16):
+        super().__init__()
+        self.fc = nn.Sequential(
+            nn.Linear(n_channels, n_channels // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(n_channels // reduction, n_channels, bias=False),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        b, c, _, _ = x.shape
+        # Average feature planes
+        y = torch.flatten(x, start_dim=-2, end_dim=-1).mean(dim=-1)
+        y = self.fc(y.view(b, c)).view(b, c, 1, 1)
+        return x * y.expand_as(x)
+
+
+class ResidualBlock(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        height: int,
+        width: int,
+        kernel_size: int = 3,
+        normalize: bool = False,
+        activation: Callable = nn.ReLU,
+        squeeze_excitation: bool = True,
+        **conv2d_kwargs,
+    ):
+        super().__init__()
+
+        # Calculate "same" padding
+        # https://pytorch.org/docs/stable/generated/torch.nn.Conv2d.html
+        # https://www.wolframalpha.com/input/?i=i%3D%28i%2B2x-k-%28k-1%29%28d-1%29%2Fs%29+%2B+1&assumption=%22i%22+-%3E+%22Variable%22
+        assert "padding" not in conv2d_kwargs.keys()
+        k = kernel_size
+        d = conv2d_kwargs.get("dilation", 1)
+        s = conv2d_kwargs.get("stride", 1)
+        padding = (k - 1) * (d + s - 1) / (2 * s)
+        assert padding == int(padding), f"padding should be an integer, was {padding:.2f}"
+        padding = int(padding)
+
+        self.conv1 = nn.Conv2d(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=(kernel_size, kernel_size),
+            padding=(padding, padding),
+            **conv2d_kwargs,
+        )
+        # We use LayerNorm here since the size of the input "images" may vary based on the board size
+        self.norm1 = nn.LayerNorm([in_channels, height, width]) if normalize else nn.Identity()
+        self.act1 = activation()
+
+        self.conv2 = nn.Conv2d(
+            in_channels=out_channels,
+            out_channels=out_channels,
+            kernel_size=(kernel_size, kernel_size),
+            padding=(padding, padding),
+            **conv2d_kwargs,
+        )
+        self.norm2 = nn.LayerNorm([in_channels, height, width]) if normalize else nn.Identity()
+        self.final_act = activation()
+
+        if in_channels != out_channels:
+            self.change_n_channels = nn.Conv2d(in_channels, out_channels, (1, 1))
+        else:
+            self.change_n_channels = nn.Identity()
+
+        if squeeze_excitation:
+            self.squeeze_excitation = SELayer(out_channels)
+        else:
+            self.squeeze_excitation = nn.Identity()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        identity = x
+        x = self.conv1(x)
+        x = self.act1(self.norm1(x))
+        x = self.conv2(x)
+        x = self.squeeze_excitation(self.norm2(x))
+        x = x + self.change_n_channels(identity)
+        return self.final_act(x)
+
+
+class ParallelDilationResidualBlock(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        height: int,
+        width: int,
+        kernel_size: int = 3,
+        normalize: bool = False,
+        activation: Callable = nn.ReLU,
+        squeeze_excitation: bool = True,
+        **conv2d_kwargs,
+    ):
+        super().__init__()
+
+        # Calculate "same" padding
+        # https://pytorch.org/docs/stable/generated/torch.nn.Conv2d.html
+        # https://www.wolframalpha.com/input/?i=i%3D%28i%2B2x-k-%28k-1%29%28d-1%29%2Fs%29+%2B+1&assumption=%22i%22+-%3E+%22Variable%22
+        assert "padding" not in conv2d_kwargs.keys()
+        assert "dilation" not in conv2d_kwargs.keys()
+        k = kernel_size
+        d_main = 1
+        s = conv2d_kwargs.get("stride", 1)
+        padding_main = (k - 1) * (d_main + s - 1) / (2 * s)
+        assert padding_main == int(padding_main), f"padding should be an integer, was {padding_main:.2f}"
+        padding_main = int(padding_main)
+
+        d_dilation = 2
+        padding_dilation = (k - 1) * (d_dilation + s - 1) / (2 * s)
+        assert padding_dilation == int(padding_dilation), f"padding should be an integer, was {padding_dilation:.2f}"
+        padding_dilation = int(padding_dilation)
+
+        # Main branch
+        self.conv1_main = nn.Conv2d(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=(kernel_size, kernel_size),
+            padding=(padding_main, padding_main),
+            dilation=(d_main, d_main),
+            **conv2d_kwargs,
+        )
+        # We use LayerNorm here since the size of the input "images" may vary based on the board size
+        self.norm1_main = nn.LayerNorm([in_channels, height, width]) if normalize else nn.Identity()
+        self.act1_main = activation()
+
+        self.conv2_main = nn.Conv2d(
+            in_channels=out_channels,
+            out_channels=out_channels,
+            kernel_size=(kernel_size, kernel_size),
+            padding=(padding_main, padding_main),
+            dilation=(d_main, d_main),
+            **conv2d_kwargs,
+        )
+        self.norm2_main = nn.LayerNorm([in_channels, height, width]) if normalize else nn.Identity()
+        if squeeze_excitation:
+            self.squeeze_excitation_main = SELayer(out_channels)
+        else:
+            self.squeeze_excitation_main = nn.Identity()
+
+        # Dilated branch
+        self.conv1_dilation = nn.Conv2d(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=(kernel_size, kernel_size),
+            padding=(padding_dilation, padding_dilation),
+            dilation=(d_dilation, d_dilation),
+            **conv2d_kwargs,
+        )
+        # We use LayerNorm here since the size of the input "images" may vary based on the board size
+        self.norm1_dilation = nn.LayerNorm([in_channels, height, width]) if normalize else nn.Identity()
+        self.act1_dilation = activation()
+
+        self.conv2_dilation = nn.Conv2d(
+            in_channels=out_channels,
+            out_channels=out_channels,
+            kernel_size=(kernel_size, kernel_size),
+            padding=(padding_dilation, padding_dilation),
+            dilation=(d_dilation, d_dilation),
+            **conv2d_kwargs,
+        )
+        self.norm2_dilation = nn.LayerNorm([in_channels, height, width]) if normalize else nn.Identity()
+        if squeeze_excitation:
+            self.squeeze_excitation_dilation = SELayer(out_channels)
+        else:
+            self.squeeze_excitation_dilation = nn.Identity()
+
+        self.final_act = activation()
+        if in_channels != out_channels:
+            self.change_n_channels = nn.Conv2d(in_channels, out_channels, (1, 1))
+        else:
+            self.change_n_channels = nn.Identity()
+
+    def forward(self, x_orig: torch.Tensor) -> torch.Tensor:
+        # Main branch
+        x_main = self.conv1_main(x_orig)
+        x_main = self.act1_main(self.norm1_main(x_main))
+        x_main = self.conv2_main(x_main)
+        x_main = self.squeeze_excitation_main(self.norm2_main(x_main))
+
+        # Dilated branch
+        x_dilation = self.conv1_dilation(x_orig)
+        x_dilation = self.act1_dilation(self.norm1_dilation(x_dilation))
+        x_dilation = self.conv2_dilation(x_dilation)
+        x_dilation = self.squeeze_excitation_dilation(self.norm2_dilation(x_dilation))
+
+        x = x_main + x_dilation + self.change_n_channels(x_orig)
+        return self.final_act(x)
+
+
 class LuxUNetModel(nn.Module):
     def __init__(
         self,
@@ -518,74 +715,123 @@ class LuxUNetModel(nn.Module):
         res: bool = False,
     ) -> None:
         super().__init__()
-        self.bilinear = bilinear
 
-        self.inc = DoubleConv(state_space_size, 64, res=res)
-        self.down1 = Down(64, 128, res=res)
-        self.down2 = Down(128, 256, res=res)
-        self.down3 = Down(256, 256, res=res)
+        self.hidden_dim = 128
 
-        #
-        factor = 2 if bilinear else 1
-        self.up1 = Up(256 * 2 + global_state_space_size, 256 // factor, bilinear)
-        self.up2 = Up(256, 128 // factor, bilinear)
-        self.up3 = Up(128, 64, bilinear)
-        self.policy_net = OutConv(64 * n_stack, action_space_size)
-        # self.sap_net = OutConv(64 * n_stack, 1)
-        self.state_net = OutConv(64 * n_stack, hidden_state_space_size)
+        self.base_model = nn.Sequential(
+            DoubleConv((state_space_size + global_state_space_size) * n_stack, self.hidden_dim, res=res),
+            *[
+                # ParallelDilationResidualBlock(
+                ResidualBlock(
+                    in_channels=self.hidden_dim,
+                    out_channels=self.hidden_dim,
+                    height=EnvParams.map_height,
+                    width=EnvParams.map_width,
+                    kernel_size=5,
+                    normalize=True,
+                    activation=nn.LeakyReLU,
+                )
+                for _ in range(16)
+            ],
+        )
+
+        self.policy_net = OutConv(self.hidden_dim, action_space_size)
+        self.state_net = OutConv(self.hidden_dim, hidden_state_space_size)
         self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
-        # self.value_net = nn.Sequential(
-        #     nn.Linear((256 + global_state_space_size) * n_stack, 128),
-        #     nn.ReLU(),
-        #     nn.Linear(128, 64),
-        #     nn.ReLU(),
-        #     nn.Linear(64, 1),
-        # )
         self.global_state_net = nn.Sequential(
-            nn.Linear((256 + global_state_space_size) * n_stack, 128),
+            nn.Linear(128, 128),
             nn.ReLU(),
             nn.Linear(128, 64),
             nn.ReLU(),
             nn.Linear(64, len(HiddenGlobalState)),
         )
 
+        # self.bilinear = bilinear
+
+        # self.inc = DoubleConv(state_space_size, 64, res=res)
+        # self.down1 = Down(64, 128, res=res)
+        # self.down2 = Down(128, 256, res=res)
+        # self.down3 = Down(256, 256, res=res)
+
+        # #
+        # factor = 2 if bilinear else 1
+        # self.up1 = Up(256 * 2 + global_state_space_size, 256 // factor, bilinear)
+        # self.up2 = Up(256, 128 // factor, bilinear)
+        # self.up3 = Up(128, 64, bilinear)
+        # self.policy_net = OutConv(64 * n_stack, action_space_size)
+        # # self.sap_net = OutConv(64 * n_stack, 1)
+        # self.state_net = OutConv(64 * n_stack, hidden_state_space_size)
+        # self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
+        # # self.value_net = nn.Sequential(
+        # #     nn.Linear((256 + global_state_space_size) * n_stack, 128),
+        # #     nn.ReLU(),
+        # #     nn.Linear(128, 64),
+        # #     nn.ReLU(),
+        # #     nn.Linear(64, 1),
+        # # )
+        # self.global_state_net = nn.Sequential(
+        #     nn.Linear((256 + global_state_space_size) * n_stack, 128),
+        #     nn.ReLU(),
+        #     nn.Linear(128, 64),
+        #     nn.ReLU(),
+        #     nn.Linear(64, len(HiddenGlobalState)),
+        # )
+
     def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         state = batch["state"]
         global_state = batch["global_state"]
         _n, _t, _c, _x, _y = state.shape
-        x = state.view(-1, _c, _x, _y)
-        x1 = self.inc(x)
-        x2 = self.down1(x1)
-        x3 = self.down2(x2)
-        x4 = self.down3(x3)
+        x = state.view(_n, _t * _c, _x, _y)
+        _ng, _tg, _cg = global_state.shape
+        gx = global_state.view(_n, _tg * _cg, 1, 1)
+        gx = gx.repeat(1, 1, _x, _y)
+        x = torch.cat([x, gx], dim=1)
 
-        # sx, syのマップにグローバルステートをブロードキャスト
-        sx, sy = x4.shape[2:]
-        _n, _t, _c = global_state.shape
-        gx = global_state.view(-1, _c, 1, 1)
-        gx = gx.repeat(1, 1, sx, sy)
+        x = self.base_model(x)
+        x_global = self.global_avg_pool(x).view(_n, -1)
+        global_state_logits = self.global_state_net(x_global)
 
-        x4 = torch.cat([x4, gx], dim=1)
-        x = self.global_avg_pool(x4).view(_n, -1)
-        # value_logits = self.value_net(x)
-        global_state_logits = self.global_state_net(x)
-
-        x = self.up1(x4, x3)
-        x = self.up2(x, x2)
-        x = self.up3(x, x1)
-
-        x = x.view(_n, -1, _x, _y)
         policy_logits = self.policy_net(x)
-        # sap_logits = self.sap_net(x)
         state_logits = self.state_net(x)
 
         return {
             "policy": policy_logits,
-            # "sap": sap_logits,
             "state": state_logits,
             "global_state": global_state_logits,
-            # "value": value_logits,
         }
+
+        # x1 = self.inc(x)
+        # x2 = self.down1(x1)
+        # x3 = self.down2(x2)
+        # x4 = self.down3(x3)
+
+        # # sx, syのマップにグローバルステートをブロードキャスト
+        # sx, sy = x4.shape[2:]
+        # _n, _t, _c = global_state.shape
+        # gx = global_state.view(-1, _c, 1, 1)
+        # gx = gx.repeat(1, 1, sx, sy)
+
+        # x4 = torch.cat([x4, gx], dim=1)
+        # x = self.global_avg_pool(x4).view(_n, -1)
+        # # value_logits = self.value_net(x)
+        # global_state_logits = self.global_state_net(x)
+
+        # x = self.up1(x4, x3)
+        # x = self.up2(x, x2)
+        # x = self.up3(x, x1)
+
+        # x = x.view(_n, -1, _x, _y)
+        # policy_logits = self.policy_net(x)
+        # # sap_logits = self.sap_net(x)
+        # state_logits = self.state_net(x)
+
+        # return {
+        #     "policy": policy_logits,
+        #     # "sap": sap_logits,
+        #     "state": state_logits,
+        #     "global_state": global_state_logits,
+        #     # "value": value_logits,
+        # }
 
 
 def save_model(model, output_dir: Path, latest: bool = False):

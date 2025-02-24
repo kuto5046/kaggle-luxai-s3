@@ -37,8 +37,8 @@ class Config:
     epoch: int = 20
     limit_train_batches: float = 1.0
     limit_val_batches: float = 1.0
-    use_amp: bool = False
-    batch_size: int = 1024
+    use_amp: bool = True
+    batch_size: int = 512
     num_workers: int = 20
     ckpt_path: str = None
     lr: float = 0.001
@@ -115,7 +115,7 @@ class TrainPipeline:
     def setup_logger(self) -> None:
         self.pl_logger = WandbLogger(
             project="kaggle-luxai-s3",
-            entity="kawattataido",
+            entity="cnumber",
             # name=f"{self.cfg.exp_name}",
             group=self.cfg.exp_name,
             mode="disabled" if self.cfg.debug else "online",
