@@ -26,6 +26,10 @@ class State(IntEnum):
     # OPP_UNIT_MASK = auto()
     VISIT_COUNT = auto()
     SAP_AVAILABLE_AREA = auto()  # sapを使用できるエリア
+    POINTS_WITH_OWN_UNIT = auto()  # POINTS[OWN_UNIT_COUNT > 0]
+    POINTS_WITHOUT_OWN_UNIT = auto()  # POINTS[OWN_UNIT_COUNT == 0]
+    POINTS_WITH_OPP_UNIT = auto()  # POINTS[OPP_UNIT_COUNT > 0]
+    POINTS_WITHOUT_OPP_UNIT = auto()  # POINTS[OPP_UNIT_COUNT == 0]
 
 
 class GlobalState(IntEnum):
@@ -1000,6 +1004,11 @@ def extract_gt_state(obs: dict[str, Any], target_team_id: int) -> np.ndarray:
                 state_map[State.OPP_UNIT_COUNT, y, x] += 1
                 state_map[State.OPP_UNIT_ENERGY, y, x] += unit_energy / EnvParams.init_unit_energy
 
+    state_map[State.POINTS_WITH_OWN_UNIT] = state_map[State.POINTS] * (state_map[State.OWN_UNIT_COUNT] > 0)
+    state_map[State.POINTS_WITHOUT_OWN_UNIT] = state_map[State.POINTS] * (state_map[State.OWN_UNIT_COUNT] == 0)
+    state_map[State.POINTS_WITH_OPP_UNIT] = state_map[State.POINTS] * (state_map[State.OPP_UNIT_COUNT] > 0)
+    state_map[State.POINTS_WITHOUT_OPP_UNIT] = state_map[State.POINTS] * (state_map[State.OPP_UNIT_COUNT] == 0)
+
     return state_map
 
 
@@ -1067,6 +1076,12 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
                 state_map[State.OPP_UNIT_COUNT, y, x] += 1 / EnvParams.max_units
                 state_map[State.OPP_UNIT_ENERGY, y, x] += unit_energy / EnvParams.init_unit_energy
                 # state_map[State.OPP_UNIT_MASK, y, x] = unit_mask
+
+    state_map[State.POINTS_WITH_OWN_UNIT] = state_map[State.POINTS] * (state_map[State.OWN_UNIT_COUNT] > 0)
+    state_map[State.POINTS_WITHOUT_OWN_UNIT] = state_map[State.POINTS] * (state_map[State.OWN_UNIT_COUNT] == 0)
+    state_map[State.POINTS_WITH_OPP_UNIT] = state_map[State.POINTS] * (state_map[State.OPP_UNIT_COUNT] > 0)
+    state_map[State.POINTS_WITHOUT_OPP_UNIT] = state_map[State.POINTS] * (state_map[State.OPP_UNIT_COUNT] == 0)
+
     return state_map
 
 
