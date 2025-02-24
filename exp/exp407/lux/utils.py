@@ -42,6 +42,8 @@ class GlobalState(IntEnum):
     NEBULA_TILE_VISION_REDUCTION_SIGMA = auto()  # 推定精度
     ENERGY_NODE_DRIFT_SPEED_MEAN = auto()  # 推定値
     ENERGY_NODE_DRIFT_SPEED_SIGMA = auto()  # 推定精度
+    SAP_DROPOFF_FACTOR_MEAN = auto()
+    SAP_DROPOFF_FACTOR_SIGMA = auto()
 
 
 class HiddenState(IntEnum):
@@ -54,7 +56,7 @@ class HiddenState(IntEnum):
 class HiddenGlobalState(IntEnum):
     # NEBULA_TILE_VISION_REDUCTION = 0
     NEBULA_TILE_ENERGY_REDUCTION = 0
-    UNIT_SAP_DROPOFF_FACTOR = auto()
+    # UNIT_SAP_DROPOFF_FACTOR = auto()
     UNIT_ENERGY_VOID_FACTOR = auto()
     # NEBULA_TILE_DRIFT_SPEED = auto() . # 推定可能なので不要
     # ENERGY_NODE_DRIFT_SPEED = auto()
@@ -407,6 +409,43 @@ class NebulaTileVisionReductionGuesser:
             sigma += (candidate - mean) ** 2
         sigma = np.sqrt(sigma / len(self._nebula_tile_vision_reduction_candidates))
         return (mean, sigma)
+
+
+# nebula tile reduction/sap dropoff factor/energy void factorの推定
+class EnergyRelatedFactorGuesser:
+    def __init__(self, target_team_id: int, unit_sap_cost: int, unit_move_cost: int) -> None:
+        self._sap_dropoff_factor_candidates = env_params_ranges["sap_dropoff_factor"]
+        self._unit_energy_void_factor_candidates = env_params_ranges["unit_energy_void_factor"]
+        self._target_team_id = target_team_id
+        self._unit_sap_cost = unit_sap_cost
+        self._unit_move_cost = unit_move_cost
+
+    def update(
+        self, obs: dict[str, Any], prev_obs: dict[str, Any], actions: np.ndarray, nebula_energy_reduction: int
+    ) -> None:
+        # 一度確定させればあとは計算不要
+        if len(self._sap_dropoff_factor_candidates) == 1 and len(self._unit_energy_void_factor_candidates) == 1:
+            return
+        # 0ステップ目は計算できないのでskip
+        if prev_obs is None:
+            return
+
+        unit_positions = np.array(obs["units"]["position"][self._target_team_id])  # (max_units, 2)
+        unit_energies = np.array(obs["units"]["energy"][self._target_team_id])  # (max_units, 1)
+        prev_unit_energies = prev_obs["units"]["energy"][self._target_team_id]
+        tile_type_map = np.array(prev_obs["map_features"]["tile_type"]).T
+        prev_energy_map = np.array(prev_obs["map_features"]["energy"]).T
+
+        # 相手のactionわかるっけ？
+
+        # # 前ステップからの行動によってユニットのエネルギーが減少するのでそれを考慮
+        # action = actions[unit_id][0].item()
+        # if action == Action.SAP:
+        #     action_cost = self._unit_sap_cost
+        # elif action == Action.CENTER:
+        #     action_cost = 0
+        # else:
+        #     action_cost = self._unit_move_cost
 
 
 class EpisodeStore:
