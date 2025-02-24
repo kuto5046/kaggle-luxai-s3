@@ -1,3 +1,4 @@
+import gzip
 import json
 import time
 import datetime
@@ -15,25 +16,31 @@ def saveEpisode(epid: int, save_path: Path) -> None:
     # request
     re = requests.post(GET_URL, json={"episodeId": int(epid)}, timeout=10)
 
-    # save replay
+    # save replay with gzip compression
     replay = re.json()
-    with open(save_path, "w") as f:
+    with gzip.open(save_path, "wt") as f:
         json.dump(replay, f)
 
 
 def main():
-    df = pl.read_csv("/home/user/work/output/feature_store/episodes/episodes0210.csv")
+    max_episode_count = 3000
+    df = pl.read_csv("/home/task/kaggle/kaggle-luxai-s3/output/feature_store/episodes/episodes_0224.csv")
+    agents_to_load = [
+        42704976,  # Frog Parade
+        42705163,  # Frog Parade
+    ]
+    df = df.filter(pl.col("SubmissionId").is_in(agents_to_load))
     start_time = datetime.datetime.now(tz=datetime.timezone.utc)
     episode_count = 0
     for _sub_id, df in df.group_by("SubmissionId"):
         sub_id = _sub_id[0]
-        output_dir = Path(f"/home/user/work/output/feature_store/episodes/{sub_id}")
+        output_dir = Path(f"/home/task/kaggle/kaggle-luxai-s3/output/feature_store/episodes/{sub_id}")
         output_dir.mkdir(exist_ok=True, parents=True)
         ep_ids = df["EpisodeId"].unique()
         for epid in tqdm(ep_ids):
-            save_path = output_dir / f"{epid}.json"
+            save_path = output_dir / f"{epid}.json.gz"
             if save_path.exists():
-                print(f"  file {epid}.json already exists")
+                print(f"  file {epid}.json.gz already exists")
                 continue
 
             saveEpisode(epid, save_path)
@@ -43,6 +50,8 @@ def main():
             spend_seconds = (datetime.datetime.now(tz=datetime.timezone.utc) - start_time).seconds
             if episode_count > spend_seconds:
                 time.sleep(episode_count - spend_seconds)
+            if episode_count >= max_episode_count:
+                break
 
         print(f"Episodes saved: {episode_count}")
 

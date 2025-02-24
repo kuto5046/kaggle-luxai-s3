@@ -1,3 +1,4 @@
+import gzip
 import json
 import shutil
 import logging
@@ -33,13 +34,13 @@ class Config:
     debug: bool = False
     use_gt: bool = False
     n_splits: int = 5
-    root_dir: Path = Path("/home/user/work")
+    root_dir: Path = Path("/home/task/kaggle/kaggle-luxai-s3")
     input_dir: Path = root_dir / "input"
     episode_dir: Path = root_dir / "output/feature_store/episodes"
-    episode_path: Path = episode_dir / "episodes0210.csv"
+    episode_path: Path = episode_dir / "episodes_0224.csv"
     feature_dir: Path = root_dir / f"output/feature_store/{exp_name}"
-    target_team_name: str = "aDg4b"
-    target_sub_ids: list[int] = field(default_factory=lambda: [42683570])
+    target_team_name: str = "Frog Parade"
+    target_sub_ids: list[int] = field(default_factory=lambda: [42704976, 42705163])
     validation: bool = False
 
 
@@ -103,12 +104,16 @@ class DataProcessor:
     def _process_episode(self, row) -> tuple[str, int, int]:
         sub_id = row["SubmissionId"]
         episode_id = row["EpisodeId"]
-        episode_path = self.episode_dir / f"{sub_id}/{episode_id}.json"
+        episode_path = self.episode_dir / f"{sub_id}/{episode_id}.json.gz"
+
+        if not episode_path.exists():
+            print(f"EpisodeId {episode_id} not found")
+            return None
 
         try:
-            with open(episode_path) as f:
+            with gzip.open(episode_path, "rt") as f:
                 json_load = json.load(f)
-        except json.JSONDecodeError as e:
+        except (json.JSONDecodeError, gzip.BadGzipFile) as e:
             print(f"EpisodeId {episode_id}: {e}")
             return None
 
@@ -151,20 +156,22 @@ class DataProcessor:
                     state = extract_gt_state(gt_obs, target_team_id)
                 else:
                     state = extract_state(obs, target_team_id, episode_store)
-                episode_state_group.create_dataset(f"{step_idx}", data=state)
+                episode_state_group.create_dataset(f"{step_idx}", data=state, compression="gzip")
 
                 global_state = extract_global_state(obs, target_team_id, env_params, episode_store)
-                episode_global_state_group.create_dataset(f"{step_idx}", data=global_state)
+                episode_global_state_group.create_dataset(f"{step_idx}", data=global_state, compression="gzip")
 
                 hidden_state = extract_hidden_state(gt_obs, target_team_id)
-                episode_hidden_state_group.create_dataset(f"{step_idx}", data=hidden_state)
+                episode_hidden_state_group.create_dataset(f"{step_idx}", data=hidden_state, compression="gzip")
 
                 hidden_global_state = extract_hidden_global_state(gt_env_params)
-                episode_hidden_global_state_group.create_dataset(f"{step_idx}", data=hidden_global_state)
+                episode_hidden_global_state_group.create_dataset(
+                    f"{step_idx}", data=hidden_global_state, compression="gzip"
+                )
 
                 next_actions = next_step_info[target_team_id]["action"]
                 action = extract_action(next_actions, obs, target_team_id)
-                episode_action_group.create_dataset(f"{step_idx}", data=action)
+                episode_action_group.create_dataset(f"{step_idx}", data=action, compression="gzip")
 
                 match_idx = obs["steps"] // (EnvParams.max_steps_in_match + 1)
                 is_win = match_results[match_idx]
@@ -185,7 +192,7 @@ class DataProcessor:
 
         # 一時ファイルを1つのh5ファイルにマージ
         with h5py.File(self.feature_dir / "episodes.h5", "w") as out_f:
-            for episode_id in valid_ids:
+            for episode_id in tqdm(valid_ids):
                 temp_path = self.feature_dir / f"temp_{episode_id}.h5"
                 with h5py.File(temp_path, "r") as temp_f:
                     temp_f.copy(f"{episode_id}", out_f)
@@ -210,8 +217,8 @@ class DataProcessor:
         episode_id = row["EpisodeId"]
         # if episode_id != 66503529:
         #     return False
-        episode_path = self.episode_dir / f"{sub_id}/{episode_id}.json"
-        with open(episode_path) as f:
+        episode_path = self.episode_dir / f"{sub_id}/{episode_id}.json.gz"
+        with gzip.open(episode_path, "rt") as f:
             json_load = json.load(f)
 
         # 無効なepisodeはスキップ(valueも学習したいのでskip)
