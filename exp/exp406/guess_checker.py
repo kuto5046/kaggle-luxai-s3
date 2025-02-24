@@ -138,14 +138,15 @@ class GuessChecker:
                     f"energy node miss {tupled_energy_nodes1=}, {tupled_energy_nodes2=}, {episode_store.energy_node_guesser._energy_node_candidates=}"
                 )
 
-    def _check_nebula_tile_vision_reduction(
-        self, episode_store: EpisodeStore, params: dict[str, Any], vision_reduction_diff: float
-    ) -> float:
+    def _check_nebula_tile_vision_reduction(self, episode_store: EpisodeStore, params: dict[str, Any]) -> float:
         # nebula tile vision reductionの確認
         mean, std = episode_store.nebula_tile_vision_reduction_guesser.get_nebula_tile_vision_reduction_estimate()
         # print(f"mean: {mean:.2f}, std: {std:.2f} candidate: {episode_store.nebula_tile_vision_reduction_guesser._nebula_tile_vision_reduction_candidates}, true: {params['nebula_tile_vision_reduction']}")
-        vision_reduction_diff += abs(mean - params["nebula_tile_vision_reduction"])
-        return vision_reduction_diff
+        return abs(mean - params["nebula_tile_vision_reduction"])
+
+    def _check_nebula_tile_enery_reduction(self, episode_store: EpisodeStore, params: dict[str, Any]) -> None:
+        if episode_store._nebula_energy_reduction is not None:
+            assert episode_store._nebula_energy_reduction == params["nebula_tile_energy_reduction"]
 
     def _check_guess(self, row) -> bool:
         sub_id = row["SubmissionId"]
@@ -183,7 +184,9 @@ class GuessChecker:
                 episode_store.reset()
             # リセット時以外はupdateをする
             else:
-                episode_store.update(obs)
+                prev_actions = np.array(step_info[target_team_id]["action"])
+                episode_store.update(obs, prev_actions)
+
             extract_state(obs, target_team_id, episode_store)
 
             drift_speed_diff += abs(
@@ -193,7 +196,8 @@ class GuessChecker:
 
             if obs["match_steps"] != 0:
                 self._check_energy_node(episode_store, obs, prev_energy_node, transposed_energy, prev_energy_field)
-                vision_reduction_diff += self._check_nebula_tile_vision_reduction(episode_store, obs)
+                vision_reduction_diff += self._check_nebula_tile_vision_reduction(episode_store, params)
+                self._check_nebula_tile_enery_reduction(episode_store, params)
 
             prev_energy_field = transposed_energy
             prev_energy_node = gt_obs["energy_nodes"]
