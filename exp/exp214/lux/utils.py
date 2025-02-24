@@ -1,5 +1,6 @@
 from enum import IntEnum, auto
 from typing import Any
+from collections import deque
 
 import flax
 import numpy as np
@@ -26,6 +27,7 @@ class State(IntEnum):
     # OPP_UNIT_MASK = auto()
     VISIT_COUNT = auto()
     SAP_AVAILABLE_AREA = auto()  # sapを使用できるエリア
+    DIST_TO_RELIC = auto()
 
 
 class GlobalState(IntEnum):
@@ -80,6 +82,46 @@ class TileType(IntEnum):
 def to_np(x: torch.Tensor) -> np.ndarray:
     return x.detach().cpu().numpy()
 
+def compute_distance_with_obstacle(target: np.ndarray, obstacle: np.ndarray) -> np.ndarray:
+    if target.shape != obstacle.shape:
+        raise ValueError("target and obstacle must have the same shape")
+    if target.ndim != 2:
+        raise ValueError("target and obstacle must be 2D array")
+    dist = np.ones_like(target, dtype=np.float32) * -1
+    list_target_pos = np.argwhere(target)
+
+    H, W = target.shape
+
+    # use 2d list because numpy array is slow
+    target = target.tolist()
+    obstacle = obstacle.tolist()
+    dist = dist.tolist()
+
+    # use 01 bfs to calculate distance
+    q = deque()
+    for pos in list_target_pos:
+        q.append((*pos, 0))
+        x, y = pos
+        dist[x][y] = 0
+    while q:
+        x, y, d = q.popleft()
+        for dx, dy in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
+            nx, ny = x + dx, y + dy
+            if nx < 0 or nx >= H or ny < 0 or ny >= W:
+                continue
+            if d > 0 and obstacle[nx][ny]:
+                continue
+            if dist[nx][ny] != -1:
+                continue
+            # 目標地点が障害物に埋まっている場合は障害物全体を距離0と置く
+            if obstacle[nx][ny]:
+                dist[nx][ny] = 0
+                q.appendleft((nx, ny, 0))
+            else:
+                dist[nx][ny] = d + 1
+                q.append((nx, ny, d + 1))
+
+    return np.array(dist)
 
 class EnergyNodeGuesser:
     def __init__(self) -> None:
@@ -1000,6 +1042,17 @@ def extract_gt_state(obs: dict[str, Any], target_team_id: int) -> np.ndarray:
                 state_map[State.OPP_UNIT_COUNT, y, x] += 1
                 state_map[State.OPP_UNIT_ENERGY, y, x] += unit_energy / EnvParams.init_unit_energy
 
+    # compute distance to relic
+    state_map[State.DIST_TO_RELIC] = (
+        compute_distance_with_obstacle(
+            state_map[State.RELICS],
+            state_map[State.TILE_TYPE] == TileType.ASTEROID,
+        )
+        / EnvParams.map_width
+    )
+    # 0 未満を -1 にする
+    state_map[State.DIST_TO_RELIC] = np.where(state_map[State.DIST_TO_RELIC] < 0, -1, state_map[State.DIST_TO_RELIC])
+
     return state_map
 
 
@@ -1067,6 +1120,18 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
                 state_map[State.OPP_UNIT_COUNT, y, x] += 1 / EnvParams.max_units
                 state_map[State.OPP_UNIT_ENERGY, y, x] += unit_energy / EnvParams.init_unit_energy
                 # state_map[State.OPP_UNIT_MASK, y, x] = unit_mask
+
+    # compute distance to relic
+    state_map[State.DIST_TO_RELIC] = (
+        compute_distance_with_obstacle(
+            state_map[State.RELICS],
+            state_map[State.TILE_TYPE] == TileType.ASTEROID,
+        )
+        / EnvParams.map_width
+    )
+    # 0 未満を -1 にする
+    state_map[State.DIST_TO_RELIC] = np.where(state_map[State.DIST_TO_RELIC] < 0, -1, state_map[State.DIST_TO_RELIC])
+
     return state_map
 
 
