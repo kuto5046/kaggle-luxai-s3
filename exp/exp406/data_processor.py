@@ -33,7 +33,7 @@ class Config:
     debug: bool = False
     use_gt: bool = False
     n_splits: int = 5
-    root_dir: Path = Path("/home/user/work")
+    root_dir: Path = Path("/home/kawattataido/デスクトップ/programing/kaggle/kaggle-luxai-s3")
     input_dir: Path = root_dir / "input"
     episode_dir: Path = root_dir / "output/feature_store/episodes"
     episode_path: Path = episode_dir / "episodes0210.csv"
@@ -204,119 +204,6 @@ class DataProcessor:
         if not self.cfg.debug:
             df = self.add_fold(df)
         df.write_csv(self.feature_dir / "train.csv")
-
-    def _check_guess(self, row) -> bool:
-        sub_id = row["SubmissionId"]
-        episode_id = row["EpisodeId"]
-        # if episode_id != 66503529:
-        #     return False
-        episode_path = self.episode_dir / f"{sub_id}/{episode_id}.json"
-        with open(episode_path) as f:
-            json_load = json.load(f)
-
-        # 無効なepisodeはスキップ(valueも学習したいのでskip)
-        if not valid_episode(json_load, self.cfg.target_team_name):
-            return False
-        print(f"check {sub_id=}, {episode_id=}")
-
-        target_team_id = np.argmax(json_load["rewards"])  # win or tie
-
-        # episode内で獲得する情報
-        env_params = EnvParams(**json_load["configuration"]["env_cfg"])
-        episode_store = EpisodeStore(target_team_id, env_params, self.cfg.validation, episode_id)
-        steps = json_load["steps"]
-
-        params = steps[0][0]["info"]["replay"]["params"]
-        prev_energy_field = None
-        prev_energy_node = None
-        drift_speed_diff = 0
-        vision_reduction_diff = 0
-        for step_idx in range(len(steps) - 1):  # 505でdoneとなるため-1
-            step_info = steps[step_idx]
-            obs = json.loads(step_info[target_team_id]["observation"]["obs"])
-            gt_obs = step_info[0]["info"]["replay"]["observations"][0]
-            transposed_energy = np.array(gt_obs["map_features"]["energy"]).T
-            # マッチごとにリセットされる要素をリセット
-            if obs["match_steps"] == 0:
-                episode_store.reset()
-            # リセット時以外はupdateをする
-            else:
-                episode_store.update(obs)
-            extract_state(obs, target_team_id, episode_store)
-
-            drift_speed_diff += abs(
-                params["energy_node_drift_speed"]
-                - episode_store.energy_node_guesser.get_energy_drft_speed_estimate()[0]
-            )
-
-            if obs["match_steps"] != 0:
-                # energy fieldが一致しているか確認
-                # energy fieldの真値がgt_obs["map_features"]["energy"]に格納されているが
-                # これは前のターンのgt_obs["energy_nodes"]を元に計算されたものである
-
-                # energy_nodeが正しければenergy fieldが一致することの確認
-                guess = episode_store.energy_node_guesser._energy_tile_patterns[
-                    prev_energy_node[0][1], prev_energy_node[0][0]
-                ]
-                for y in range(EnvParams.map_height):
-                    for x in range(EnvParams.map_width):
-                        assert (
-                            guess[y, x] == transposed_energy[y, x]
-                        ), f"at {x=}, {y=}, {guess[y, x]=}, {transposed_energy[y, x]=}"
-
-                # 観測値と真のenergy fieldが一致しているか確認(シミュレータの挙動の確認)
-                transposed_energy_from_obs = np.array(obs["map_features"]["energy"]).T
-                sensor_mask = np.array(obs["sensor_mask"]).T
-                for y in range(EnvParams.map_height):
-                    for x in range(EnvParams.map_width):
-                        if sensor_mask[y, x]:
-                            assert transposed_energy_from_obs[y, x] == transposed_energy[y, x]
-
-                if prev_energy_field is not None and not np.all(prev_energy_field == transposed_energy):
-                    pass
-                    # print(f"energy field drifted in {obs['steps']=}")
-
-                # energy_nodeの推定の確認
-                if episode_store.energy_node_guesser.is_determistic():
-                    tupled_energy_nodes1 = (prev_energy_node[0][0], prev_energy_node[0][1])
-                    tupled_energy_nodes2 = (
-                        prev_energy_node[len(prev_energy_node) // 2][0],
-                        prev_energy_node[len(prev_energy_node) // 2][1],
-                    )
-                    if (
-                        tupled_energy_nodes1 not in episode_store.energy_node_guesser._energy_node_candidates
-                        and tupled_energy_nodes2 not in episode_store.energy_node_guesser._energy_node_candidates
-                    ):
-                        print(
-                            f"energy node miss {tupled_energy_nodes1=}, {tupled_energy_nodes2=}, {episode_store.energy_node_guesser._energy_node_candidates=}"
-                        )
-                # nebula tile vision reductionの確認
-                mean, std = (
-                    episode_store.nebula_tile_vision_reduction_guesser.get_nebula_tile_vision_reduction_estimate()
-                )
-                # print(f"mean: {mean:.2f}, std: {std:.2f} candidate: {episode_store.nebula_tile_vision_reduction_guesser._nebula_tile_vision_reduction_candidates}, true: {params['nebula_tile_vision_reduction']}")
-                vision_reduction_diff += abs(mean - params["nebula_tile_vision_reduction"])
-
-            prev_energy_field = transposed_energy
-            prev_energy_node = gt_obs["energy_nodes"]
-
-        # vision reductionが大きい場合推定は難しいので簡易的な確認
-        assert (
-            params["nebula_tile_vision_reduction"]
-            in episode_store.nebula_tile_vision_reduction_guesser._nebula_tile_vision_reduction_candidates
-        )
-        # print(f"mean vision reduction est diff: {vision_reduction_diff / len(steps)}, relative: {vision_reduction_diff / len(steps) / max(1,params['nebula_tile_vision_reduction'])} at true value {params['nebula_tile_vision_reduction']}")
-        assert drift_speed_diff / len(steps) / params["energy_node_drift_speed"] < 0.2
-        return True
-
-    def test(self) -> None:
-        episode_paths = self.read_data()
-        ok_count = 0
-        for row in episode_paths.iter_rows(named=True):
-            if self._check_guess(row):
-                ok_count += 1
-            if ok_count == 10:
-                break
 
 
 def get_match_results(json_load: dict[str, Any], target_team_id: int) -> list[bool]:
