@@ -10,7 +10,15 @@ from .params import EnvParams, env_params_ranges
 
 class State(IntEnum):
     TILE_TYPE = 0  # 0スタート
+    TILE_TYPE_UNKNOWN = auto()
+    TILE_TYPE_EMPTY = auto()
+    TILE_TYPE_NEBULA = auto()
+    TILE_TYPE_ASTEROID = auto()
     NEXT_TILE_TYPE = auto()
+    NEXT_TILE_TYPE_UNKNOWN = auto()
+    NEXT_TILE_TYPE_EMPTY = auto()
+    NEXT_TILE_TYPE_NEBULA = auto()
+    NEXT_TILE_TYPE_ASTEROID = auto()
     ENERGY = auto()
     NEBULA_ENERGY_REDUCTION = auto()
     SENSOR_MASK = auto()
@@ -1013,6 +1021,15 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
     # state_map[State.TILE_TYPE] = np.array(obs["map_features"]["tile_type"]).T
     state_map[State.TILE_TYPE] = episode_store.tile_type_map
     state_map[State.NEXT_TILE_TYPE] = episode_store.next_tile_type_map
+    # one hot
+    state_map[State.TILE_TYPE_UNKNOWN] = (state_map[State.TILE_TYPE] == TileType.UNKNOWN) * 1
+    state_map[State.TILE_TYPE_EMPTY] = (state_map[State.TILE_TYPE] == TileType.EMPTY) * 1
+    state_map[State.TILE_TYPE_NEBULA] = (state_map[State.TILE_TYPE] == TileType.NEBULA) * 1
+    state_map[State.TILE_TYPE_ASTEROID] = (state_map[State.TILE_TYPE] == TileType.ASTEROID) * 1
+    state_map[State.NEXT_TILE_TYPE_UNKNOWN] = (state_map[State.NEXT_TILE_TYPE] == TileType.UNKNOWN) * 1
+    state_map[State.NEXT_TILE_TYPE_EMPTY] = (state_map[State.NEXT_TILE_TYPE] == TileType.EMPTY) * 1
+    state_map[State.NEXT_TILE_TYPE_NEBULA] = (state_map[State.NEXT_TILE_TYPE] == TileType.NEBULA) * 1
+    state_map[State.NEXT_TILE_TYPE_ASTEROID] = (state_map[State.NEXT_TILE_TYPE] == TileType.ASTEROID) * 1
     # energy nodesの位置は未知(tileのenergyはvisionで観測可能) energy系は正規化の分母をinit_unit_energyにする
     state_map[State.ENERGY] = episode_store.energy_node_guesser.get_energy_map() / EnvParams.init_unit_energy
     state_map[State.NEBULA_ENERGY_REDUCTION] = episode_store.nebula_energy_reduction
