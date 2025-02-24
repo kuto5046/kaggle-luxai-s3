@@ -87,6 +87,7 @@ def extract_results(
     results = defaultdict(list)
     states = deque(maxlen=cfg.n_stack)
     global_states = deque(maxlen=cfg.n_stack)
+    prev_actions = np.zeros((env_params.max_units, 3), dtype=np.int32)
     for i in range(cfg.n_stack):
         states.append(np.zeros((len(State), 24, 24), dtype=np.float32))
         global_states.append(np.zeros((len(GlobalState),), dtype=np.float32))
@@ -103,10 +104,11 @@ def extract_results(
             episode_store.reset()
         # リセット時以外はupdateをする
         else:
-            episode_store.update(obs)
+            prev_actions = np.array(step_info[target_team_id]["action"])
+            episode_store.update(obs, prev_actions)
 
         state = extract_state(obs, target_team_id, episode_store)
-        global_state = extract_global_state(obs, target_team_id, env_params)
+        global_state = extract_global_state(obs, target_team_id, env_params, episode_store)
         gt_state = extract_gt_state(gt_obs, target_team_id)
         policy_map, _ = model.predict(obs, target_team_id, episode_store)
 
@@ -115,7 +117,7 @@ def extract_results(
         results["gt_state"].append(gt_state)
         results["global_state"].append(global_state)
         results["policy_map"].append(policy_map)
-        results["action"].append(next_actions)
+        results["action"].append(next_actions)  # その状態からどう行動したかを知りたいのnext_actions
     return results
 
 
@@ -231,11 +233,10 @@ def main():
     cfg = Config()
     seed_everything(cfg.seed, workers=True)
     st.title(f"Episode Data Visualizer in {cfg.exp_name}")
-
+    usage()
     # jsonファイルをupload
     json_load = st.file_uploader("jsonファイルをupload", type="json")
     if json_load is not None:
-        usage()
         json_load = json.load(json_load)
         episode_id = json_load["info"]["EpisodeId"]
         target_team_id = json_load["info"]["TeamNames"].index(cfg.team_name)

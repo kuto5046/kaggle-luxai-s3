@@ -241,7 +241,8 @@ class DataProcessor:
                 episode_store.reset()
             # リセット時以外はupdateをする
             else:
-                episode_store.update(obs)
+                prev_actions = np.array(step_info[target_team_id]["action"])
+                episode_store.update(obs, prev_actions)
             extract_state(obs, target_team_id, episode_store)
 
             drift_speed_diff += abs(
@@ -324,8 +325,12 @@ def get_match_results(json_load: dict[str, Any], target_team_id: int) -> list[bo
     for i_match in range(EnvParams.match_count_per_episode):
         final_step_in_match = (i_match + 1) * 100 + i_match  # 100, 201, 302, 403, 504
 
-        teams_wins_after = np.asarray(json_load["steps"][final_step_in_match + 1][0]["info"]["replay"]["observations"][0]["team_wins"])
-        teams_wins_before = np.asarray(json_load["steps"][final_step_in_match][0]["info"]["replay"]["observations"][0]["team_wins"])
+        teams_wins_after = np.asarray(
+            json_load["steps"][final_step_in_match + 1][0]["info"]["replay"]["observations"][0]["team_wins"]
+        )
+        teams_wins_before = np.asarray(
+            json_load["steps"][final_step_in_match][0]["info"]["replay"]["observations"][0]["team_wins"]
+        )
         win_team = np.argmax(teams_wins_after - teams_wins_before)
 
         is_win = win_team == target_team_id
