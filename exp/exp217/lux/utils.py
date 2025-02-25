@@ -26,6 +26,11 @@ class State(IntEnum):
     # OPP_UNIT_MASK = auto()
     VISIT_COUNT = auto()
     SAP_AVAILABLE_AREA = auto()  # sapを使用できるエリア
+    SAP_AVAILABLE_COUNT = auto()  # sapを使用できる駒の数
+    OPP_SAP_AVAILABLE_AREA = auto()  # 相手がsapを打てるエリア
+    OPP_SAP_AVAILABLE_COUNT = auto()  # 相手がsapを打てる駒の数
+    OPP_SENSOR_MASK_AREA = auto()  # 相手の視野
+    OPP_SENSOR_MASK_COUNT = auto()  # 相手の視野（コマの数を考慮）
 
 
 class GlobalState(IntEnum):
@@ -1062,11 +1067,26 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
                             nx, ny, unit_energy, episode_store.unit_sap_cost, episode_store.tile_type_map
                         ):
                             state_map[State.SAP_AVAILABLE_AREA, ny, nx] = 1
+                            state_map[State.SAP_AVAILABLE_COUNT, ny, nx] += 1 / EnvParams.max_units
                 # state_map[State.OWN_UNIT_MASK, y, x] = unit_mask
             else:
                 state_map[State.OPP_UNIT_COUNT, y, x] += 1 / EnvParams.max_units
                 state_map[State.OPP_UNIT_ENERGY, y, x] += unit_energy / EnvParams.init_unit_energy
                 # state_map[State.OPP_UNIT_MASK, y, x] = unit_mask
+                for dx in range(-EnvParams.unit_sap_range, EnvParams.unit_sap_range + 1):
+                    for dy in range(-EnvParams.unit_sap_range, EnvParams.unit_sap_range + 1):
+                        nx, ny = x + dx, y + dy
+                        if in_map((nx, ny)) and can_sap(
+                            nx, ny, unit_energy, episode_store.unit_sap_cost, episode_store.tile_type_map
+                        ):
+                            state_map[State.OPP_SAP_AVAILABLE_AREA, ny, nx] = 1
+                            state_map[State.OPP_SAP_AVAILABLE_COUNT, ny, nx] += 1 / EnvParams.max_units
+                for dx in range(-EnvParams.unit_sensor_range, EnvParams.unit_sensor_range + 1):
+                    for dy in range(-EnvParams.unit_sensor_range, EnvParams.unit_sensor_range + 1):
+                        nx, ny = x + dx, y + dy
+                        if in_map((nx, ny)):
+                            state_map[State.OPP_SENSOR_MASK_AREA, ny, nx] = 1
+                            state_map[State.OPP_SENSOR_MASK_COUNT, ny, nx] += 1 / EnvParams.max_units
     return state_map
 
 

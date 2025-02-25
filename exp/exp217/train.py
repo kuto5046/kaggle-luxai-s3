@@ -115,7 +115,7 @@ class TrainPipeline:
     def setup_logger(self) -> None:
         self.pl_logger = WandbLogger(
             project="kaggle-luxai-s3",
-            entity="kawattataido",
+            entity="cnumber",
             # name=f"{self.cfg.exp_name}",
             group=self.cfg.exp_name,
             mode="disabled" if self.cfg.debug else "online",
