@@ -233,9 +233,9 @@ class LaxLitModel(LightningModule):
             n_stack=cfg.n_stack,
             res=cfg.res,
         )
-        self.criterion1 = DiceLoss(n_classes=1)
-        # self.criterion1 = MaskedBCEWithLogitsLoss()
-        self.criterion2 = nn.BCEWithLogitsLoss()
+        self.policy_decision_loss = nn.CrossEntropyLoss()
+        self.policy_non_sap_loss = nn.CrossEntropyLoss()
+        self.policy_sap_loss = nn.CrossEntropyLoss()
         self.criterion3 = nn.MSELoss()
         self.criterion4 = MaskedFocalLoss()
 
@@ -255,12 +255,31 @@ class LaxLitModel(LightningModule):
 
     def _share_step(self, batch: Any, mode: str = "train") -> torch.Tensor:
         outputs = self(batch)
+        # 階層型の出力を取得
+        decision_logits = outputs["policy_decision"]  # shape: (batch, 2)
+        non_sap_logits = outputs["policy_non_sap"]  # shape: (batch, 5)
+        sap_logits = outputs["policy_sap"]  # shape: (batch, map_width*map_height)
+        # バッチ中のターゲットは one-hot なのでクラスラベルに変換
+        action_target = torch.argmax(batch["action"], dim=1)  # shape: (batch,)
+        # 非SAPの場合は target < 5, SAPの場合は target >= 5 で定義（SAPのとき target - 5 が sap用ラベル）
+        high_target = (action_target >= 5).long()  # 0: 非SAP, 1: SAP
+        non_sap_target = action_target[high_target == 0]  # 非SAPの対象
+        sap_target = action_target[high_target == 1] - 5  # SAP対象の座標ラベル
 
-        policy_preds = torch.softmax(outputs["policy"], dim=1)
-        policy_targets = batch["action"]
-        # policy_mask = (batch["state"][:, -1, State.OWN_UNIT_COUNT] > 0).unsqueeze(1)  # (batch_size, 1, w, h)
-        # policy_loss = self.criterion1(policy_preds, policy_targets, policy_mask)
-        policy_loss = self.criterion1(policy_preds, policy_targets)
+        loss_decision = self.policy_decision_loss(decision_logits, high_target)
+        loss_non_sap = (
+            self.policy_non_sap_loss(non_sap_logits[high_target == 0], non_sap_target)
+            if (high_target == 0).sum() > 0
+            else 0
+        )
+        loss_sap = self.policy_sap_loss(sap_logits[high_target == 1], sap_target) if (high_target == 1).sum() > 0 else 0
+        policy_loss = loss_decision + loss_non_sap + loss_sap
+
+        # policy_preds = torch.softmax(outputs["policy"], dim=1)
+        # policy_targets = batch["action"]
+        # # policy_mask = (batch["state"][:, -1, State.OWN_UNIT_COUNT] > 0).unsqueeze(1)  # (batch_size, 1, w, h)
+        # # policy_loss = self.criterion1(policy_preds, policy_targets, policy_mask)
+        # policy_loss = self.criterion1(policy_preds, policy_targets)
 
         # value_loss = self.criterion2(outputs["value"].flatten(), batch["win"])
         state_loss = self.criterion3(outputs["state"].flatten(), batch["hidden_state"].flatten())
@@ -326,19 +345,21 @@ class LaxLitModel(LightningModule):
             logger=True,
         )
 
-        # batch["action"][i]がすべて0の場合は除くためのmask
+        # 推論時は階層型で最終予測を復元
+        predicted_high = torch.argmax(decision_logits, dim=1)
+        predicted_action = torch.zeros_like(action_target)
+        if (predicted_high == 0).sum() > 0:
+            predicted_action[predicted_high == 0] = torch.argmax(non_sap_logits[predicted_high == 0], dim=1)
+        if (predicted_high == 1).sum() > 0:
+            predicted_action[predicted_high == 1] = torch.argmax(sap_logits[predicted_high == 1], dim=1) + 5
+        # バッチ内全ゼロ（学習データの欠損等）を除く
         all_zero_mask = torch.all(batch["action"] == 0, dim=1)
-        preds = torch.softmax(outputs["policy"], dim=1).argmax(dim=1)
-        gts = torch.softmax(batch["action"], dim=1).argmax(dim=1)
-        preds = preds[~all_zero_mask]
-        gts = gts[~all_zero_mask]
+        preds = predicted_action[~all_zero_mask]
+        gts = action_target[~all_zero_mask]
         if mode == "train":
             self.train_metrics.update(preds, gts)
         else:
             self.valid_metrics.update(preds, gts)
-            # Action.SAP以上はSAPにまとめる
-            gts = torch.where(gts >= len(Action) - 1, len(Action) - 1, gts)
-            preds = torch.where(preds >= len(Action) - 1, len(Action) - 1, preds)
             self.valid_outputs["ground_truth"].append(to_np(gts))
             self.valid_outputs["predictions"].append(to_np(preds))
         return loss
@@ -546,16 +567,27 @@ class LuxUNetModel(nn.Module):
         self.up1 = Up(256 * 2 + global_state_space_size, 256 // factor, bilinear)
         self.up2 = Up(256, 128 // factor, bilinear)
         self.up3 = Up(128, 64, bilinear)
-        self.policy_net = OutConv(64 * n_stack, 2)
+        # self.policy_net = OutConv(64 * n_stack, 2)
         # self.sap_net = OutConv(64 * n_stack, 1)
         self.state_net = OutConv(64 * n_stack, hidden_state_space_size)
         self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
-        self.policy_net2 = nn.Sequential(
-            nn.Linear(
-                EnvParams.map_height * EnvParams.map_width * 2,
-                EnvParams.map_height * EnvParams.map_width + len(Action) - 1,
-            ),
-        )
+        # self.policy_net2 = nn.Sequential(
+        #     nn.Linear(
+        #         EnvParams.map_height * EnvParams.map_width * 2,
+        #         EnvParams.map_height * EnvParams.map_width + len(Action) - 1,
+        #     ),
+        # )
+
+        # ここから階層型ポリシーヘッド
+        # ここではアップサンプリング後の特徴マップ x の shape は (_n, C, _x, _y) と仮定 (_x, _y) = (map_width, map_height)
+        # 特徴ベクトルとして全体をflattenする
+        self.feature_dim = 64 * n_stack * EnvParams.map_width * EnvParams.map_height
+        self.policy_decision = nn.Linear(self.feature_dim, 2)  # 0: 非SAP, 1: SAP
+        self.policy_non_sap = nn.Linear(self.feature_dim, 5)  # 非SAPは5クラス（CENTER, UP, RIGHT, DOWN, LEFT）
+        self.policy_sap = nn.Linear(
+            self.feature_dim, EnvParams.map_width * EnvParams.map_height
+        )  # SAPは各マスをクラス化
+
         self.global_state_net = nn.Sequential(
             nn.Linear((256 + global_state_space_size) * n_stack, 128),
             nn.ReLU(),
@@ -589,14 +621,18 @@ class LuxUNetModel(nn.Module):
         x = self.up2(x, x2)
         x = self.up3(x, x1)
 
-        x = x.view(_n, -1, _x, _y)
-        policy_net2_input = self.policy_net(x)
-        policy_logits2 = self.policy_net2(policy_net2_input.view(-1, 24 * 24 * 2))
-        # sap_logits = self.sap_net(x)
-        state_logits = self.state_net(x)
+        # x の shape は (_n, C, _x, _y) → flattenして特徴ベクトルとする
+        x = x.view(_n, -1)
+        # 階層型の各ヘッドに通す
+        policy_decision_logits = self.policy_decision(x)  # (_n, 2)
+        policy_non_sap_logits = self.policy_non_sap(x)  # (_n, 5)
+        policy_sap_logits = self.policy_sap(x)  # (_n, map_width*map_height)
+        state_logits = self.state_net(x.view(_n, -1, _x, _y))
 
         return {
-            "policy": policy_logits2,
+            "policy_decision": policy_decision_logits,
+            "policy_non_sap": policy_non_sap_logits,
+            "policy_sap": policy_sap_logits,
             # "sap": sap_logits,
             "state": state_logits,
             "global_state": global_state_logits,
