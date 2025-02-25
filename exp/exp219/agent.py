@@ -126,7 +126,9 @@ class ILAgent:
             res=res,
         )
         ckpt = torch.load(checkpoint_path, weights_only=True, map_location="cpu")
-        state_dict = {k.replace("model.", ""): v for k, v in ckpt["state_dict"].items()}
+        state_dict = {k.replace("base_model.", "BASE_MODEL."): v for k, v in ckpt["state_dict"].items()}
+        state_dict = {k.replace("model.", ""): v for k, v in state_dict.items()}
+        state_dict = {k.replace("BASE_MODEL.", "base_model."): v for k, v in state_dict.items()}
         self.model.load_state_dict(state_dict)
         self.model.eval()
         if torch.cuda.is_available():
