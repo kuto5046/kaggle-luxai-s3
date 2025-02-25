@@ -1,9 +1,10 @@
-import sys
-import time
-from heapq import heappop, heappush  # for dijkstra in MinimumCostFlow
 from typing import Any
 from pathlib import Path
 from collections import deque
+import time
+import sys
+from heapq import heappop, heappush  # for dijkstra in MinimumCostFlow
+
 
 import numpy as np
 import torch
@@ -32,7 +33,6 @@ class Config:
     stochastic: bool = True  # Falseにするとargmaxで行動を選択する
     res: bool = True
     n_stack: int = 4
-    # 同じマスに複数のユニットが移動する場合のペナルティ、0=重複を許可(greedy)、1=重複を禁止
     overlap_penalty: float = 2.0
 
     checkpoint_path: Path = Path(__file__).parent / "output/best_model.ckpt"
@@ -142,7 +142,7 @@ class ILAgent:
 
     def predict(self, obs: dict[str, Any], team_id: int, episode_store: EpisodeStore) -> tuple[np.ndarray, np.ndarray]:
         state = extract_state(obs, team_id, episode_store)
-        global_state = extract_global_state(obs, team_id, self.env_cfg, episode_store)
+        global_state = extract_global_state(obs, team_id, self.env_cfg)
         self.stack_states.append(state)
         self.stack_global_states.append(global_state)
         states = {
