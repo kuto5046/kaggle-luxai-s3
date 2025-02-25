@@ -18,6 +18,10 @@ class State(IntEnum):
     RELICS = auto()
     POINTS = auto()  # relic nodes周辺のポイントを獲得できるノード
     ENTROPY = auto()
+    OWN_ACTING_UNIT_POSITION = auto()  # 次に行動するユニットの位置
+    OWN_NOT_ACTED_UNIT_POSITION = auto()  # まだ行動していないユニットの位置
+    OWN_ACTED_UNIT_NEXT_POSITION = auto()  # すでに行動済みのユニットの次の位置
+    SAP_SCHEDULED_POSITION = auto()  # sapを予定している位置 大きさはは回数
     OWN_UNIT_COUNT = auto()
     OWN_UNIT_ENERGY = auto()
     # OWN_UNIT_MASK = auto()
@@ -480,7 +484,9 @@ class EnergyAttackFactorGuesser:
             if prev_x == -1 or prev_y == -1:
                 continue
 
-            if action[0] == Action.SAP and prev_unit_energies[self._target_team_id][unit_id] >= self._unit_sap_cost:
+            if action[0] == Action.SAP and can_sap(
+                prev_unit_energies[self._target_team_id][unit_id], self._unit_sap_cost
+            ):
                 sap_pos = (prev_x + action[1], prev_y + action[2])
                 # env.pyのl.333-334相当
                 if not in_map(sap_pos):
@@ -1195,7 +1201,13 @@ def extract_gt_state(obs: dict[str, Any], target_team_id: int) -> np.ndarray:
     return state_map
 
 
-def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: EpisodeStore) -> np.ndarray:
+def extract_state(
+    obs: dict[str, Any],
+    target_team_id: int,
+    episode_store: EpisodeStore,
+    detemined_actions: dict[int, Any],
+    acting_unig_id: int | None,
+) -> np.ndarray:
     state_space_size: int = len(State)
     # enemy_team_id = 1 - target_team_id
     state_map = np.zeros((state_space_size, EnvParams.map_width, EnvParams.map_height), dtype=np.float32)
@@ -1215,6 +1227,28 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
     state_map[State.POINTS] = episode_store.point_map
     state_map[State.ENTROPY] = episode_store.entropy_map
     state_map[State.VISIT_COUNT] = episode_store.visit_count
+
+    acted_unit = set(detemined_actions.keys())
+    if acting_unig_id is not None:
+        acting_x, acting_y = obs["units"]["position"][target_team_id][acting_unig_id]
+        state_map[State.OWN_ACTING_UNIT_POSITION, acting_y, acting_x] += 1
+    for unit_id, action in detemined_actions.items():
+        x, y = obs["units"]["position"][target_team_id][unit_id]
+        unit_energy = obs["units"]["energy"][target_team_id][unit_id]
+        if (
+            action[0] != Action.SAP
+            and action[0] != Action.CENTER
+            and can_move((x, y), unit_energy, action[0], episode_store.tile_type_map, episode_store.unit_move_cost)
+        ):
+            nx, ny = calc_next_pos((x, y), action[0])
+            state_map[State.OWN_ACTED_UNIT_NEXT_POSITION, ny, nx] += 1
+        else:
+            state_map[State.OWN_ACTED_UNIT_NEXT_POSITION, y, x] += 1
+        if action[0] == Action.SAP and can_sap(unit_energy, episode_store.unit_sap_cost):
+            sap_x = x + action[1]
+            sap_y = y + action[2]
+            if in_map((sap_x, sap_y)):
+                state_map[State.SAP_SCHEDULED_POSITION, sap_y, sap_x] += 1
 
     # unit state
     for team_id in range(2):
@@ -1243,6 +1277,9 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
                 continue
             # 味方同士は重複可能なのでincrementする（敵との重複はないため打ち消し合うことはないはず）
             if team_id == target_team_id:
+                if unit_id not in acted_unit and unit_id != acting_unig_id:
+                    state_map[State.OWN_NOT_ACTED_UNIT_POSITION, y, x] += 1
+
                 # 重複はそんなに発生しないだろうということで正規化はしない
                 state_map[State.OWN_UNIT_COUNT, y, x] += 1 / EnvParams.max_units
                 state_map[State.OWN_UNIT_ENERGY, y, x] += unit_energy / EnvParams.init_unit_energy
@@ -1250,9 +1287,7 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
                 for dx in range(-EnvParams.unit_sap_range, EnvParams.unit_sap_range + 1):
                     for dy in range(-EnvParams.unit_sap_range, EnvParams.unit_sap_range + 1):
                         nx, ny = x + dx, y + dy
-                        if in_map((nx, ny)) and can_sap(
-                            nx, ny, unit_energy, episode_store.unit_sap_cost, episode_store.tile_type_map
-                        ):
+                        if in_map((nx, ny)) and can_sap(unit_energy, episode_store.unit_sap_cost):
                             state_map[State.SAP_AVAILABLE_AREA, ny, nx] = 1
                 # state_map[State.OWN_UNIT_MASK, y, x] = unit_mask
             else:
@@ -1356,23 +1391,75 @@ def extract_action(actions: np.ndarray, obs: dict[str, Any], target_team_id: int
     return action_map
 
 
-def get_valid_policy_map(obs: dict[str, Any], team_id: int, episode_store: EpisodeStore) -> np.ndarray:
-    validate_policy_map = np.zeros((len(Action), EnvParams.map_width, EnvParams.map_height), dtype=np.float32)
-    available_unit_ids = np.where(obs["units_mask"][team_id])[0]
-    for unit_id in available_unit_ids:
-        pos = tuple(obs["units"]["position"][team_id][unit_id])
-        x, y = pos
-        energy = obs["units"]["energy"][team_id][unit_id]
+def extract_action_per_unit(
+    unit_id: int, action: tuple[Action, int, int], obs: dict[str, Any], target_team_id: int
+) -> np.ndarray:
+    # action_map = np.zeros(len(Action)-1 + EnvParams.map_height*EnvParams.map_width, dtype=np.float32)
+    x, y = obs["units"]["position"][target_team_id][unit_id]
+    if action[0] == Action.SAP:
+        dx, dy = action[1:]
+        nx = x + dx
+        ny = y + dy
+        if in_map((nx, ny)) and obs["units"]["energy"][target_team_id][unit_id] >= EnvParams.unit_sap_cost:
+            return Action.SAP + ny * EnvParams.map_width + nx
+        else:
+            return Action.CENTER
+    else:
+        return action[0]
 
-        validate_policy_map[:, y, x] = 1  # 行動は一旦全て有効化
 
-        for dir in [Action.UP, Action.RIGHT, Action.DOWN, Action.LEFT]:
-            if not can_move(pos, energy, dir, episode_store.tile_type_map, episode_store.unit_move_cost):
-                validate_policy_map[dir, y, x] = 0
+# def extract_action_per_unit(unit_id : int, action: tuple[Action, int, int], obs: dict[str, Any], target_team_id: int) -> np.ndarray:
+#     # action_map = np.zeros(len(Action)-1 + EnvParams.map_height*EnvParams.map_width, dtype=np.float32)
+#     action_map = np.zeros((2, EnvParams.map_width, EnvParams.map_height), dtype=np.float32)
+#     x, y = obs["units"]["position"][target_team_id][unit_id]
+#     if action[0] == Action.SAP:
+#         dx, dy = action[1:]
+#         nx = x + dx
+#         ny = y + dy
+#         if in_map((nx, ny)) and obs["units"]["energy"][target_team_id][unit_id] >= EnvParams.unit_sap_cost:
+#             action_map[1, ny, nx] = 1
+#         else:
+#             action_map[0, y, x] = 1
+#     else:
+#         nx, ny = calc_next_pos((x, y), action[0])
+#         action_map[0, ny, nx] = 1
+#     return action_map
 
-        if not can_sap(x, y, energy, episode_store.unit_sap_cost, episode_store.tile_type_map):
-            validate_policy_map[Action.SAP, y, x] = 0
+
+def get_valid_policy_map(obs: dict[str, Any], team_id: int, episode_store: EpisodeStore, unit_id: int) -> np.ndarray:
+    validate_policy_map = np.ones(len(Action) - 1 + EnvParams.map_width * EnvParams.map_height, dtype=np.float32)
+    pos = tuple(obs["units"]["position"][team_id][unit_id])
+    x, y = pos
+    energy = obs["units"]["energy"][team_id][unit_id]
+
+    for dir in [Action.UP, Action.RIGHT, Action.DOWN, Action.LEFT]:
+        if not can_move(pos, energy, dir, episode_store.tile_type_map, episode_store.unit_move_cost):
+            validate_policy_map[dir] = 0
+
+    if not can_sap(energy, episode_store.unit_sap_cost):
+        for y in range(EnvParams.map_height):
+            for x in range(EnvParams.map_width):
+                validate_policy_map[Action.SAP + y * EnvParams.map_width + x] = 0
     return validate_policy_map
+
+
+# def get_valid_policy_map(obs: dict[str, Any], team_id: int, episode_store: EpisodeStore) -> np.ndarray:
+#     validate_policy_map = np.zeros((len(Action), EnvParams.map_width, EnvParams.map_height), dtype=np.float32)
+#     available_unit_ids = np.where(obs["units_mask"][team_id])[0]
+#     for unit_id in available_unit_ids:
+#         pos = tuple(obs["units"]["position"][team_id][unit_id])
+#         x, y = pos
+#         energy = obs["units"]["energy"][team_id][unit_id]
+
+#         validate_policy_map[:, y, x] = 1  # 行動は一旦全て有効化
+
+#         for dir in [Action.UP, Action.RIGHT, Action.DOWN, Action.LEFT]:
+#             if not can_move(pos, energy, dir, episode_store.tile_type_map, episode_store.unit_move_cost):
+#                 validate_policy_map[dir, y, x] = 0
+
+#         if not can_sap(energy, episode_store.unit_sap_cost):
+#             validate_policy_map[Action.SAP, y, x] = 0
+#     return validate_policy_map
 
 
 def get_valid_sap_map(obs: dict[str, Any], team_id: int, episode_store: EpisodeStore) -> np.ndarray:
@@ -1426,5 +1513,5 @@ def can_move(pos: tuple[int, int], energy: int, dir: int, tile_type_map: np.ndar
     return True
 
 
-def can_sap(x: int, y: int, energy: int, unit_sap_cost: int, tile_type_map: np.ndarray):
-    return energy >= unit_sap_cost and tile_type_map[y, x] != TileType.ASTEROID
+def can_sap(energy: int, unit_sap_cost: int):
+    return energy >= unit_sap_cost

@@ -13,10 +13,10 @@ from lightning import seed_everything
 from lux.utils import (
     EpisodeStore,
     extract_state,
-    extract_action,
     extract_gt_state,
     extract_global_state,
     extract_hidden_state,
+    extract_action_per_unit,
     extract_hidden_global_state,
 )
 from tqdm.auto import tqdm
@@ -33,7 +33,7 @@ class Config:
     debug: bool = False
     use_gt: bool = False
     n_splits: int = 5
-    root_dir: Path = Path("/home/user/work")
+    root_dir: Path = Path("/home/kawattataido/デスクトップ/programing/kaggle/kaggle-luxai-s3")
     input_dir: Path = root_dir / "input"
     episode_dir: Path = root_dir / "output/feature_store/episodes"
     episode_path: Path = episode_dir / "episodes0210.csv"
@@ -98,6 +98,9 @@ class DataProcessor:
         if self.cfg.debug:
             episode_df = episode_df.sample(n=5, seed=self.cfg.seed)
             # episode_df = episode_df.filter(pl.col("EpisodeId") == 67293512)
+        # else:
+        # episode_df = episode_df.sample(n=len(episode_df)*self.cfg.reduction, seed=self.cfg.seed)
+        # print(f"sampled episode_df: {len(episode_df)}")
         return episode_df
 
     def _process_episode(self, row) -> tuple[str, int, int]:
@@ -120,6 +123,7 @@ class DataProcessor:
             episode_group = out_f.create_group(f"{episode_id}")
             episode_action_group = episode_group.create_group("actions")
             episode_state_group = episode_group.create_group("states")
+            episode_in_process_state_group = episode_group.create_group("in_process_states")
             episode_global_state_group = episode_group.create_group("global_states")
             episode_hidden_state_group = episode_group.create_group("hidden_states")
             episode_hidden_global_state_group = episode_group.create_group("hidden_global_states")
@@ -133,6 +137,7 @@ class DataProcessor:
             episode_store = EpisodeStore(target_team_id, env_params, self.cfg.validation, episode_id)
             steps = json_load["steps"]
             gt_env_params = EnvParams(**steps[0][0]["info"]["replay"]["params"])
+            acting_unit = None
             for step_idx in range(len(steps) - 1):  # 505でdoneとなるため-1
                 step_info = steps[step_idx]
                 next_step_info = steps[step_idx + 1]
@@ -150,8 +155,32 @@ class DataProcessor:
                 if self.cfg.use_gt:
                     state = extract_gt_state(gt_obs, target_team_id)
                 else:
-                    state = extract_state(obs, target_team_id, episode_store)
-                episode_state_group.create_dataset(f"{step_idx}", data=state)
+                    next_actions = next_step_info[target_team_id]["action"]
+                    unit_mask = obs["units_mask"][target_team_id]
+                    determined_actions = []
+                    for unit_id, action in enumerate(next_actions):
+                        if unit_mask[unit_id] == 0:
+                            continue
+                        determined_actions.append((unit_id, action))
+                    if len(determined_actions) == 0:
+                        acting_unit = None
+                        state = extract_state(obs, target_team_id, episode_store, {}, acting_unit)
+                    elif len(determined_actions) == 1:
+                        acting_unit = determined_actions[0][0]
+                        state = extract_state(obs, target_team_id, episode_store, {}, acting_unit)
+                    else:
+                        determined_actions_num = np.random.randint(0, len(determined_actions) - 1)
+                        # shuffleして前determined_actions_num個のみを取得
+                        np.random.shuffle(determined_actions)
+                        non_determined_actions = determined_actions[determined_actions_num:]
+                        determined_actions = determined_actions[:determined_actions_num]
+                        determined_actions_dict = dict(determined_actions)
+                        acting_unit = non_determined_actions[np.random.randint(0, len(non_determined_actions))][0]
+                        state = extract_state(obs, target_team_id, episode_store, determined_actions_dict, acting_unit)
+
+                episode_in_process_state_group.create_dataset(f"{step_idx}", data=state)
+                non_action_state = extract_state(obs, target_team_id, episode_store, {}, None)
+                episode_state_group.create_dataset(f"{step_idx}", data=non_action_state)
 
                 global_state = extract_global_state(obs, target_team_id, env_params, episode_store)
                 episode_global_state_group.create_dataset(f"{step_idx}", data=global_state)
@@ -163,7 +192,11 @@ class DataProcessor:
                 episode_hidden_global_state_group.create_dataset(f"{step_idx}", data=hidden_global_state)
 
                 next_actions = next_step_info[target_team_id]["action"]
-                action = extract_action(next_actions, obs, target_team_id)
+                action = (
+                    extract_action_per_unit(acting_unit, next_actions[acting_unit], obs, target_team_id)
+                    if acting_unit is not None
+                    else -1
+                )
                 episode_action_group.create_dataset(f"{step_idx}", data=action)
 
                 match_idx = obs["steps"] // (EnvParams.max_steps_in_match + 1)

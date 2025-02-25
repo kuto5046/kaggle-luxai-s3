@@ -10,7 +10,6 @@ import polars as pl
 import torch.nn.functional as F
 from torch import nn, optim
 from lightning import LightningModule, LightningDataModule
-from torchvision import transforms
 from torchmetrics import Accuracy, MetricCollection
 from transformers import get_cosine_schedule_with_warmup
 from torch.utils.data import Dataset, DataLoader
@@ -119,8 +118,8 @@ class LaxDataset(Dataset):
             for step_idx in range(1, int(max_step)):  # step_idx=0は初期状態なのでスキップ
                 self.ids.append((episode_id, step_idx))
         self.h5_file = h5py.File(self.cfg.feature_dir / "episodes.h5", "r")
-        self.transform_standardize = transforms.Compose([LuxAugmentStandardize()])
-        self.transform = transforms.Compose([LuxAugmentTranspose()])
+        # self.transform_standardize = transforms.Compose([LuxAugmentStandardize()])
+        # self.transform = transforms.Compose([LuxAugmentTranspose()])
         self.aug = cfg.aug
 
     def __len__(self) -> int:
@@ -141,6 +140,8 @@ class LaxDataset(Dataset):
                 global_state = np.zeros(len(GlobalState), dtype=np.float32)
             states.append(state)
             global_states.append(global_state)
+        states.pop()
+        states.append(np.array(self.h5_file[str(episode_id)]["in_process_states"][str(step_idx)]).astype(np.float32))
         state = np.stack(states, axis=0)  # (n_stack, channel, x, y)
         global_state = np.stack(global_states, axis=0)  # (n_stack, channel)
 
@@ -148,22 +149,29 @@ class LaxDataset(Dataset):
         hidden_global_state = np.array(self.h5_file[str(episode_id)]["hidden_global_states"][str(step_idx)]).astype(
             np.float32
         )
-        actions = np.array(self.h5_file[str(episode_id)]["actions"][str(step_idx)]).astype(np.float32)
-        action = actions[0]
-        sap = actions[1]
+        # action = self.h5_file[str(episode_id)]["actions"][str(step_idx)]
+        action = np.array(self.h5_file[str(episode_id)]["actions"][str(step_idx)]).astype(np.float32)
+        actions = np.zeros(len(Action) - 1 + EnvParams.map_height * EnvParams.map_width, dtype=np.float32)
+        if action is not None:
+            # スカラーnumpy配列の場合、item()でスカラー値を取得してからint型に変換
+            action_idx = int(action.item())
+            actions[action_idx] = 1
+        # actions = np.array(self.h5_file[str(episode_id)]["actions"][str(step_idx)]).astype(np.float32)
+        # action = actions[0]
+        # sap = actions[1]
         win = np.array(self.h5_file[str(episode_id)]["win"][str(step_idx)]).astype(np.float32)
         inputs = {
             "state": state,
             "global_state": global_state,
             "hidden_state": hidden_state,
             "hidden_global_state": hidden_global_state,
-            "action": action,
-            "sap": sap,
+            "action": actions,
+            # "sap": sap,
             "win": win,
         }
-        inputs = self.transform_standardize(inputs)
-        if self.mode == "train" and self.aug:
-            inputs = self.transform(inputs)
+        # inputs = self.transform_standardize(inputs)
+        # if self.mode == "train" and self.aug:
+        #     inputs = self.transform(inputs)
 
         return inputs
 
@@ -220,12 +228,12 @@ class LaxLitModel(LightningModule):
         self.model = LuxUNetModel(
             state_space_size=len(State),
             global_state_space_size=len(GlobalState),
-            action_space_size=len(Action),
+            # action_space_size=len(Action),
             hidden_state_space_size=len(HiddenState),
             n_stack=cfg.n_stack,
             res=cfg.res,
         )
-        self.criterion1 = DiceLoss(n_classes=len(Action))
+        self.criterion1 = DiceLoss(n_classes=1)
         # self.criterion1 = MaskedBCEWithLogitsLoss()
         self.criterion2 = nn.BCEWithLogitsLoss()
         self.criterion3 = nn.MSELoss()
@@ -249,7 +257,7 @@ class LaxLitModel(LightningModule):
         outputs = self(batch)
 
         policy_preds = torch.softmax(outputs["policy"], dim=1)
-        policy_targets = one_hot_encoder(batch["action"], n_classes=len(Action))
+        policy_targets = batch["action"]
         # policy_mask = (batch["state"][:, -1, State.OWN_UNIT_COUNT] > 0).unsqueeze(1)  # (batch_size, 1, w, h)
         # policy_loss = self.criterion1(policy_preds, policy_targets, policy_mask)
         policy_loss = self.criterion1(policy_preds, policy_targets)
@@ -318,16 +326,19 @@ class LaxLitModel(LightningModule):
             logger=True,
         )
 
-        preds = torch.softmax(outputs["policy"], dim=1).argmax(dim=1).flatten()
-        gts = batch["action"].flatten()
-        unit_masks = (batch["state"][:, -1, State.OWN_UNIT_COUNT] > 0).flatten()  # unitが存在するところだけで計算する
-
-        preds = preds[unit_masks]
-        gts = gts[unit_masks]
+        # batch["action"][i]がすべて0の場合は除くためのmask
+        all_zero_mask = torch.all(batch["action"] == 0, dim=1)
+        preds = torch.softmax(outputs["policy"], dim=1).argmax(dim=1)
+        gts = torch.softmax(batch["action"], dim=1).argmax(dim=1)
+        preds = preds[~all_zero_mask]
+        gts = gts[~all_zero_mask]
         if mode == "train":
             self.train_metrics.update(preds, gts)
         else:
             self.valid_metrics.update(preds, gts)
+            # Action.SAP以上はSAPにまとめる
+            gts = torch.where(gts >= len(Action) - 1, len(Action) - 1, gts)
+            preds = torch.where(preds >= len(Action) - 1, len(Action) - 1, preds)
             self.valid_outputs["ground_truth"].append(to_np(gts))
             self.valid_outputs["predictions"].append(to_np(preds))
         return loss
@@ -349,6 +360,10 @@ class LaxLitModel(LightningModule):
         ):
             # save_model(self.model, self.output_dir)
             self.trainer.callback_metrics["best_valid_loss"] = self.trainer.callback_metrics["Loss/valid"]
+            # class_names = [action.name for action in Action]
+            # class_names.pop()
+            # for i in range(EnvParams.map_height * EnvParams.map_width):
+            #     class_names.append(f"SAP ({i // EnvParams.map_width}, {i % EnvParams.map_width})")
             wandb.log(
                 {
                     "confusion_matrix": wandb.plot.confusion_matrix(
@@ -400,7 +415,7 @@ class LaxLitModel(LightningModule):
     def get_metrics(self) -> MetricCollection:
         return MetricCollection(
             [
-                Accuracy(task="multiclass", num_classes=len(Action)),
+                Accuracy(task="multiclass", num_classes=len(Action) - 1 + EnvParams.map_height * EnvParams.map_width),
             ]
         )
 
@@ -512,7 +527,7 @@ class LuxUNetModel(nn.Module):
         self,
         state_space_size: int,
         global_state_space_size: int,
-        action_space_size: int,
+        # action_space_size: int,
         hidden_state_space_size: int,
         n_stack: int,
         bilinear: bool = True,
@@ -531,17 +546,16 @@ class LuxUNetModel(nn.Module):
         self.up1 = Up(256 * 2 + global_state_space_size, 256 // factor, bilinear)
         self.up2 = Up(256, 128 // factor, bilinear)
         self.up3 = Up(128, 64, bilinear)
-        self.policy_net = OutConv(64 * n_stack, action_space_size)
+        self.policy_net = OutConv(64 * n_stack, 2)
         # self.sap_net = OutConv(64 * n_stack, 1)
         self.state_net = OutConv(64 * n_stack, hidden_state_space_size)
         self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
-        # self.value_net = nn.Sequential(
-        #     nn.Linear((256 + global_state_space_size) * n_stack, 128),
-        #     nn.ReLU(),
-        #     nn.Linear(128, 64),
-        #     nn.ReLU(),
-        #     nn.Linear(64, 1),
-        # )
+        self.policy_net2 = nn.Sequential(
+            nn.Linear(
+                EnvParams.map_height * EnvParams.map_width * 2,
+                EnvParams.map_height * EnvParams.map_width + len(Action) - 1,
+            ),
+        )
         self.global_state_net = nn.Sequential(
             nn.Linear((256 + global_state_space_size) * n_stack, 128),
             nn.ReLU(),
@@ -576,12 +590,13 @@ class LuxUNetModel(nn.Module):
         x = self.up3(x, x1)
 
         x = x.view(_n, -1, _x, _y)
-        policy_logits = self.policy_net(x)
+        policy_net2_input = self.policy_net(x)
+        policy_logits2 = self.policy_net2(policy_net2_input.view(-1, 24 * 24 * 2))
         # sap_logits = self.sap_net(x)
         state_logits = self.state_net(x)
 
         return {
-            "policy": policy_logits,
+            "policy": policy_logits2,
             # "sap": sap_logits,
             "state": state_logits,
             "global_state": global_state_logits,
