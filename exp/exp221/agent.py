@@ -285,31 +285,19 @@ class Agent:
                         unit_pos, opp_unit_positions, self.env_cfg["unit_sap_range"]
                     )
                     if len(nearby_enemy_unit_ids) > 0:
-                        # random shuffle nearby_enemy_unit_ids
-                        np.random.shuffle(nearby_enemy_unit_ids)
-                        for nearby_enemy_unit_id in nearby_enemy_unit_ids:
-                            if sap_pos_relative is not None:
-                                break
-                            sap_pos = opp_unit_positions[nearby_enemy_unit_id]
-                            if point_map[sap_pos[1], sap_pos[0]] == 1 or sap_pos in self.prev_opp_unit_positions:
-                                sap_pos_relative = calc_relative_pos(np.array(unit_pos), np.array(sap_pos))
-                            else:
-                                # 敵ユニットの隣接セルがポイント位置であればそこに移動すると考える。
-                                nearby_point_positions = get_nearby_point_positions(sap_pos, point_map)
-                                if len(nearby_point_positions) > 0:
-                                    sap_pos = nearby_point_positions[np.random.choice(len(nearby_point_positions))]
-                                    sap_pos_relative = calc_relative_pos(np.array(unit_pos), np.array(sap_pos))
+                        sap_pos_candidate = [
+                            (
+                                unit_id,
+                                len(get_nearby_enemy_unit_ids(opp_unit_positions[unit_id], opp_unit_positions, 1)),
+                            )
+                            for unit_id in nearby_enemy_unit_ids
+                        ]
+                        # get pos with max adjacent enemy units
+                        sap_max = max(sap_pos_candidate, key=lambda x: x[1])
+                        sap_pos_candidate = [x for x in sap_pos_candidate if x[1] == sap_max[1]]
+                        sap_pos = opp_unit_positions[np.random.choice([x[0] for x in sap_pos_candidate])]
+                        sap_pos_relative = calc_relative_pos(np.array(unit_pos), np.array(sap_pos))
 
-                        # sap_pos = opp_unit_positions[np.random.choice(nearby_enemy_unit_ids)]
-                        # # 敵ユニットが2ステップ以上動いていない場合はsapする
-                        # if point_map[sap_pos[1], sap_pos[0]] == 1 or sap_pos in self.prev_opp_unit_positions:
-                        #     sap_pos_relative = calc_relative_pos(np.array(unit_pos), np.array(sap_pos))
-                        # else:
-                        #     # 敵ユニットの隣接セルがポイント位置であればそこに移動すると考える。
-                        #     nearby_point_positions = get_nearby_point_positions(sap_pos, point_map)
-                        #     if len(nearby_point_positions) > 0:
-                        #         sap_pos = nearby_point_positions[np.random.choice(len(nearby_point_positions))]
-                        #         sap_pos_relative = calc_relative_pos(np.array(unit_pos), np.array(sap_pos))
                     next_pos = unit_pos  # SAPは現在位置として扱う
                     if sap_pos_relative is None:
                         continue
