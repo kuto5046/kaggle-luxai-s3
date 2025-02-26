@@ -165,7 +165,10 @@ class ILAgent:
             policy_map = output["policy"].squeeze().numpy()
             sap_map = output["sap"].squeeze().numpy()
             sap_map = sap_map.reshape(
-                EnvParams.map_height, EnvParams.map_width, EnvParams.max_sap_range, EnvParams.max_sap_range
+                EnvParams.map_height,
+                EnvParams.map_width,
+                2 * EnvParams.max_sap_range + 1,
+                2 * EnvParams.max_sap_range + 1,
             )
         if do_flip:
             policy_map = np.flip(policy_map, axis=(1, 2)).copy()
@@ -202,6 +205,17 @@ def get_legal_sap_policy(
 ) -> np.ndarray:
     legal_sap_map = np.zeros_like(sap_map)
     available_unit_ids = np.where(obs["units_mask"][team_id])[0]
+    # SAPマップにsoftmaxを適用する
+    # 各ユニットごとに独立してsoftmaxを適用
+    for unit_id in available_unit_ids:
+        y, x = obs["units"]["position"][team_id][unit_id]
+        # ユニットの位置に対応するSAPマップを取得
+        unit_sap_map = sap_map[y, x]
+        # softmaxを適用（値が0のセルは0のまま保持）
+        if unit_sap_map.sum() > 0:  # 有効なSAPがある場合のみ適用
+            unit_sap_map = softmax(unit_sap_map.flatten()).reshape(unit_sap_map.shape)
+            sap_map[y, x] = unit_sap_map
+
     for unit_id in available_unit_ids:
         unit_pos = obs["units"]["position"][team_id][unit_id]
         for dx in range(-EnvParams.unit_sap_range, EnvParams.unit_sap_range + 1):
@@ -213,6 +227,10 @@ def get_legal_sap_policy(
                     ] = 1
     # 無効な場所は0にする
     sap_map *= legal_sap_map
+    # print("sap_map", file=sys.stderr)
+    # print(sap_map, file=sys.stderr)
+    # print("legal_sap_map", file=sys.stderr)
+    # print(legal_sap_map, file=sys.stderr)
     return sap_map
 
 

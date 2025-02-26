@@ -110,13 +110,14 @@ def extract_results(
         state = extract_state(obs, target_team_id, episode_store)
         global_state = extract_global_state(obs, target_team_id, env_params, episode_store)
         gt_state = extract_gt_state(gt_obs, target_team_id)
-        policy_map, _ = model.predict(obs, target_team_id, episode_store)
+        policy_map, _, sap_map = model.predict(obs, target_team_id, episode_store)
 
         results["obs"].append(obs)
         results["state"].append(state)
         results["gt_state"].append(gt_state)
         results["global_state"].append(global_state)
         results["policy_map"].append(policy_map)
+        results["sap_map"].append(sap_map)
         results["action"].append(next_actions)  # その状態からどう行動したかを知りたいのnext_actions
     return results
 
