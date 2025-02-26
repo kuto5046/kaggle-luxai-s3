@@ -2,6 +2,7 @@ import random
 from typing import Any
 from pathlib import Path
 from dataclasses import dataclass
+from collections.abc import Callable
 
 import h5py
 import numpy as np
@@ -413,20 +414,69 @@ def one_hot_encoder(input_tensor: torch.Tensor, n_classes: int) -> torch.Tensor:
     return output_tensor.float()
 
 
+# https://github.com/IsaiahPressman/Kaggle_Lux_AI_2021/blob/main/lux_ai/nns/conv_blocks.py
+class SELayer(nn.Module):
+    def __init__(self, n_channels: int, reduction: int = 16):
+        super().__init__()
+        self.fc = nn.Sequential(
+            nn.Linear(n_channels, n_channels // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(n_channels // reduction, n_channels, bias=False),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        b, c, _, _ = x.shape
+        # Average feature planes
+        y = torch.flatten(x, start_dim=-2, end_dim=-1).mean(dim=-1)
+        y = self.fc(y.view(b, c)).view(b, c, 1, 1)
+        return x * y.expand_as(x)
+
+
+class LayerNorm2d(nn.Module):
+    def __init__(self, num_features, eps=1e-5, elementwise_affine=True):
+        """
+        入力が [N, C, H, W] の場合、各ピクセル位置ごとにチャンネル正規化を行う。
+        """
+        super().__init__()
+        self.ln = nn.LayerNorm(num_features, eps=eps, elementwise_affine=elementwise_affine)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [N, C, H, W] → [N, H, W, C]
+        x = x.permute(0, 2, 3, 1)
+        x = self.ln(x)
+        # [N, H, W, C] → [N, C, H, W]
+        return x.permute(0, 3, 1, 2)
+
+
 class DoubleConv(nn.Module):
     """(convolution => [BN] => ReLU) * 2"""
 
-    def __init__(self, in_channels: int, out_channels: int, mid_channels: int | None = None, res: bool = False) -> None:
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        mid_channels: int | None = None,
+        res: bool = False,
+        kernel_size: int = 3,
+        squeeze_excitation: bool = True,
+        layer_normalization: bool = True,
+    ) -> None:
         super().__init__()
         if not mid_channels:
             mid_channels = out_channels
+        if kernel_size % 2 == 0:
+            raise ValueError("kernel_size must be odd number")
+        padding = kernel_size // 2
+        normalization = LayerNorm2d if layer_normalization else nn.BatchNorm2d
         self.double_conv = nn.Sequential(
-            nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(mid_channels),
+            nn.Conv2d(in_channels, mid_channels, kernel_size=kernel_size, padding=padding, bias=False),
+            normalization(mid_channels),
             nn.ReLU(inplace=True),
-            nn.Conv2d(mid_channels, out_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(out_channels),
+            nn.Conv2d(mid_channels, out_channels, kernel_size=kernel_size, padding=padding, bias=False),
+            normalization(out_channels),
             nn.ReLU(inplace=True),
+            SELayer(out_channels) if squeeze_excitation else nn.Identity(),
         )
         self.res = res
         # 入力と出力のチャンネル数が異なる場合のための1x1 convolution
@@ -445,7 +495,10 @@ class Down(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, res: bool = False) -> None:
         super().__init__()
         self.maxpool = nn.MaxPool2d(2)
-        self.conv = DoubleConv(in_channels, out_channels, res=res)
+        self.conv = nn.Sequential(
+            DoubleConv(in_channels, out_channels, res=res, kernel_size=5, squeeze_excitation=True),
+            DoubleConv(out_channels, out_channels, res=res, kernel_size=5, squeeze_excitation=True),
+        )
         self.res = res
         # スキップコネクション用の1x1 convとダウンサンプリング
         if self.res:
@@ -468,7 +521,7 @@ class Up(nn.Module):
         # if bilinear, use the normal convolutions to reduce the number of channels
         if bilinear:
             self.up = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True)
-            self.conv = DoubleConv(in_channels, out_channels, in_channels // 2)
+            self.conv = DoubleConv(in_channels, out_channels, in_channels // 2, kernel_size=5, squeeze_excitation=True)
         else:
             self.up = nn.ConvTranspose2d(in_channels, in_channels // 2, kernel_size=2, stride=2)
             self.conv = DoubleConv(in_channels, out_channels)
@@ -574,7 +627,7 @@ class LuxUNetModel(nn.Module):
         x = self.up2(x, x2)
         x = self.up3(x, x1)
 
-        x = x.view(_n, -1, _x, _y)
+        x = x.reshape(_n, -1, _x, _y)
         policy_logits = self.policy_net(x)
         # sap_logits = self.sap_net(x)
         state_logits = self.state_net(x)
