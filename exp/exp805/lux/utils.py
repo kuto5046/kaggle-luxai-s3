@@ -1411,6 +1411,9 @@ def extract_sap_map(
 
     # sap_mask - 有効なsap範囲を示すマスク
     for unit_id in available_unit_ids:
+        # sap以外は学習しない
+        if actions[unit_id][0] != Action.SAP:
+            continue
         x, y = unit_positions[unit_id]
         # 中心からの距離がsap_range以下の場所を1にする
         for dx in range(-sap_range, sap_range + 1):
