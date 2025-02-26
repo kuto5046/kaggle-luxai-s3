@@ -520,29 +520,26 @@ class LuxUNetModel(nn.Module):
         super().__init__()
         self.bilinear = bilinear
 
-        self.inc = DoubleConv(state_space_size, 64, res=res)
-        self.down1 = Down(64, 128, res=res)
-        self.down2 = Down(128, 256, res=res)
-        self.down3 = Down(256, 256, res=res)
+        self.inc = nn.Sequential(
+            nn.Conv2d(state_space_size, 128, kernel_size=1),
+            nn.LeakyReLU(inplace=True)
+        )
 
-        #
+        self.down1 = Down(128, 256, res=res)
+        self.down2 = Down(256, 512, res=res)
+        self.down3 = Down(512, 512, res=res)
+
         factor = 2 if bilinear else 1
-        self.up1 = Up(256 * 2 + global_state_space_size, 256 // factor, bilinear)
-        self.up2 = Up(256, 128 // factor, bilinear)
-        self.up3 = Up(128, 64, bilinear)
+        self.up1 = Up(1024 + global_state_space_size, 512 // factor, bilinear)
+        self.up2 = Up(256 + 256, 256 // factor, bilinear)
+        self.up3 = Up(128 + 128, 64, bilinear)
+
         self.policy_net = OutConv(64 * n_stack, action_space_size)
-        # self.sap_net = OutConv(64 * n_stack, 1)
         self.state_net = OutConv(64 * n_stack, hidden_state_space_size)
         self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
-        # self.value_net = nn.Sequential(
-        #     nn.Linear((256 + global_state_space_size) * n_stack, 128),
-        #     nn.ReLU(),
-        #     nn.Linear(128, 64),
-        #     nn.ReLU(),
-        #     nn.Linear(64, 1),
-        # )
+        
         self.global_state_net = nn.Sequential(
-            nn.Linear((256 + global_state_space_size) * n_stack, 128),
+            nn.Linear((512 + global_state_space_size) * n_stack, 128),
             nn.ReLU(),
             nn.Linear(128, 64),
             nn.ReLU(),
@@ -576,17 +573,14 @@ class LuxUNetModel(nn.Module):
 
         x = x.view(_n, -1, _x, _y)
         policy_logits = self.policy_net(x)
-        # sap_logits = self.sap_net(x)
         state_logits = self.state_net(x)
 
         return {
             "policy": policy_logits,
-            # "sap": sap_logits,
             "state": state_logits,
             "global_state": global_state_logits,
-            # "value": value_logits,
-        }
-
+        }  
+      
 
 def save_model(model, output_dir: Path, latest: bool = False):
     if latest:
