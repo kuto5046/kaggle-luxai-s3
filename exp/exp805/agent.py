@@ -17,7 +17,6 @@ from lux.utils import (
     in_map,
     calc_next_pos,
     extract_state,
-    get_valid_sap_map,
     extract_global_state,
     get_valid_policy_map,
 )
@@ -164,7 +163,10 @@ class ILAgent:
             if torch.cuda.is_available():
                 output = {k: v.cpu() for k, v in output.items()}
             policy_map = output["policy"].squeeze().numpy()
-
+            sap_map = output["sap"].squeeze().numpy()
+            sap_map = sap_map.reshape(
+                EnvParams.map_height, EnvParams.map_width, EnvParams.max_sap_range, EnvParams.max_sap_range
+            )
         if do_flip:
             policy_map = np.flip(policy_map, axis=(1, 2)).copy()
             policy_map[Action.UP], policy_map[Action.DOWN] = (
@@ -175,11 +177,13 @@ class ILAgent:
                 policy_map[Action.RIGHT].copy(),
                 policy_map[Action.LEFT].copy(),
             )
+            sap_map = np.flip(sap_map, axis=(0, 1, 2, 3)).copy()
 
         policy_map = get_legal_policy(obs, policy_map, team_id, episode_store)
+        sap_map = get_legal_sap_policy(obs, sap_map, team_id, episode_store)
         point_map = state[State.POINTS]
 
-        return policy_map, point_map
+        return policy_map, point_map, sap_map
 
 
 def get_legal_policy(
@@ -196,7 +200,17 @@ def get_legal_policy(
 def get_legal_sap_policy(
     obs: dict[str, Any], sap_map: np.ndarray, team_id: int, episode_store: EpisodeStore
 ) -> np.ndarray:
-    legal_sap_map = get_valid_sap_map(obs, team_id, episode_store)
+    legal_sap_map = np.zeros_like(sap_map)
+    available_unit_ids = np.where(obs["units_mask"][team_id])[0]
+    for unit_id in available_unit_ids:
+        unit_pos = obs["units"]["position"][team_id][unit_id]
+        for dx in range(-EnvParams.unit_sap_range, EnvParams.unit_sap_range + 1):
+            for dy in range(-EnvParams.unit_sap_range, EnvParams.unit_sap_range + 1):
+                sap_pos = (unit_pos[0] + dx, unit_pos[1] + dy)
+                if in_map(sap_pos):
+                    legal_sap_map[
+                        unit_pos[1], unit_pos[0], dy + EnvParams.max_sap_range, dx + EnvParams.max_sap_range
+                    ] = 1
     # 無効な場所は0にする
     sap_map *= legal_sap_map
     return sap_map
@@ -227,7 +241,7 @@ class Agent:
             self.episode_store.reset()
         else:
             self.episode_store.update(obs, self.prev_actions)
-        policy_map, point_map = imitation_model.predict(obs, self.team_id, self.episode_store)
+        policy_map, point_map, sap_map = imitation_model.predict(obs, self.team_id, self.episode_store)
 
         unit_mask = np.array(obs["units_mask"][self.team_id])  # shape (max_units, )
         unit_positions = np.array(obs["units"]["position"][self.team_id])  # shape (max_units, 2)
@@ -238,12 +252,12 @@ class Agent:
         if len(available_unit_ids) > 1 and self.cfg.overlap_penalty > 0:
             actions = np.zeros((self.env_cfg["max_units"], 3), dtype=int)
             self._assign_actions_with_flow(
-                actions, available_unit_ids, unit_positions, policy_map, point_map, obs, opp_unit_positions
+                actions, available_unit_ids, unit_positions, policy_map, point_map, obs, opp_unit_positions, sap_map
             )
         else:
             actions = np.zeros((self.env_cfg["max_units"], 3), dtype=int)
             self._assign_greedy_actions(
-                actions, available_unit_ids, unit_positions, policy_map, point_map, obs, opp_unit_positions
+                actions, available_unit_ids, unit_positions, policy_map, point_map, obs, opp_unit_positions, sap_map
             )
 
         self.prev_opp_unit_positions = opp_unit_positions
@@ -251,7 +265,7 @@ class Agent:
         return actions
 
     def _assign_actions_with_flow(
-        self, actions, available_unit_ids, unit_positions, policy_map, point_map, obs, opp_unit_positions
+        self, actions, available_unit_ids, unit_positions, policy_map, point_map, obs, opp_unit_positions, sap_map
     ):
         """最小費用流問題としてグリッドへの割り当てを解く"""
         # self._assign_greedy_actions(
@@ -280,27 +294,13 @@ class Agent:
             for action in range(len(Action)):
                 sap_pos_relative = None
                 if action == Action.SAP:
-                    # 範囲内にいる敵ユニットを取得
-                    nearby_enemy_unit_ids = get_nearby_enemy_unit_ids(
-                        unit_pos, opp_unit_positions, self.env_cfg["unit_sap_range"]
-                    )
-                    if len(nearby_enemy_unit_ids) > 0:
-                        sap_pos_candidate = [
-                            (
-                                unit_id,
-                                len(get_nearby_enemy_unit_ids(opp_unit_positions[unit_id], opp_unit_positions, 1)),
-                            )
-                            for unit_id in nearby_enemy_unit_ids
-                        ]
-                        # get pos with max adjacent enemy units
-                        sap_max = max(sap_pos_candidate, key=lambda x: x[1])
-                        sap_pos_candidate = [x for x in sap_pos_candidate if x[1] == sap_max[1]]
-                        sap_pos = opp_unit_positions[np.random.choice([x[0] for x in sap_pos_candidate])]
-                        sap_pos_relative = calc_relative_pos(np.array(unit_pos), np.array(sap_pos))
-
-                    next_pos = unit_pos  # SAPは現在位置として扱う
-                    if sap_pos_relative is None:
-                        continue
+                    next_pos = unit_pos  # SAPは移動しない
+                    # ユニットの位置に対応するsap_mapを取得
+                    unit_sap_map = sap_map[y, x]
+                    if unit_sap_map.sum() > 0:  # 有効なSAPがある場合
+                        sap_pos_relative = get_sap_pos_relative(unit_sap_map)
+                    else:
+                        continue  # 有効なSAPがない場合はこのアクションをスキップ
                 else:
                     next_pos = calc_next_pos(unit_pos, action)
                     if not in_map(next_pos):
@@ -361,7 +361,7 @@ class Agent:
         if flow_result == -1:
             print("flow=-1", file=sys.stderr)
             self._assign_greedy_actions(
-                actions, available_unit_ids, unit_positions, policy_map, point_map, obs, opp_unit_positions
+                actions, available_unit_ids, unit_positions, policy_map, point_map, obs, opp_unit_positions, sap_map
             )
             return
 
@@ -387,7 +387,7 @@ class Agent:
         # print(f"Flow assignment took {(end_time - start_time) * 1000:.1f} ms")  # ミリ秒単位で表示
 
     def _assign_greedy_actions(
-        self, actions, available_unit_ids, unit_positions, policy_map, point_map, obs, opp_unit_positions
+        self, actions, available_unit_ids, unit_positions, policy_map, point_map, obs, opp_unit_positions, sap_map
     ):
         for unit_id in available_unit_ids:
             unit_pos = unit_positions[unit_id]
@@ -407,27 +407,20 @@ class Agent:
 
                 # print(policy, file=sys.stderr)
                 if action == Action.SAP:
-                    # 範囲内にいる敵ユニットを取得
-                    nearby_enemy_unit_ids = get_nearby_enemy_unit_ids(
-                        unit_pos, opp_unit_positions, self.env_cfg["unit_sap_range"]
-                    )
-                    if len(nearby_enemy_unit_ids) > 0:
-                        sap_pos = opp_unit_positions[np.random.choice(nearby_enemy_unit_ids)]
-                        # 敵ユニットが2ステップ以上動いていない場合はsapする
-                        if point_map[sap_pos[1], sap_pos[0]] == 1 or sap_pos in self.prev_opp_unit_positions:
-                            dx, dy = calc_relative_pos(unit_pos, sap_pos)
-                            actions[unit_id] = [Action.SAP, dx, dy]
-                            break
+                    # ユニットの位置に対応するsap_mapを取得
+                    unit_sap_map = sap_map[y, x]
+                    if unit_sap_map.sum() > 0:  # 有効なSAPがある場合
+                        sap_pos_relative = get_sap_pos_relative(unit_sap_map)
+                        actions[unit_id] = [Action.SAP, sap_pos_relative[0], sap_pos_relative[1]]
+                    else:
+                        # 有効なSAPがない場合はCENTERを選択
+                        policy[Action.SAP] = 0
+                        if policy.sum() > 0:
+                            policy = policy / policy.sum()
+                            continue  # 再度アクションを選択
                         else:
-                            # 敵ユニットの隣接セルがポイント位置であればそこに移動すると考える。
-                            nearby_point_positions = get_nearby_point_positions(sap_pos, point_map)
-                            if len(nearby_point_positions) > 0:
-                                sap_pos = nearby_point_positions[np.random.choice(len(nearby_point_positions))]
-                                dx, dy = calc_relative_pos(unit_pos, sap_pos)
-                                actions[unit_id] = [Action.SAP, dx, dy]
-                                break
-
-                    policy[Action.SAP] = 0
+                            actions[unit_id] = [Action.CENTER, 0, 0]
+                    break
                 else:
                     actions[unit_id] = [action, 0, 0]
                     break
@@ -436,6 +429,12 @@ class Agent:
 # 相対位置を計算
 def calc_relative_pos(base_pos: np.ndarray, target_pos: np.ndarray) -> np.ndarray:
     return target_pos - base_pos
+
+
+# sap policyから貪欲にsapする位置を取得
+def get_sap_pos_relative(sap_map: np.ndarray) -> tuple[int, int]:
+    sap_pos_yx = np.unravel_index(sap_map.argmax(), sap_map.shape)
+    return sap_pos_yx[1] - EnvParams.max_sap_range, sap_pos_yx[0] - EnvParams.max_sap_range
 
 
 # マスの半径kマス以内に該当するかどうか
