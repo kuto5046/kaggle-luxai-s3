@@ -27,6 +27,7 @@ class EnvParams:
     The unit sap cost is the amount of energy a unit uses when it saps another unit. Can change between games.
     """
     unit_sap_range: int = 4
+    max_sap_range: int = 7
     """
     The unit sap range is the range of the unit's sap action.
     """

@@ -1356,6 +1356,51 @@ def extract_action(actions: np.ndarray, obs: dict[str, Any], target_team_id: int
     return action_map
 
 
+def extract_sap_map(
+    actions: np.ndarray, opp_actions: np.ndarray, obs: dict[str, Any], target_team_id: int, sap_dropoff_factor: float
+) -> np.ndarray:
+    sap_map = np.zeros(
+        (EnvParams.max_units, 1 + 2 * EnvParams.max_sap_range, 1 + 2 * EnvParams.max_sap_range), dtype=np.float32
+    )
+    unit_masks = np.array(obs["units_mask"][target_team_id])  # (max_units, )
+    unit_positions = np.array(obs["units"]["position"][target_team_id])  # (max_units, 2)
+    opp_unit_masks = np.array(obs["units_mask"][1 - target_team_id])  # (max_units, )
+    opp_unit_positions = np.array(obs["units"]["position"][1 - target_team_id])  # (max_units, 2)
+
+    available_unit_ids = np.where(unit_masks)[0]
+    for unit_id in available_unit_ids:
+        x, y = unit_positions[unit_id]
+        # soft label - 敵の行動を予測, sapがどれだけ命中するか
+        for opp_unit_id in np.where(opp_unit_masks)[0]:
+            opp_x, opp_y = opp_unit_positions[opp_unit_id]
+            opp_x, opp_y = calc_next_pos((opp_x, opp_y), opp_actions[opp_unit_id][0])
+            dx, dy = opp_x - x, opp_y - y
+            if abs(dx) <= EnvParams.max_sap_range and abs(dy) <= EnvParams.max_sap_range:
+                sap_map[unit_id, dy + EnvParams.max_sap_range, dx + EnvParams.max_sap_range] += 0.1
+            # adj cells
+            for ddx in [-1, 0, 1]:
+                for ddy in [-1, 0, 1]:
+                    if ddx == 0 and ddy == 0:
+                        continue
+                    nx, ny = opp_x + ddx, opp_y + ddy
+                    if in_map((nx, ny)):
+                        adj_dx, adj_dy = nx - x, ny - y
+                        if abs(adj_dx) <= EnvParams.max_sap_range and abs(adj_dy) <= EnvParams.max_sap_range:
+                            sap_map[unit_id, adj_dy + EnvParams.max_sap_range, adj_dx + EnvParams.max_sap_range] += (
+                                0.1 * sap_dropoff_factor
+                            )
+
+        # dropoffがなく敵が多すぎるとsap_mapが大きくなるのでclipしておく
+        sap_map[unit_id] = np.clip(sap_map[unit_id], 0, 0.5)
+
+        # hard label - imitation learning
+        if actions[unit_id][0] == Action.SAP:
+            dx, dy = actions[unit_id][1:]
+            sap_map[unit_id, dy + EnvParams.max_sap_range, dx + EnvParams.max_sap_range] = 1
+
+    return sap_map
+
+
 def get_valid_policy_map(obs: dict[str, Any], team_id: int, episode_store: EpisodeStore) -> np.ndarray:
     validate_policy_map = np.zeros((len(Action), EnvParams.map_width, EnvParams.map_height), dtype=np.float32)
     available_unit_ids = np.where(obs["units_mask"][team_id])[0]

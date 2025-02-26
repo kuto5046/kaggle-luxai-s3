@@ -1,3 +1,4 @@
+import gzip
 import json
 import shutil
 import logging
@@ -14,6 +15,7 @@ from lux.utils import (
     EpisodeStore,
     extract_state,
     extract_action,
+    extract_sap_map,
     extract_gt_state,
     extract_global_state,
     extract_hidden_state,
@@ -33,10 +35,10 @@ class Config:
     debug: bool = False
     use_gt: bool = False
     n_splits: int = 5
-    root_dir: Path = Path("/home/user/work")
+    root_dir: Path = Path("/home/task/kaggle/kaggle-luxai-s3")
     input_dir: Path = root_dir / "input"
-    episode_dir: Path = root_dir / "output/feature_store/luxai-s3-frog-parade-42704976/episodes"
-    episode_path: Path = episode_dir / "episodes.csv"
+    episode_dir: Path = root_dir / "output/feature_store/episodes"
+    episode_path: Path = episode_dir / "episodes_5k.csv"
     feature_dir: Path = root_dir / f"output/feature_store/{exp_name}"
     target_team_name: str = "Frog Parade"
     target_sub_ids: list[int] = field(default_factory=lambda: [42704976])
@@ -103,10 +105,10 @@ class DataProcessor:
     def _process_episode(self, row) -> tuple[str, int, int]:
         sub_id = row["SubmissionId"]
         episode_id = row["EpisodeId"]
-        episode_path = self.episode_dir / f"{sub_id}/{episode_id}.json"
+        episode_path = self.episode_dir / f"{sub_id}/{episode_id}.json.gz"
 
         try:
-            with open(episode_path) as f:
+            with gzip.open(episode_path, "rt") as f:
                 json_load = json.load(f)
         except json.JSONDecodeError as e:
             print(f"EpisodeId {episode_id}: {e}")
@@ -119,6 +121,7 @@ class DataProcessor:
         with h5py.File(self.feature_dir / f"temp_{episode_id}.h5", "w") as out_f:
             episode_group = out_f.create_group(f"{episode_id}")
             episode_action_group = episode_group.create_group("actions")
+            episode_sap_map_group = episode_group.create_group("sap_maps")
             episode_state_group = episode_group.create_group("states")
             episode_global_state_group = episode_group.create_group("global_states")
             episode_hidden_state_group = episode_group.create_group("hidden_states")
@@ -165,6 +168,12 @@ class DataProcessor:
                 next_actions = next_step_info[target_team_id]["action"]
                 action = extract_action(next_actions, obs, target_team_id)
                 episode_action_group.create_dataset(f"{step_idx}", data=action)
+
+                opp_next_actions = next_step_info[1 - target_team_id]["action"]
+                # should use actual value?
+                sap_dropoff_factor = episode_store.energy_attack_guesser.get_sap_dropoff_factor_estimate()[0]
+                sap_map = extract_sap_map(next_actions, opp_next_actions, obs, target_team_id, sap_dropoff_factor)
+                episode_sap_map_group.create_dataset(f"{step_idx}", data=sap_map)
 
                 match_idx = obs["steps"] // (EnvParams.max_steps_in_match + 1)
                 is_win = match_results[match_idx]
