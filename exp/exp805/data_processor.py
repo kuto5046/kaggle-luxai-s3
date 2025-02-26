@@ -19,6 +19,7 @@ from lux.utils import (
     extract_gt_state,
     extract_global_state,
     extract_hidden_state,
+    extract_unit_positions,
     extract_hidden_global_state,
 )
 from tqdm.auto import tqdm
@@ -121,7 +122,8 @@ class DataProcessor:
         with h5py.File(self.feature_dir / f"temp_{episode_id}.h5", "w") as out_f:
             episode_group = out_f.create_group(f"{episode_id}")
             episode_action_group = episode_group.create_group("actions")
-            episode_sap_map_group = episode_group.create_group("sap_maps")
+            episode_sap_group = episode_group.create_group("sap")
+            episode_unit_group = episode_group.create_group("unit_positions")
             episode_state_group = episode_group.create_group("states")
             episode_global_state_group = episode_group.create_group("global_states")
             episode_hidden_state_group = episode_group.create_group("hidden_states")
@@ -154,29 +156,37 @@ class DataProcessor:
                     state = extract_gt_state(gt_obs, target_team_id)
                 else:
                     state = extract_state(obs, target_team_id, episode_store)
-                episode_state_group.create_dataset(f"{step_idx}", data=state)
+                episode_state_group.create_dataset(f"{step_idx}", data=state, compression="gzip")
 
                 global_state = extract_global_state(obs, target_team_id, env_params, episode_store)
-                episode_global_state_group.create_dataset(f"{step_idx}", data=global_state)
+                episode_global_state_group.create_dataset(f"{step_idx}", data=global_state, compression="gzip")
 
                 hidden_state = extract_hidden_state(gt_obs, target_team_id)
-                episode_hidden_state_group.create_dataset(f"{step_idx}", data=hidden_state)
+                episode_hidden_state_group.create_dataset(f"{step_idx}", data=hidden_state, compression="gzip")
 
                 hidden_global_state = extract_hidden_global_state(gt_env_params)
-                episode_hidden_global_state_group.create_dataset(f"{step_idx}", data=hidden_global_state)
+                episode_hidden_global_state_group.create_dataset(
+                    f"{step_idx}", data=hidden_global_state, compression="gzip"
+                )
 
                 next_actions = next_step_info[target_team_id]["action"]
                 action = extract_action(next_actions, obs, target_team_id)
-                episode_action_group.create_dataset(f"{step_idx}", data=action)
+                episode_action_group.create_dataset(f"{step_idx}", data=action, compression="gzip")
 
                 opp_next_actions = next_step_info[1 - target_team_id]["action"]
                 # should use actual value?
                 sap_dropoff_factor = episode_store.energy_attack_guesser.get_sap_dropoff_factor_estimate()[0]
-                sap_map = extract_sap_map(next_actions, opp_next_actions, obs, target_team_id, sap_dropoff_factor)
-                episode_sap_map_group.create_dataset(f"{step_idx}", data=sap_map)
+                sap = extract_sap_map(
+                    next_actions, opp_next_actions, obs, target_team_id, env_params.unit_sap_range, sap_dropoff_factor
+                )
+                episode_sap_group.create_dataset(f"{step_idx}", data=sap, compression="gzip")
+
+                unit_positions = extract_unit_positions(obs, target_team_id)
+                episode_unit_group.create_dataset(f"{step_idx}", data=unit_positions, compression="gzip")
 
                 match_idx = obs["steps"] // (EnvParams.max_steps_in_match + 1)
                 is_win = match_results[match_idx]
+                # スカラー値は圧縮できないのでcompressionは指定しない
                 episode_win_group.create_dataset(f"{step_idx}", data=is_win)
 
         return str(episode_id), len(steps) - 1, target_team_id, is_win
@@ -194,7 +204,7 @@ class DataProcessor:
 
         # 一時ファイルを1つのh5ファイルにマージ
         with h5py.File(self.feature_dir / "episodes.h5", "w") as out_f:
-            for episode_id in valid_ids:
+            for episode_id in tqdm(valid_ids):
                 temp_path = self.feature_dir / f"temp_{episode_id}.h5"
                 with h5py.File(temp_path, "r") as temp_f:
                     temp_f.copy(f"{episode_id}", out_f)

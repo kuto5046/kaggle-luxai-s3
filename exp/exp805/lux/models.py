@@ -18,7 +18,7 @@ from torch.utils.data import Dataset, DataLoader
 
 import wandb
 
-from .utils import State, Action, GlobalState, HiddenState, HiddenGlobalState, to_np
+from .utils import Sap, State, Action, GlobalState, HiddenState, HiddenGlobalState, to_np
 from .params import EnvParams
 
 
@@ -61,7 +61,7 @@ class LuxAugmentStandardize(LuxAugmentBase):
         hidden_state = inputs["hidden_state"].copy()
         action = inputs["action"].copy()
         sap = inputs["sap"].copy()
-
+        unit_positions = inputs["unit_positions"].copy()
         # 原点を自陣とする
         # TODO agent_id を用いて自陣を判定する
         visit_count = state[:, State.VISIT_COUNT]
@@ -75,12 +75,14 @@ class LuxAugmentStandardize(LuxAugmentBase):
             action = np.flip(action, axis=(0, 1)).copy()
             action = self.switch_action(action, Action.UP, Action.DOWN)
             action = self.switch_action(action, Action.LEFT, Action.RIGHT)
-            sap = np.flip(sap, axis=(0, 1)).copy()
-
+            sap = np.flip(sap, axis=(2, 3)).copy()  # (len(Sap), max_units, 1+2*max_sap_range, 1+2*max_sap_range)
+            unit_positions[:, 0] = state.shape[3] - 1 - unit_positions[:, 0]  # (max_units, 2), 2 = x, y
+            unit_positions[:, 1] = state.shape[2] - 1 - unit_positions[:, 1]
         inputs["state"] = state
         inputs["hidden_state"] = hidden_state
         inputs["action"] = action
         inputs["sap"] = sap
+        inputs["unit_positions"] = unit_positions
         return inputs
 
 
@@ -94,6 +96,7 @@ class LuxAugmentTranspose(LuxAugmentBase):
         hidden_state = inputs["hidden_state"].copy()
         action = inputs["action"].copy()
         sap = inputs["sap"].copy()
+        unit_positions = inputs["unit_positions"].copy()
 
         if random.random() < self.p:
             state = np.transpose(state, (0, 1, 3, 2)).copy()
@@ -101,12 +104,14 @@ class LuxAugmentTranspose(LuxAugmentBase):
             action = np.transpose(action, (1, 0)).copy()
             action = self.switch_action(action, Action.UP, Action.LEFT)
             action = self.switch_action(action, Action.DOWN, Action.RIGHT)
-            sap = np.transpose(sap, (1, 0)).copy()
+            sap = np.transpose(sap, (0, 1, 3, 2)).copy()  # (len(Sap), max_units, 1+2*max_sap_range, 1+2*max_sap_range)
+            unit_positions[:, [0, 1]] = unit_positions[:, [1, 0]]  # (max_units, 2), 2 = x, y
 
         inputs["state"] = state
         inputs["hidden_state"] = hidden_state
         inputs["action"] = action
         inputs["sap"] = sap
+        inputs["unit_positions"] = unit_positions
         return inputs
 
 
@@ -151,7 +156,8 @@ class LaxDataset(Dataset):
         )
         actions = np.array(self.h5_file[str(episode_id)]["actions"][str(step_idx)]).astype(np.float32)
         action = actions[0]
-        sap = actions[1]
+        sap = np.array(self.h5_file[str(episode_id)]["sap"][str(step_idx)]).astype(np.float32)
+        unit_positions = np.array(self.h5_file[str(episode_id)]["unit_positions"][str(step_idx)]).astype(np.int32)
         win = np.array(self.h5_file[str(episode_id)]["win"][str(step_idx)]).astype(np.float32)
         inputs = {
             "state": state,
@@ -160,6 +166,7 @@ class LaxDataset(Dataset):
             "hidden_global_state": hidden_global_state,
             "action": action,
             "sap": sap,
+            "unit_positions": unit_positions,
             "win": win,
         }
         inputs = self.transform_standardize(inputs)
@@ -246,7 +253,7 @@ class LaxLitModel(LightningModule):
     def validation_step(self, batch: Any, batch_idx: int) -> torch.Tensor:
         return self._share_step(batch, mode="valid")
 
-    def _share_step(self, batch: Any, mode: str = "train") -> torch.Tensor:
+    def _share_step(self, batch: dict[str, torch.Tensor], mode: str = "train") -> torch.Tensor:
         outputs = self(batch)
 
         policy_preds = torch.softmax(outputs["policy"], dim=1)
@@ -259,14 +266,53 @@ class LaxLitModel(LightningModule):
         state_loss = self.criterion3(outputs["state"].flatten(), batch["hidden_state"].flatten())
         global_state_loss = self.criterion3(outputs["global_state"].flatten(), batch["hidden_global_state"].flatten())
 
-        # sap_available_mask = (batch["state"][:, -1, State.SAP_AVAILABLE_AREA] > 0)  # (batch_size, w, h)
-        # sap_loss = self.criterion4(outputs["sap"].squeeze(1), batch["sap"], sap_available_mask)
+        unit_positions = batch["unit_positions"]  # (batch_size, max_units, 2)
+        sap_preds = outputs["sap"]  # (batch, height, width, (1+2*max_sap_range)*(1+2*max_sap_range))
+        batch_size, sap_dim, height, width = sap_preds.shape
+        # チャネル次元を最後に移動 (batch_size, sap_dim, height, width) -> (batch_size, height, width, sap_dim)
+        sap_preds = sap_preds.permute(0, 2, 3, 1)
+        # SAPの範囲パラメータ
+        max_sap_range = EnvParams.max_sap_range
+        sap_window_size = 1 + 2 * max_sap_range
+
+        # 次元を確認
+        assert (
+            sap_dim == sap_window_size * sap_window_size
+        ), f"予想されるSAP次元と一致しません: {sap_dim} != {sap_window_size * sap_window_size}"
+
+        # SAPマップを適切な形状に変形 (batch_size, height, width, sap_dim) -> (batch_size, height, width, sap_window_size, sap_window_size)
+        sap_preds = sap_preds.reshape(batch_size, height, width, sap_window_size, sap_window_size)
+
+        # ターゲットとマスクを取得
+        sap_targets = batch["sap"][:, Sap.SAP_MAP, :, :]  # (batch_size, max_units, sap_window_size, sap_window_size)
+        sap_available_mask = batch["sap"][
+            :, Sap.SAP_MASK, :, :
+        ]  # (batch_size, max_units, sap_window_size, sap_window_size)
+
+        # ユニット位置の抽出
+        batch_size, max_units, _ = unit_positions.shape
+
+        # バッチとユニットの次元をフラット化して簡単にインデックス付けできるようにする
+        flat_batch_indices = torch.arange(batch_size, device=unit_positions.device).repeat_interleave(max_units)
+
+        # ユニットの位置座標を取得
+        positions = unit_positions.view(-1, 2)
+        x_positions = positions[:, 0]
+        y_positions = positions[:, 1]
+
+        # 各ユニット位置でのSAP予測を取得
+        unit_sap_preds = sap_preds[flat_batch_indices, y_positions, x_positions]
+        # ターゲット形式に合わせて形状を変更
+        unit_sap_preds = unit_sap_preds.view(batch_size, max_units, sap_window_size, sap_window_size)
+
+        sap_loss = self.criterion4(unit_sap_preds, sap_targets, sap_available_mask)
+
         loss = (
             policy_loss * self.cfg.loss_weight_policy
             + state_loss * self.cfg.loss_weight_state
             # + value_loss * self.cfg.loss_weight_value
             + global_state_loss * self.cfg.loss_weight_global_state
-            # + sap_loss * self.cfg.loss_weight_sap
+            + sap_loss * self.cfg.loss_weight_sap
         )
 
         self.log(
@@ -277,14 +323,14 @@ class LaxLitModel(LightningModule):
             prog_bar=False,
             logger=True,
         )
-        # self.log(
-        #     f"SapLoss/{mode}",
-        #     sap_loss,
-        #     on_step=False,
-        #     on_epoch=True,
-        #     prog_bar=False,
-        #     logger=True,
-        # )
+        self.log(
+            f"SapLoss/{mode}",
+            sap_loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+        )
         # self.log(
         #     f"ValueLoss/{mode}",
         #     value_loss,
@@ -713,6 +759,7 @@ class LuxUNetModel(nn.Module):
         n_stack: int,
         bilinear: bool = True,
         res: bool = False,
+        max_sap_range: int = 7,
     ) -> None:
         super().__init__()
 
@@ -736,6 +783,7 @@ class LuxUNetModel(nn.Module):
         )
 
         self.policy_net = OutConv(self.hidden_dim, action_space_size)
+        self.sap_net = OutConv(self.hidden_dim, (max_sap_range * 2 + 1) * (max_sap_range * 2 + 1))
         self.state_net = OutConv(self.hidden_dim, hidden_state_space_size)
         self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
         self.global_state_net = nn.Sequential(
@@ -792,10 +840,11 @@ class LuxUNetModel(nn.Module):
         global_state_logits = self.global_state_net(x_global)
 
         policy_logits = self.policy_net(x)
+        sap_logits = self.sap_net(x)
         state_logits = self.state_net(x)
-
         return {
             "policy": policy_logits,
+            "sap": sap_logits,
             "state": state_logits,
             "global_state": global_state_logits,
         }
@@ -898,9 +947,30 @@ class MaskedFocalLoss(nn.Module):
         self.gamma = gamma
         self.bce = nn.BCEWithLogitsLoss(reduction="none")
 
-    def forward(self, logits, targets, mask):
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        # 入力値のチェックと形状の確認
+        assert logits.shape == targets.shape, f"Shape mismatch: logits {logits.shape}, targets {targets.shape}"
+        assert logits.shape == mask.shape, f"Shape mismatch: logits {logits.shape}, mask {mask.shape}"
+
+        # targetsを[0,1]の範囲に制限
+        targets = torch.clamp(targets, 0, 1)
+
+        # maskを[0,1]の範囲に制限
+        mask = torch.clamp(mask, 0, 1)
+
+        # BCELossの計算
         bce_loss = self.bce(logits, targets)
-        pt = torch.exp(-bce_loss)  # 確率の補正
+
+        # Focal Lossの計算
+        pt = torch.exp(-bce_loss)
         focal_loss = self.alpha * (1 - pt) ** self.gamma * bce_loss
+
+        # マスクの適用
         masked_focal_loss = focal_loss * mask
-        return masked_focal_loss.sum() / mask.sum()
+
+        # マスクの合計が0の場合の処理
+        mask_sum = mask.sum()
+        if mask_sum == 0:
+            return torch.tensor(0.0, device=logits.device)
+
+        return masked_focal_loss.sum() / mask_sum

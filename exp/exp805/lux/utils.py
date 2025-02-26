@@ -67,6 +67,11 @@ class HiddenGlobalState(IntEnum):
     ENERGY_NODE_DRIFT_MAGNITUDE = 0  # 多分推定できるが重要度は低いと想定
 
 
+class Sap(IntEnum):
+    SAP_MAP = 0
+    SAP_MASK = 1
+
+
 class Action(IntEnum):
     CENTER = 0
     UP = 1
@@ -1357,10 +1362,16 @@ def extract_action(actions: np.ndarray, obs: dict[str, Any], target_team_id: int
 
 
 def extract_sap_map(
-    actions: np.ndarray, opp_actions: np.ndarray, obs: dict[str, Any], target_team_id: int, sap_dropoff_factor: float
+    actions: np.ndarray,
+    opp_actions: np.ndarray,
+    obs: dict[str, Any],
+    target_team_id: int,
+    sap_range: int,
+    sap_dropoff_factor: float,
 ) -> np.ndarray:
     sap_map = np.zeros(
-        (EnvParams.max_units, 1 + 2 * EnvParams.max_sap_range, 1 + 2 * EnvParams.max_sap_range), dtype=np.float32
+        (len(Sap), EnvParams.max_units, 1 + 2 * EnvParams.max_sap_range, 1 + 2 * EnvParams.max_sap_range),
+        dtype=np.float32,
     )
     unit_masks = np.array(obs["units_mask"][target_team_id])  # (max_units, )
     unit_positions = np.array(obs["units"]["position"][target_team_id])  # (max_units, 2)
@@ -1376,7 +1387,7 @@ def extract_sap_map(
             opp_x, opp_y = calc_next_pos((opp_x, opp_y), opp_actions[opp_unit_id][0])
             dx, dy = opp_x - x, opp_y - y
             if abs(dx) <= EnvParams.max_sap_range and abs(dy) <= EnvParams.max_sap_range:
-                sap_map[unit_id, dy + EnvParams.max_sap_range, dx + EnvParams.max_sap_range] += 0.1
+                sap_map[Sap.SAP_MAP, unit_id, dy + EnvParams.max_sap_range, dx + EnvParams.max_sap_range] += 0.1
             # adj cells
             for ddx in [-1, 0, 1]:
                 for ddy in [-1, 0, 1]:
@@ -1386,19 +1397,39 @@ def extract_sap_map(
                     if in_map((nx, ny)):
                         adj_dx, adj_dy = nx - x, ny - y
                         if abs(adj_dx) <= EnvParams.max_sap_range and abs(adj_dy) <= EnvParams.max_sap_range:
-                            sap_map[unit_id, adj_dy + EnvParams.max_sap_range, adj_dx + EnvParams.max_sap_range] += (
-                                0.1 * sap_dropoff_factor
-                            )
+                            sap_map[
+                                Sap.SAP_MAP, unit_id, adj_dy + EnvParams.max_sap_range, adj_dx + EnvParams.max_sap_range
+                            ] += 0.1 * sap_dropoff_factor
 
         # dropoffがなく敵が多すぎるとsap_mapが大きくなるのでclipしておく
-        sap_map[unit_id] = np.clip(sap_map[unit_id], 0, 0.5)
+        sap_map[Sap.SAP_MAP, unit_id] = np.clip(sap_map[Sap.SAP_MAP, unit_id], 0, 0.5)
 
         # hard label - imitation learning
         if actions[unit_id][0] == Action.SAP:
             dx, dy = actions[unit_id][1:]
-            sap_map[unit_id, dy + EnvParams.max_sap_range, dx + EnvParams.max_sap_range] = 1
+            sap_map[Sap.SAP_MAP, unit_id, dy + EnvParams.max_sap_range, dx + EnvParams.max_sap_range] = 1
+
+    # sap_mask - 有効なsap範囲を示すマスク
+    for unit_id in available_unit_ids:
+        x, y = unit_positions[unit_id]
+        # 中心からの距離がsap_range以下の場所を1にする
+        for dx in range(-sap_range, sap_range + 1):
+            for dy in range(-sap_range, sap_range + 1):
+                # ターゲット位置がマップ内かチェック
+                target_x, target_y = x + dx, y + dy
+                if in_map((target_x, target_y)):
+                    sap_map[Sap.SAP_MASK, unit_id, dy + EnvParams.max_sap_range, dx + EnvParams.max_sap_range] = 1
 
     return sap_map
+
+
+def extract_unit_positions(obs: dict[str, Any], target_team_id: int) -> np.ndarray:
+    # invalid unit position is set to -1, but this function clip it to 0 for easier indexing
+    # this is not a problem because the model will ignore the invalid positions using the sap mask
+    unit_positions = np.array(obs["units"]["position"][target_team_id])  # (max_units, 2)
+    unit_positions[:, 0] = np.clip(unit_positions[:, 0], 0, EnvParams.map_width - 1)
+    unit_positions[:, 1] = np.clip(unit_positions[:, 1], 0, EnvParams.map_height - 1)
+    return unit_positions
 
 
 def get_valid_policy_map(obs: dict[str, Any], team_id: int, episode_store: EpisodeStore) -> np.ndarray:

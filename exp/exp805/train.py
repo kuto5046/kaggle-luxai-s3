@@ -23,12 +23,12 @@ LOGGER = logging.getLogger(__name__)
 @dataclass
 class Config:
     exp_name: str = Path(__file__).parent.name
-    notes: str = "exp405で更新したbest model"
+    notes: str = "exp221にsap学習を追加"
     seed: int = 2025
     debug: bool = False
     n_splits: int = 5
     use_fold: int = 0
-    root_dir: Path = Path("/home/user/work")
+    root_dir: Path = Path("/home/task/kaggle/kaggle-luxai-s3")
     feature_version: str = exp_name
     feature_dir: Path = root_dir / f"output/feature_store/{feature_version}"
     output_dir = root_dir / f"exp/{exp_name}/output"
@@ -53,7 +53,7 @@ class Config:
     loss_weight_state: float = 1.0
     loss_weight_global_state: float = 0.0
     # loss_weight_value: float = 0.0
-    # loss_weight_sap: float = 1.0
+    loss_weight_sap: float = 1.0
 
     @classmethod
     def from_args(cls) -> "Config":
@@ -115,7 +115,7 @@ class TrainPipeline:
     def setup_logger(self) -> None:
         self.pl_logger = WandbLogger(
             project="kaggle-luxai-s3",
-            entity="cnumber",
+            entity="kibuna",
             # name=f"{self.cfg.exp_name}",
             group=self.cfg.exp_name,
             mode="disabled" if self.cfg.debug else "online",
