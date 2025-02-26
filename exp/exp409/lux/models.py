@@ -60,6 +60,7 @@ class LuxAugmentStandardize(LuxAugmentBase):
         hidden_state = inputs["hidden_state"].copy()
         action = inputs["action"].copy()
         sap = inputs["sap"].copy()
+        sap_count = inputs["sap_count"].copy()
 
         # 原点を自陣とする
         # TODO agent_id を用いて自陣を判定する
@@ -75,11 +76,13 @@ class LuxAugmentStandardize(LuxAugmentBase):
             action = self.switch_action(action, Action.UP, Action.DOWN)
             action = self.switch_action(action, Action.LEFT, Action.RIGHT)
             sap = np.flip(sap, axis=(0, 1)).copy()
+            sap_count = np.flip(sap_count, axis=(2, 3)).copy()
 
         inputs["state"] = state
         inputs["hidden_state"] = hidden_state
         inputs["action"] = action
         inputs["sap"] = sap
+        inputs["sap_count"] = sap_count
         return inputs
 
 
@@ -93,6 +96,7 @@ class LuxAugmentTranspose(LuxAugmentBase):
         hidden_state = inputs["hidden_state"].copy()
         action = inputs["action"].copy()
         sap = inputs["sap"].copy()
+        sap_count = inputs["sap_count"].copy()
 
         if random.random() < self.p:
             state = np.transpose(state, (0, 1, 3, 2)).copy()
@@ -101,11 +105,13 @@ class LuxAugmentTranspose(LuxAugmentBase):
             action = self.switch_action(action, Action.UP, Action.LEFT)
             action = self.switch_action(action, Action.DOWN, Action.RIGHT)
             sap = np.transpose(sap, (1, 0)).copy()
+            sap_count = np.transpose(sap_count, (0, 2, 1)).copy()
 
         inputs["state"] = state
         inputs["hidden_state"] = hidden_state
         inputs["action"] = action
         inputs["sap"] = sap
+        inputs["sap_count"] = sap_count
         return inputs
 
 
