@@ -520,10 +520,8 @@ class LuxUNetModel(nn.Module):
         super().__init__()
         self.bilinear = bilinear
 
-        self.inc = self.inc = nn.Sequential(
-            nn.Conv2d(state_space_size, 64, kernel_size=1),
-            nn.LeakyReLU()
-        )
+        self.inc = self.inc = DoubleConv(state_space_size, 64, res=res)
+        
         self.down1 = Down(64, 128, res=res)
         self.down2 = Down(128, 256, res=res)
         self.down3 = Down(256, 256, res=res)
