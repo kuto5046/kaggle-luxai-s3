@@ -617,9 +617,10 @@ class LuxUNetModel(nn.Module):
         self.feature_dim = 64 * n_stack * EnvParams.map_width * EnvParams.map_height
         self.policy_decision = nn.Linear(self.feature_dim, 2)  # 0: 非SAP, 1: SAP
         self.policy_non_sap = nn.Linear(self.feature_dim, 5)  # 非SAPは5クラス（CENTER, UP, RIGHT, DOWN, LEFT）
-        self.policy_sap = nn.Linear(
-            self.feature_dim, EnvParams.map_width * EnvParams.map_height
-        )  # SAPは各マスをクラス化
+        self.policy_sap = OutConv(64 * n_stack, 1)  # SAPは各マスをクラス化
+        # nn.Linear(
+        #     self.feature_dim, EnvParams.map_width * EnvParams.map_height
+        # )  # SAPは各マスをクラス化
 
         self.global_state_net = nn.Sequential(
             nn.Linear((256 + global_state_space_size) * n_stack, 128),
@@ -659,7 +660,11 @@ class LuxUNetModel(nn.Module):
         # 階層型の各ヘッドに通す
         policy_decision_logits = self.policy_decision(x)  # (_n, 2)
         policy_non_sap_logits = self.policy_non_sap(x)  # (_n, 5)
-        policy_sap_logits = self.policy_sap(x)  # (_n, map_width*map_height)
+        # policy_sap_logits = self.policy_sap(x.view(_n, -1, _x, _y))  # (_n, map_width * map_height)
+        # policy_sap_logits = policy_sap_logits.view(_n, -1)
+        sap_logits_map = self.policy_sap(x.view(_n, -1, _x, _y))  # xはup3の出力, shape: (_n, 1, _x, _y)
+        policy_sap_logits = sap_logits_map.view(_n, -1)  # (_n, _x*_y)
+
         state_logits = self.state_net(x.view(_n, -1, _x, _y))
 
         return {
