@@ -71,7 +71,8 @@ def valid_episode(json_load: dict[str, Any], target_team_name: str) -> bool:
             return False
     win_idx = np.argmax([r or 0 for r in json_load["rewards"]])  # win or tie
     win_team = json_load["info"]["TeamNames"][win_idx]
-    return win_team == target_team_name
+    match_results = get_match_results(json_load, win_idx)
+    return win_team == target_team_name and match_results[-1]
     # return True
 
 
@@ -99,8 +100,8 @@ class DataProcessor:
             episode_df = episode_df.sample(n=5, seed=self.cfg.seed)
             # episode_df = episode_df.filter(pl.col("EpisodeId") == 67293512)
         # else:
-        # episode_df = episode_df.sample(n=len(episode_df)*self.cfg.reduction, seed=self.cfg.seed)
-        # print(f"sampled episode_df: {len(episode_df)}")
+        #     episode_df = episode_df.sample(n=len(episode_df)*0.1, seed=self.cfg.seed)
+        # # print(f"sampled episode_df: {len(episode_df)}")
         return episode_df
 
     def _process_episode(self, row) -> tuple[str, int, int]:
@@ -218,11 +219,11 @@ class DataProcessor:
 
         # 一時ファイルを1つのh5ファイルにマージ
         with h5py.File(self.feature_dir / "episodes.h5", "w") as out_f:
-            for episode_id in valid_ids:
+            for episode_id in tqdm(valid_ids, total=len(valid_ids)):
                 temp_path = self.feature_dir / f"temp_{episode_id}.h5"
                 with h5py.File(temp_path, "r") as temp_f:
                     temp_f.copy(f"{episode_id}", out_f)
-                temp_path.unlink()  # 一時ファイルの削除
+                # temp_path.unlink()  # 一時ファイルの削除
 
         return pl.DataFrame(
             {"EpisodeId": valid_ids, "MaxStep": max_steps, "TargetTeamId": target_team_ids, "Win": is_wins},

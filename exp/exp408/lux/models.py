@@ -262,9 +262,9 @@ class LaxLitModel(LightningModule):
         # バッチ中のターゲットは one-hot なのでクラスラベルに変換
         action_target = torch.argmax(batch["action"], dim=1)  # shape: (batch,)
         # 非SAPの場合は target < 5, SAPの場合は target >= 5 で定義（SAPのとき target - 5 が sap用ラベル）
-        high_target = (action_target >= 5).long()  # 0: 非SAP, 1: SAP
+        high_target = (action_target >= Action.SAP).long()  # 0: 非SAP, 1: SAP
         non_sap_target = action_target[high_target == 0]  # 非SAPの対象
-        sap_target = action_target[high_target == 1] - 5  # SAP対象の座標ラベル
+        sap_target = action_target[high_target == 1] - Action.SAP  # SAP対象の座標ラベル
 
         loss_decision = self.policy_decision_loss(decision_logits, high_target)
         loss_non_sap = (
@@ -298,6 +298,30 @@ class LaxLitModel(LightningModule):
         self.log(
             f"PolicyLoss/{mode}",
             policy_loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+        )
+        self.log(
+            f"DecisionLoss/{mode}",
+            loss_decision,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+        )
+        self.log(
+            f"NonSapLoss/{mode}",
+            loss_non_sap,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+        )
+        self.log(
+            f"SapLoss/{mode}",
+            loss_sap,
             on_step=False,
             on_epoch=True,
             prog_bar=False,
@@ -352,6 +376,15 @@ class LaxLitModel(LightningModule):
             predicted_action[predicted_high == 0] = torch.argmax(non_sap_logits[predicted_high == 0], dim=1)
         if (predicted_high == 1).sum() > 0:
             predicted_action[predicted_high == 1] = torch.argmax(sap_logits[predicted_high == 1], dim=1) + 5
+
+        # マッピング：SAPの場合は全て5に統一する
+        predicted_action = torch.where(
+            predicted_action >= Action.SAP, torch.tensor(Action.SAP, device=predicted_action.device), predicted_action
+        )
+        action_target = torch.where(
+            action_target >= Action.SAP, torch.tensor(Action.SAP, device=action_target.device), action_target
+        )
+
         # バッチ内全ゼロ（学習データの欠損等）を除く
         all_zero_mask = torch.all(batch["action"] == 0, dim=1)
         preds = predicted_action[~all_zero_mask]
