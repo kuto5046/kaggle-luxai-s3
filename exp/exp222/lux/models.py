@@ -731,7 +731,7 @@ class LuxUNetModel(nn.Module):
                     normalize=True,
                     activation=nn.LeakyReLU,
                 )
-                for _ in range(10)
+                for _ in range(20)
             ],
         )
 
