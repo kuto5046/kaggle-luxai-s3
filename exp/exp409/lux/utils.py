@@ -1337,7 +1337,7 @@ def extract_hidden_global_state(env_params: dict[str, Any]) -> np.ndarray:
 
 
 def extract_action(actions: np.ndarray, obs: dict[str, Any], target_team_id: int) -> np.ndarray:
-    action_map = np.zeros((2, EnvParams.map_width, EnvParams.map_height), dtype=np.float32)
+    action_map = np.zeros((3, EnvParams.map_width, EnvParams.map_height), dtype=np.float32)
     # unit state
     unit_masks = np.array(obs["units_mask"][target_team_id])  # (max_units, )
     unit_positions = np.array(obs["units"]["position"][target_team_id])  # (max_units, 2)
@@ -1353,6 +1353,7 @@ def extract_action(actions: np.ndarray, obs: dict[str, Any], target_team_id: int
             ny = y + dy
             if in_map((nx, ny)):
                 action_map[1, ny, nx] = 1
+                action_map[2, ny, nx] += 1
     return action_map
 
 
@@ -1427,4 +1428,4 @@ def can_move(pos: tuple[int, int], energy: int, dir: int, tile_type_map: np.ndar
 
 
 def can_sap(x: int, y: int, energy: int, unit_sap_cost: int, tile_type_map: np.ndarray):
-    return energy >= unit_sap_cost and tile_type_map[y, x] != TileType.ASTEROID
+    return energy >= unit_sap_cost

@@ -33,7 +33,7 @@ class Config:
     debug: bool = False
     use_gt: bool = False
     n_splits: int = 5
-    root_dir: Path = Path("/home/user/work")
+    root_dir: Path = Path("/home/kawattataido/デスクトップ/programing/kaggle/kaggle-luxai-s3")
     input_dir: Path = root_dir / "input"
     episode_dir: Path = root_dir / "output/feature_store/episodes"
     episode_path: Path = episode_dir / "episodes0210.csv"
@@ -71,7 +71,8 @@ def valid_episode(json_load: dict[str, Any], target_team_name: str) -> bool:
             return False
     win_idx = np.argmax([r or 0 for r in json_load["rewards"]])  # win or tie
     win_team = json_load["info"]["TeamNames"][win_idx]
-    return win_team == target_team_name
+    match_results = get_match_results(json_load, win_idx)
+    return win_team == target_team_name and match_results[-1]
     # return True
 
 
@@ -185,7 +186,7 @@ class DataProcessor:
 
         # 一時ファイルを1つのh5ファイルにマージ
         with h5py.File(self.feature_dir / "episodes.h5", "w") as out_f:
-            for episode_id in valid_ids:
+            for episode_id in tqdm(valid_ids, total=len(valid_ids)):
                 temp_path = self.feature_dir / f"temp_{episode_id}.h5"
                 with h5py.File(temp_path, "r") as temp_f:
                     temp_f.copy(f"{episode_id}", out_f)
