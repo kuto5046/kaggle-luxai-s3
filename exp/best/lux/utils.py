@@ -143,7 +143,8 @@ class EnergyNodeGuesser:
         return energy_tile_patterns
 
     def _will_drift(self, obs: dict[str, Any]) -> bool:
-        return obs["steps"] in self._drift_steps
+        steps = obs["steps"] if isinstance(obs["steps"], int) else obs["steps"].item()
+        return steps in self._drift_steps
 
     def _drift_energy_node(self, obs: dict[str, Any]) -> None:
         # driftさせる
@@ -255,8 +256,9 @@ class EnergyNodeGuesser:
         likelihoods = np.zeros(len(self._drift_speed_prob))
         max_magnitude = max(env_params_ranges["energy_node_drift_magnitude"])
         non_move_prob = 1 / (2 * max_magnitude + 1) ** 2
+        steps = obs["steps"] if isinstance(obs["steps"], int) else obs["steps"].item()
         for i in range(len(self._drift_speed_prob)):
-            if obs["steps"] in self.ok_drift_steps[i]:
+            if steps in self.ok_drift_steps[i]:
                 if drifted:
                     # 動くはずで動いている場合
                     likelihoods[i] = 1 - non_move_prob
