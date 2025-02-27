@@ -4,6 +4,7 @@ import logging
 from typing import Any
 from pathlib import Path
 from dataclasses import field, dataclass
+from concurrent.futures import ProcessPoolExecutor
 
 import h5py
 import numpy as np
@@ -21,7 +22,7 @@ from lux.utils import (
 )
 from tqdm.auto import tqdm
 from lux.params import EnvParams
-from sklearn.model_selection import KFold
+from sklearn.model_selection import KFold, StratifiedKFold
 
 LOGGER = logging.getLogger(__name__)
 
@@ -33,14 +34,18 @@ class Config:
     debug: bool = False
     use_gt: bool = False
     n_splits: int = 5
-    root_dir: Path = Path("/home/user/work")
+    stratify: bool = False
+    root_dir: Path = Path("/kaggle")
     input_dir: Path = root_dir / "input"
-    episode_dir: Path = root_dir / "output/feature_store/episodes"
-    episode_path: Path = episode_dir / "episodes0210.csv"
+    episode_dir: Path = root_dir / "data/42704976/episodes"
+    episode_path: Path = root_dir / "data/42704976/episodes.csv"
     feature_dir: Path = root_dir / f"output/feature_store/{exp_name}"
-    target_team_name: str = "aDg4b"
-    target_sub_ids: list[int] = field(default_factory=lambda: [42683570])
+    target_team_name: str = "Frog Parade"
+    target_sub_ids: list[int] = field(default_factory=lambda: [42704976])
     validation: bool = False
+
+    use_only_win_data: bool = True
+    ignore_after_3_wins: bool = False
 
 
 def get_fold(_train: pl.DataFrame, cv: list[tuple[np.ndarray, np.ndarray]]) -> pl.DataFrame:
@@ -57,9 +62,13 @@ def get_fold(_train: pl.DataFrame, cv: list[tuple[np.ndarray, np.ndarray]]) -> p
     return train
 
 
-def get_kfold(train: pl.DataFrame, n_splits: int, seed: int = 0) -> pl.DataFrame:
-    kf = KFold(n_splits=n_splits, shuffle=True, random_state=seed)
-    cv = list(kf.split(X=train))
+def get_kfold(train: pl.DataFrame, n_splits: int, seed: int = 0, stratify: bool = False) -> pl.DataFrame:
+    if stratify:
+        kf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+        cv = list(kf.split(X=train, y=train["UpdatedScore"]))
+    else:
+        kf = KFold(n_splits=n_splits, shuffle=True, random_state=seed)
+        cv = list(kf.split(X=train))
     return get_fold(train, cv)
 
 
@@ -103,19 +112,36 @@ class DataProcessor:
     def _process_episode(self, row) -> tuple[str, int, int]:
         sub_id = row["SubmissionId"]
         episode_id = row["EpisodeId"]
-        episode_path = self.episode_dir / f"{sub_id}/{episode_id}.json"
 
+        episode_path = f"{self.episode_dir}/{sub_id}/{episode_id}.json"
         try:
             with open(episode_path) as f:
                 json_load = json.load(f)
         except json.JSONDecodeError as e:
-            print(f"EpisodeId {episode_id}: {e}")
+            print(f"EpisodeId {row['EpisodeId']}: {e}")
             return None
-
-        # 無効なepisodeはスキップ(valueも学習したいのでskip)
-        if not valid_episode(json_load, self.cfg.target_team_name):
+        
+        rewards = json_load["rewards"]
+        if any([r is None for r in rewards]):
+            return None  # if rewards include None  -> skip
+       
+        is_win = valid_episode(json_load, self.cfg.target_team_name)
+        if self.cfg.use_only_win_data and not is_win:
             return None
-
+        
+        target_team_id = json_load["info"]["TeamNames"].index(self.cfg.target_team_name)
+        match_results = get_match_results(json_load, target_team_id)
+        
+        # experimental
+        if not match_results[-1]:
+            return None
+        
+        final_step_in_match = [(i_match + 1) * EnvParams.max_steps_in_match + i_match for i_match in range(EnvParams.match_count_per_episode)]
+        match_confirmed = np.argmax(np.cumsum(match_results) == 3) + 1 if sum(match_results) > 2 else -1
+        match_confirmed_step = final_step_in_match[match_confirmed - 1] if match_confirmed > 0 else -1
+        
+        use_steps = match_confirmed_step if self.cfg.ignore_after_3_wins and match_confirmed > 0 else final_step_in_match[-1]  # 504
+        
         with h5py.File(self.feature_dir / f"temp_{episode_id}.h5", "w") as out_f:
             episode_group = out_f.create_group(f"{episode_id}")
             episode_action_group = episode_group.create_group("actions")
@@ -125,15 +151,12 @@ class DataProcessor:
             episode_hidden_global_state_group = episode_group.create_group("hidden_global_states")
             episode_win_group = episode_group.create_group("win")
 
-            target_team_id = np.argmax(json_load["rewards"])  # win or tie
-            match_results = get_match_results(json_load, target_team_id)
-
             # episode内で獲得する情報
             env_params = EnvParams(**json_load["configuration"]["env_cfg"])
             episode_store = EpisodeStore(target_team_id, env_params, self.cfg.validation, episode_id)
             steps = json_load["steps"]
             gt_env_params = EnvParams(**steps[0][0]["info"]["replay"]["params"])
-            for step_idx in range(len(steps) - 1):  # 505でdoneとなるため-1
+            for step_idx in range(use_steps + 1):
                 step_info = steps[step_idx]
                 next_step_info = steps[step_idx + 1]
                 obs = json.loads(step_info[target_team_id]["observation"]["obs"])
@@ -153,7 +176,7 @@ class DataProcessor:
                     state = extract_state(obs, target_team_id, episode_store)
                 episode_state_group.create_dataset(f"{step_idx}", data=state)
 
-                global_state = extract_global_state(obs, target_team_id, env_params, episode_store)
+                global_state = extract_global_state(obs, target_team_id, env_params)
                 episode_global_state_group.create_dataset(f"{step_idx}", data=global_state)
 
                 hidden_state = extract_hidden_state(gt_obs, target_team_id)
@@ -167,10 +190,10 @@ class DataProcessor:
                 episode_action_group.create_dataset(f"{step_idx}", data=action)
 
                 match_idx = obs["steps"] // (EnvParams.max_steps_in_match + 1)
-                is_win = match_results[match_idx]
-                episode_win_group.create_dataset(f"{step_idx}", data=is_win)
+                is_win_match = match_results[match_idx]
+                episode_win_group.create_dataset(f"{step_idx}", data=is_win_match)
 
-        return str(episode_id), len(steps) - 1, target_team_id, is_win
+        return str(episode_id), use_steps + 1, target_team_id, is_win
 
     def preprocess(self, df: pl.DataFrame) -> pl.DataFrame:
         # 並列処理の実行
@@ -196,11 +219,12 @@ class DataProcessor:
         )
 
     def add_fold(self, df: pl.DataFrame) -> pl.DataFrame:
-        return get_kfold(df, self.cfg.n_splits, self.cfg.seed)
+        return get_kfold(df, self.cfg.n_splits, self.cfg.seed, stratify=self.cfg.stratify)
 
     def run(self) -> None:
-        episode_paths = self.read_data()
-        df = self.preprocess(episode_paths)
+        episode_df = self.read_data()
+
+        df = self.preprocess(episode_df)
         if not self.cfg.debug:
             df = self.add_fold(df)
         df.write_csv(self.feature_dir / "train.csv")
@@ -211,12 +235,8 @@ def get_match_results(json_load: dict[str, Any], target_team_id: int) -> list[bo
     for i_match in range(EnvParams.match_count_per_episode):
         final_step_in_match = (i_match + 1) * 100 + i_match  # 100, 201, 302, 403, 504
 
-        teams_wins_after = np.asarray(
-            json_load["steps"][final_step_in_match + 1][0]["info"]["replay"]["observations"][0]["team_wins"]
-        )
-        teams_wins_before = np.asarray(
-            json_load["steps"][final_step_in_match][0]["info"]["replay"]["observations"][0]["team_wins"]
-        )
+        teams_wins_after = np.asarray(json_load["steps"][final_step_in_match + 1][0]["info"]["replay"]["observations"][0]["team_wins"])
+        teams_wins_before = np.asarray(json_load["steps"][final_step_in_match][0]["info"]["replay"]["observations"][0]["team_wins"])
         win_team = np.argmax(teams_wins_after - teams_wins_before)
 
         is_win = win_team == target_team_id
@@ -227,7 +247,6 @@ def get_match_results(json_load: dict[str, Any], target_team_id: int) -> list[bo
 def main() -> None:
     cfg = Config()
     data_processor = DataProcessor(cfg)
-    # data_processor.test()
     data_processor.run()
 
 
