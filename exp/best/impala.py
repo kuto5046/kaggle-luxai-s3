@@ -83,9 +83,9 @@ class Config:
     num_gpus_per_learner: int = 1
 
     # 評価用
-    evaluation_num_env_runners: int = 10  # 評価用のenv runnerの数
-    evaluation_interval: int = 1  # 何回trainをしたら評価を実施するか
-    evaluation_duration: int = 10  # 1回の評価で何エピソード分評価するか
+    evaluation_num_env_runners: int = 0  # 評価用のenv runnerの数
+    evaluation_interval: int = 0  # 何回trainをしたら評価を実施するか
+    evaluation_duration: int = 1  # 1回の評価で何エピソード分評価するか
 
     # learner
     training_minutes: int = 10
@@ -93,9 +93,8 @@ class Config:
     gamma: float = 0.99
     lr: float = 1e-4
     # batch size
-    train_batch_size_per_learner: int = (
-        512  # 一応1episodeのサイズにしてるが不要かも。もしくはrollout_fragment_length部分で調整する
-    )
+    # # 一応1episodeのサイズにしてるが不要かも。もしくはrollout_fragment_length部分で調整する
+    train_batch_size_per_learner: int = 512
     # 1回の学習データ(train_batch_size*queue_size)を何epoch分学習するか
     num_epochs: int = 1
     replay_proportion: float = 0.0  # リプレイバッファの割合
@@ -626,34 +625,7 @@ class WandbLoggerCallback(RLlibCallback):
             WandbLoggerCallback._stats_collector = EpisodeStatsCollector.remote()
 
         # 各ワーカープロセス用にロガーを初期化
-        self._setup_logger()
-
-    def _setup_logger(self):
-        """各ワーカープロセス用にロガーを設定"""
-        logger = logging.getLogger(__name__)
-        logger.setLevel(logging.INFO)
-
-        # 既存のハンドラをクリア（重複を避けるため）
-        if logger.handlers:
-            logger.handlers.clear()
-
-        # ログディレクトリの作成
-        log_dir = self.output_dir / "logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
-
-        # ファイルハンドラの設定
-        log_file = log_dir / "result.log"
-        file_handler = logging.FileHandler(str(log_file))
-        file_handler.setLevel(logging.INFO)
-
-        # フォーマッタの設定
-        formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-        file_handler.setFormatter(formatter)
-
-        # ハンドラの追加
-        logger.addHandler(file_handler)
-
-        self.logger = logger
+        self.logger = setup_logger()
 
     # 学習状況をwandbに流す用
     @override(RLlibCallback)
@@ -679,25 +651,8 @@ class WandbLoggerCallback(RLlibCallback):
         if "learners" not in result:
             return
 
-        learner_metrics = [
-            # loss
-            "num_non_trainable_parameters",
-            "gradients_default_optimizer_global_norm",
-            "diff_num_grad_updates_vs_sampler_policy",
-            "module_train_batch_size_mean",
-            "pi_loss",
-            "num_module_steps_trained_lifetime",
-            "weights_seq_no",
-            "total_loss",
-            "default_optimizer_learning_rate",
-            "mean_pi_loss",
-            "num_module_steps_trained",
-            "mean_vf_loss",
-            "num_trainable_parameters",
-            "curr_entropy_coeff",
-            "vf_loss",
-            "entropy",
-        ]
+        self.logger.info(result)
+        self.logger.info(metrics_logger.get_state())
         learner_metrics = result["learners"][OWN_POLICY_NAME].keys()
         for key in learner_metrics:
             wandb.log(
@@ -752,6 +707,9 @@ class WandbLoggerCallback(RLlibCallback):
 
         # 評価結果をリセット
         ray.get(self._stats_collector.end_evaluation.remote())
+
+        # TODO: 勝率が更新された場合に保存するようにする(評価の試合数がそれなりにないと微妙そう)
+        save_model(algorithm, self.output_dir, suffix=f"_model_eval_{self._current_evaluation_id}")
 
     @override(RLlibCallback)
     def on_episode_end(
@@ -1034,9 +992,16 @@ def setup_wandb(cfg: Config):
     )
 
 
-def save_model(cfg: Config, trainer: Algorithm):
-    # torch　state_dictを保存
-    torch.save(trainer.get_policy(OWN_POLICY_NAME).get_state(), cfg.output_dir / "bset_rl_model.pt")
+def save_model(trainer: Algorithm, output_dir: Path, suffix: str = "model"):
+    model_state_dict = trainer.learner_group.get_state()["learner"]["rl_module"][OWN_POLICY_NAME]
+    policy_state_dict = {
+        k.replace("policy_model.", ""): v for k, v in model_state_dict.items() if k.startswith("policy_model")
+    }
+    value_state_dict = {
+        k.replace("value_model.", ""): v for k, v in model_state_dict.items() if k.startswith("value_model")
+    }
+    torch.save(policy_state_dict, output_dir / f"policy_{suffix}.pth")
+    torch.save(value_state_dict, output_dir / f"value_{suffix}.pth")
 
 
 def main() -> None:
@@ -1048,14 +1013,7 @@ def main() -> None:
 
     setup_wandb(cfg)
     # debug mode
-    ray.init(
-        ignore_reinit_error=True,
-        runtime_env={
-            "env_vars": {
-                "RAY_DEBUG": "1",
-            }
-        },
-    )
+    ray.init(ignore_reinit_error=True)
 
     # 環境の登録
     register_env(name=cfg.env_name, env_creator=env_creator)
@@ -1070,11 +1028,13 @@ def main() -> None:
         train_count += 1
         spend_minutes = (time() - train_start_time) / 60
         logger.info(f"Training iteration {train_count} finished. Spent {spend_minutes:.1f} minutes")
-
+        break
         # 指定した時間経ったら学習を終了
-        if spend_minutes > cfg.training_minutes:
-            logger.info(f"Training completed after {spend_minutes:.1f} minutes")
-            break
+        # if spend_minutes > cfg.training_minutes:
+        #     logger.info(f"Training completed after {spend_minutes:.1f} minutes")
+        #     break
+
+    save_model(trainer, cfg.output_dir, suffix="_latest_model")
 
 
 if __name__ == "__main__":
