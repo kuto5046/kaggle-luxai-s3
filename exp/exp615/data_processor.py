@@ -36,15 +36,16 @@ class Config:
     stratify: bool = False
     root_dir: Path = Path("/kaggle")
     input_dir: Path = root_dir / "input"
-    episode_dir: Path = root_dir / "data/42704976/episodes"
-    episode_path: Path = root_dir / "data/42704976/episodes.csv"
+    episode_dir: Path = root_dir / "data/42683570/episodes"
+    episode_path: Path = root_dir / "data/42683570/episodes.csv"
     feature_dir: Path = root_dir / f"output/feature_store/{exp_name}"
-    target_team_name: str = "Frog Parade"
-    target_sub_ids: list[int] = field(default_factory=lambda: [42704976])
+    target_team_name: str = "aDg4b"
+    target_sub_ids: list[int] = field(default_factory=lambda: [42683570])
     validation: bool = False
 
     use_only_win_data: bool = True
-    ignore_after_3_wins: bool = False
+    ignore_after_3_wins: bool = True
+    only_win_final_match: bool = True
 
 
 def get_fold(_train: pl.DataFrame, cv: list[tuple[np.ndarray, np.ndarray]]) -> pl.DataFrame:
@@ -130,6 +131,9 @@ class DataProcessor:
         
         target_team_id = json_load["info"]["TeamNames"].index(self.cfg.target_team_name)
         match_results = get_match_results(json_load, target_team_id)
+
+        if not match_results[-1] and self.cfg.only_win_final_match:
+            return None
         
         final_step_in_match = [(i_match + 1) * EnvParams.max_steps_in_match + i_match for i_match in range(EnvParams.match_count_per_episode)]
         match_confirmed = np.argmax(np.cumsum(match_results) == 3) + 1 if sum(match_results) > 2 else -1

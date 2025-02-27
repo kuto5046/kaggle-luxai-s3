@@ -23,7 +23,7 @@ LOGGER = logging.getLogger(__name__)
 @dataclass
 class Config:
     exp_name: str = Path(__file__).parent.name
-    notes: str = "Frog Parade, add more episodes"
+    notes: str = "aDg4b, ConvLSTM"
     seed: int = 2025
     debug: bool = False
     n_splits: int = 5
@@ -38,7 +38,7 @@ class Config:
     limit_train_batches: float = 1.0
     limit_val_batches: float = 1.0
     use_amp: bool = True
-    batch_size: int = 1024
+    batch_size: int = 768
     num_workers: int = 24
     ckpt_path: str = None
     lr: float = 0.001
@@ -47,7 +47,7 @@ class Config:
     # model
     res: bool = True
     aug: bool = True
-    n_stack: int = 4
+    n_stack: int = 5
     # loss
     loss_weight_policy: float = 1.0
     loss_weight_state: float = 1.0
@@ -113,14 +113,17 @@ class TrainPipeline:
         ]
 
     def setup_logger(self) -> None:
-        self.pl_logger = WandbLogger(
-            project="kaggle-luxai-s3",
-            entity="okumura",
-            # name=f"{self.cfg.exp_name}",
-            group=self.cfg.exp_name,
-            mode="disabled" if self.cfg.debug else "online",
-            notes=self.cfg.notes,
-        )
+        if not self.cfg.debug:
+            self.pl_logger = WandbLogger(
+                project="kaggle-luxai-s3",
+                entity="okumura",
+                # name=f"{self.cfg.exp_name}",
+                group=self.cfg.exp_name,
+                mode="disabled" if self.cfg.debug else "online",
+                notes=self.cfg.notes,
+            )
+        else:
+            self.pl_logger = None
 
     def setup_model(self) -> None:
         if self.cfg.ckpt_path:
