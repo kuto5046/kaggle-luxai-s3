@@ -221,7 +221,9 @@ class LaxLitModel(LightningModule):
             global_state_space_size=len(GlobalState),
             action_space_size=len(Action),
             hidden_state_space_size=len(HiddenState),
-            n_stack=cfg.n_stack,
+            num_repeats=cfg.num_repeats,
+            num_layers=cfg.num_layers,
+            hidden_dim=cfg.hidden_dim
         )
         self.criterion1 = DiceLoss(n_classes=len(Action))
         # self.criterion1 = MaskedBCEWithLogitsLoss()
@@ -674,13 +676,16 @@ class LuxConvLSTMModel(nn.Module):
         global_state_space_size: int,
         action_space_size: int,
         hidden_state_space_size: int,
-        n_stack: int,
+        num_layers: int,
+        hidden_dim: int, 
+        num_repeats: int = 1,
     ) -> None:
         super().__init__()
 
-        self.hidden_dim = 128
-        self.num_layers = n_stack
-        self.num_repeats = 1
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+        self.num_repeats = num_repeats
+        
         self.inc = nn.Conv2d(state_space_size + global_state_space_size, self.hidden_dim, kernel_size=1)
         
         self.drc = DRC(
