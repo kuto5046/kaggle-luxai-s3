@@ -35,7 +35,7 @@ class Config:
     # 同じマスに複数のユニットが移動する場合のペナルティ、0=重複を許可(greedy)、1=重複を禁止
     overlap_penalty: float = 2.0
 
-    tta: bool = True
+    tta: bool = False
 
     checkpoint_path: Path = Path(__file__).parent / "output/best_model.ckpt"
 
