@@ -1,3 +1,4 @@
+import logging
 from time import time
 from typing import Any, Optional
 from pathlib import Path
@@ -54,6 +55,8 @@ from ray.rllib.algorithms.impala.torch.vtrace_torch_v2 import (
 )
 
 import wandb
+
+OWN_POLICY_NAME = "p0"
 
 
 @dataclass
@@ -514,8 +517,8 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
 
 
 def train_metric_value(results: dict[str, Any], key: str) -> float:
-    # 自身はp0として評価している
-    return results["p0"][key]
+    # 自身はOWN_POLICY_NAMEとして評価している
+    return results[OWN_POLICY_NAME][key]
 
 
 @ray.remote
@@ -542,12 +545,77 @@ class EpisodeStatsCollector:
         return eps_per_min, self.total_episodes
 
 
+def setup_logger(cfg: Config):
+    """ロガーの設定"""
+    # ログディレクトリの作成
+    log_dir = cfg.output_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    # ロガーの設定
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.INFO)
+
+    # 既存のハンドラをクリア（重複を避けるため）
+    if logger.handlers:
+        logger.handlers.clear()
+
+    # ファイルハンドラの設定
+    log_file = log_dir / "result.log"
+    file_handler = logging.FileHandler(str(log_file))
+    file_handler.setLevel(logging.INFO)
+
+    # コンソールハンドラの設定
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+
+    # フォーマッタの設定
+    formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    file_handler.setFormatter(formatter)
+    console_handler.setFormatter(formatter)
+
+    # ハンドラの追加
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+
+    return logger
+
+
 class WandbLoggerCallback(RLlibCallback):
     def __init__(self):
         self.output_dir = Config.output_dir
         # グローバルな統計コレクターを作成（一度だけ）
         if not hasattr(WandbLoggerCallback, "_stats_collector"):
             WandbLoggerCallback._stats_collector = EpisodeStatsCollector.remote()
+
+        # 各ワーカープロセス用にロガーを初期化
+        self._setup_logger()
+
+    def _setup_logger(self):
+        """各ワーカープロセス用にロガーを設定"""
+        logger = logging.getLogger(__name__)
+        logger.setLevel(logging.INFO)
+
+        # 既存のハンドラをクリア（重複を避けるため）
+        if logger.handlers:
+            logger.handlers.clear()
+
+        # ログディレクトリの作成
+        log_dir = self.output_dir / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+        # ファイルハンドラの設定
+        log_file = log_dir / "result.log"
+        file_handler = logging.FileHandler(str(log_file))
+        file_handler.setLevel(logging.INFO)
+
+        # フォーマッタの設定
+        formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+        file_handler.setFormatter(formatter)
+
+        # ハンドラの追加
+        logger.addHandler(file_handler)
+
+        self.logger = logger
 
     # 学習状況をwandbに流す用
     @override(RLlibCallback)
@@ -569,6 +637,10 @@ class WandbLoggerCallback(RLlibCallback):
                 You can mutate this object to add additional metrics.
             kwargs: Forward compatibility placeholder.
         """
+        # learnersがない場合はskip(並列で実行しているため最初はないはず)
+        if "learners" not in result:
+            return
+
         learner_metrics = [
             # loss
             "total_loss",
@@ -581,7 +653,7 @@ class WandbLoggerCallback(RLlibCallback):
             "vf_explained_var",
             "default_optimizer_learning_rate",
         ]
-        print(f"{result['learners'].keys()=}")
+        self.logger.info(f"Learners keys: {result['learners'].keys()}")
         for key in learner_metrics:
             wandb.log(
                 {
@@ -616,29 +688,26 @@ class WandbLoggerCallback(RLlibCallback):
         'module_episode_returns_mean', 'num_episodes', 'num_episodes_lifetime', 'agent_steps', 'episode_return_min', 'num_module_steps_sampled_lifetime',
         'num_env_steps_sampled', 'episode_len_max', 'env_to_module_sum_episodes_length_out', 'episode_return_mean', 'env_to_module_sum_episodes_length_in'
         ])
-        """
-        # 自身はplayer_0として評価している
-        # print("#########################")
-        # print(f"{evaluation_metrics['env_runners']['agent_episode_returns_mean']=}")
-        # print(f"{evaluation_metrics['env_runners']['module_episode_returns_mean']=}")
-        # print(f"{evaluation_metrics['env_runners']['episode_return_mean']=}")
-        # print("#########################")
-        # episode_rewards = evaluation_metrics["env_runners"]["agent_episode_returns_mean"]["player_0"]
-        # wins = sum(1 for r in episode_rewards if r > 0)  # 報酬が正の場合は勝利
-        # win_rate = wins / len(episode_rewards) if episode_rewards else 0.0
 
-        # wandb.log(
-        #     {
-        #         # player_0を自身として評価している
-        #         "evaluate/agent_episode_returns_mean": evaluation_metrics["env_runners"]["agent_episode_returns_mean"][
-        #             "player_0"
-        #         ],
-        #         "evaluate/episode_duration_sec_mean": evaluation_metrics["env_runners"]["episode_duration_sec_mean"],
-        #         "evaluate/win_rate": win_rate,
-        #     }
-        # )
-        checkpoint_dir = algorithm.save_to_path(self.output_dir)
-        print(f"save to {checkpoint_dir}")
+        agent_episode_returns_meanはkeyがplayer_0, player_1, ...となっている
+        module_episode_returns_meanはkeyが設定したpolicy名となっている
+        """
+        # 自身はOWN_POLICY_NAMEとして評価している
+        mean_rewards = evaluation_metrics["env_runners"]["module_episode_returns_mean"][OWN_POLICY_NAME]
+        evaluation_minutes = evaluation_metrics["env_runners"]["env_to_module_sum_episodes_length_in"] / 60
+        # wins = sum(1 for r in mean_rewards if r > 0)  # 報酬が正の場合は勝利
+        # win_rate = wins / len(mean_rewards) if mean_rewards else 0.0
+
+        wandb.log(
+            {
+                "evaluate/mean_rewards": mean_rewards,
+                "evaluate/evaluation_minutes": evaluation_minutes,
+                # "evaluate/win_rate": win_rate,
+            }
+        )
+        # TODO: 保存時にバグがあるかも？
+        # checkpoint_dir = algorithm.save_to_path(self.output_dir)
+        # self.logger.info(f"Model saved to {checkpoint_dir}")
 
     # データ収集状況をwandbに流す用
     @override(RLlibCallback)
@@ -654,11 +723,9 @@ class WandbLoggerCallback(RLlibCallback):
         ray.get(self._stats_collector.add_episode.remote())
         # 統計を取得して記録
         eps_per_min, total_episodes = ray.get(self._stats_collector.get_stats.remote())
-        # rewards = episode.get_rewards()
-        # reward = {agent_id: rewards[agent_id][-1] for agent_id in rewards.keys()}
-        # duration = episode.get_duration_s()
+
         # if total_episodes % 10 == 0:
-        print(f"Episode {total_episodes} finished. Collection speed: {eps_per_min:.2f} eps/min")
+        self.logger.info(f"Episode {total_episodes} finished. Collection speed: {eps_per_min:.2f} eps/min")
 
 
 class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
@@ -867,18 +934,18 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
         # TODO: 本当はself-playにして評価のみbest policyと対戦させたいが評価時にpolicyを指定する方法がわからない
         .multi_agent(
             # RLで扱うagent(policy)の名前
-            policies={"p0", "best"},
+            policies={OWN_POLICY_NAME, "best"},
             # 各agentのポリシーを決める関数
-            policy_mapping_fn=lambda aid, episode, **kwargs: ("p0" if aid == "player_0" else "best"),
-            # 学習はp0だけ学習
-            policies_to_train=["p0"],
+            policy_mapping_fn=lambda aid, episode, **kwargs: (OWN_POLICY_NAME if aid == "player_0" else "best"),
+            # 学習はOWN_POLICY_NAMEだけ学習
+            policies_to_train=[OWN_POLICY_NAME],
         )
         # https://docs.ray.io/en/latest/rllib/rllib-rlmodule.html#construction-through-rlmodulespecs
         .rl_module(
             rl_module_spec=MultiRLModuleSpec(
-                # policy名とモデルの紐づけ(self playの場合p0とp1の両方を学習対象にする)
+                # policy名とモデルの紐づけ
                 rl_module_specs={
-                    "p0": rl_module_spec,
+                    OWN_POLICY_NAME: rl_module_spec,
                     "best": rl_module_spec,
                 }
             )
@@ -914,6 +981,14 @@ def setup_wandb(cfg: Config):
 def main() -> None:
     cfg = Config()
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
+
+    # ロガーのセットアップ
+    logger = setup_logger(cfg)
+
+    # WandbLoggerCallbackがロガーを使用できるようにする
+    # グローバル変数としてロガーを設定
+    global_logger = logger
+
     setup_wandb(cfg)
     # debug mode
     ray.init(
@@ -924,6 +999,7 @@ def main() -> None:
             }
         },
     )
+
     # 環境の登録
     register_env(name=cfg.env_name, env_creator=env_creator)
 
@@ -936,12 +1012,33 @@ def main() -> None:
         result = trainer.train()
         train_count += 1
         spend_minutes = (time() - train_start_time) / 60
-        # print(f"{train_count=} is finished. spend {spend_minutes:.1f} minutes")
-        print("train finished")
-        # print(f"{result.keys()=}")
+        logger.info(f"Training iteration {train_count} finished. Spent {spend_minutes:.1f} minutes")
+
         # 指定した時間経ったら学習を終了
-        # if spend_minutes > cfg.training_minutes:
-        break
+        if spend_minutes > cfg.training_minutes:
+            logger.info(f"Training completed after {spend_minutes:.1f} minutes")
+            break
+
+    # 最終モデルの保存(バグがある)
+    # try:
+    #     final_checkpoint = trainer.save_to_path(cfg.output_dir / "final_model")
+    #     logger.info(f"Final model saved to {final_checkpoint}")
+    # except Exception as e:
+    #     logger.error(f"Failed to save final model: {e}")
+    #     # 代替の保存方法を試みる
+    #     try:
+    #         # RLモジュールの状態だけを保存する
+    #         module_state = trainer.get_policy(OWN_POLICY_NAME).get_state()
+    #         torch.save(
+    #             {"state_dict": module_state},
+    #             cfg.output_dir / "final_model_policy_only.pt"
+    #         )
+    #         logger.info(f"Policy state saved to {cfg.output_dir / 'final_model_policy_only.pt'}")
+    #     except Exception as e2:
+    #         logger.error(f"Failed to save policy state: {e2}")
+    # 最終モデルの保存
+    # final_checkpoint = trainer.save_to_path(cfg.output_dir / "final_model")
+    # logger.info(f"Final model saved to {final_checkpoint}")
 
 
 if __name__ == "__main__":
