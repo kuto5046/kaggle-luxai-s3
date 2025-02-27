@@ -686,7 +686,7 @@ class LuxConvLSTMModel(nn.Module):
         self.num_layers = num_layers
         self.num_repeats = num_repeats
         
-        self.inc = nn.Conv2d(state_space_size + global_state_space_size, self.hidden_dim, kernel_size=1)
+        self.inc = DoubleConv(state_space_size + global_state_space_size, self.hidden_dim, res=False)
         
         self.drc = DRC(
             num_layers=self.num_layers,
