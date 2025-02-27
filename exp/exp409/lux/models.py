@@ -17,7 +17,7 @@ from torch.utils.data import Dataset, DataLoader
 
 import wandb
 
-from .utils import State, Action, GlobalState, HiddenState, HiddenGlobalState, to_np
+from .utils import State, Action, GlobalState, HiddenState, to_np
 from .params import EnvParams
 
 
@@ -76,7 +76,7 @@ class LuxAugmentStandardize(LuxAugmentBase):
             action = self.switch_action(action, Action.UP, Action.DOWN)
             action = self.switch_action(action, Action.LEFT, Action.RIGHT)
             sap = np.flip(sap, axis=(0, 1)).copy()
-            sap_count = np.flip(sap_count, axis=(2, 3)).copy()
+            sap_count = np.flip(sap_count, axis=(0, 1)).copy()
 
         inputs["state"] = state
         inputs["hidden_state"] = hidden_state
@@ -105,7 +105,7 @@ class LuxAugmentTranspose(LuxAugmentBase):
             action = self.switch_action(action, Action.UP, Action.LEFT)
             action = self.switch_action(action, Action.DOWN, Action.RIGHT)
             sap = np.transpose(sap, (1, 0)).copy()
-            sap_count = np.transpose(sap_count, (0, 2, 1)).copy()
+            sap_count = np.transpose(sap_count, (1, 0)).copy()
 
         inputs["state"] = state
         inputs["hidden_state"] = hidden_state
@@ -151,9 +151,9 @@ class LaxDataset(Dataset):
         global_state = np.stack(global_states, axis=0)  # (n_stack, channel)
 
         hidden_state = np.array(self.h5_file[str(episode_id)]["hidden_states"][str(step_idx)]).astype(np.float32)
-        hidden_global_state = np.array(self.h5_file[str(episode_id)]["hidden_global_states"][str(step_idx)]).astype(
-            np.float32
-        )
+        # hidden_global_state = np.array(self.h5_file[str(episode_id)]["hidden_global_states"][str(step_idx)]).astype(
+        #     np.float32
+        # )
         actions = np.array(self.h5_file[str(episode_id)]["actions"][str(step_idx)]).astype(np.float32)
         action = actions[0]
         sap = actions[1]
@@ -163,7 +163,7 @@ class LaxDataset(Dataset):
             "state": state,
             "global_state": global_state,
             "hidden_state": hidden_state,
-            "hidden_global_state": hidden_global_state,
+            # "hidden_global_state": hidden_global_state,
             "action": action,
             "sap_count": sap_count,
             "sap": sap,
@@ -237,7 +237,7 @@ class LaxLitModel(LightningModule):
         # self.criterion1 = MaskedBCEWithLogitsLoss()
         self.criterion2 = nn.BCEWithLogitsLoss()
         self.criterion3 = nn.MSELoss()
-        self.criterion4 = MaskedFocalLoss()
+        self.criterion4 = MaskedFocalTverskyLoss()
 
         metrics = self.get_metrics()
         self.train_metrics = metrics.clone(postfix="/train")
@@ -264,14 +264,14 @@ class LaxLitModel(LightningModule):
 
         # value_loss = self.criterion2(outputs["value"].flatten(), batch["win"])
         state_loss = self.criterion3(outputs["state"].flatten(), batch["hidden_state"].flatten())
-        global_state_loss = self.criterion3(outputs["global_state"].flatten(), batch["hidden_global_state"].flatten())
+        # global_state_loss = self.criterion3(outputs["global_state"].flatten(), batch["hidden_global_state"].flatten())
 
         sap_available_mask = batch["state"][:, -1, State.SAP_AVAILABLE_AREA] > 0  # (batch_size, w, h)
         sap_output = outputs["sap"].squeeze(1)  # shape: (batch, H, W)
         # 各サンプルごとに空間軸 (H, W) の和を計算し、sap が行われているか判定
-        sap_present_mask = sap_output.view(sap_output.shape[0], -1).sum(dim=1) > 0
+        sap_present_mask = batch["sap"].view(sap_output.shape[0], -1).sum(dim=1) > 0
 
-        if sap_present_mask.sum() > 0:
+        if sap_available_mask[sap_present_mask].sum() > 0:
             # sap_loss は、sap が存在するサンプルのみで計算
             sap_loss = self.criterion4(
                 sap_output[sap_present_mask], batch["sap"][sap_present_mask], sap_available_mask[sap_present_mask]
@@ -282,7 +282,7 @@ class LaxLitModel(LightningModule):
             policy_loss * self.cfg.loss_weight_policy
             + state_loss * self.cfg.loss_weight_state
             # + value_loss * self.cfg.loss_weight_value
-            + global_state_loss * self.cfg.loss_weight_global_state
+            # + global_state_loss * self.cfg.loss_weight_global_state
             + sap_loss * self.cfg.loss_weight_sap
         )
 
@@ -319,14 +319,14 @@ class LaxLitModel(LightningModule):
             logger=True,
         )
 
-        self.log(
-            f"GlobalStateLoss/{mode}",
-            global_state_loss,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=False,
-            logger=True,
-        )
+        # self.log(
+        #     f"GlobalStateLoss/{mode}",
+        #     global_state_loss,
+        #     on_step=False,
+        #     on_epoch=True,
+        #     prog_bar=False,
+        #     logger=True,
+        # )
         self.log(
             f"Loss/{mode}",
             loss,
@@ -544,15 +544,33 @@ class LuxUNetModel(nn.Module):
         self.down2 = Down(128, 256, res=res)
         self.down3 = Down(256, 256, res=res)
 
-        #
         factor = 2 if bilinear else 1
+
+        # グローバル状態の情報を統合した後の特徴マップを各タスクに分岐
+
+        # policy用の専用デコーダ
+        # self.policy_up1 = Up(256 * 2 + global_state_space_size, 256 // factor, bilinear)
+        # self.policy_up2 = Up(256, 128 // factor, bilinear)
+        # self.policy_up3 = Up(128, 64, bilinear)
+
+        # # sap用の専用デコーダ
+        # self.sap_up1 = Up(256 * 2 + global_state_space_size, 256 // factor, bilinear)
+        # self.sap_up2 = Up(256, 128 // factor, bilinear)
+        # self.sap_up3 = Up(128, 64, bilinear)
+
+        # # state用の専用デコーダ
+        # self.state_up1 = Up(256 * 2 + global_state_space_size, 256 // factor, bilinear)
+        # self.state_up2 = Up(256, 128 // factor, bilinear)
+        # self.state_up3 = Up(128, 64, bilinear)
+
+        #
         self.up1 = Up(256 * 2 + global_state_space_size, 256 // factor, bilinear)
         self.up2 = Up(256, 128 // factor, bilinear)
         self.up3 = Up(128, 64, bilinear)
         self.policy_net = OutConv(64 * n_stack, action_space_size)
         self.sap_net = OutConv(64 * n_stack, 1)
         self.state_net = OutConv(64 * n_stack, hidden_state_space_size)
-        self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
+        # self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
         # self.value_net = nn.Sequential(
         #     nn.Linear((256 + global_state_space_size) * n_stack, 128),
         #     nn.ReLU(),
@@ -560,13 +578,13 @@ class LuxUNetModel(nn.Module):
         #     nn.ReLU(),
         #     nn.Linear(64, 1),
         # )
-        self.global_state_net = nn.Sequential(
-            nn.Linear((256 + global_state_space_size) * n_stack, 128),
-            nn.ReLU(),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, len(HiddenGlobalState)),
-        )
+        # self.global_state_net = nn.Sequential(
+        #     nn.Linear((256 + global_state_space_size) * n_stack, 128),
+        #     nn.ReLU(),
+        #     nn.Linear(128, 64),
+        #     nn.ReLU(),
+        #     nn.Linear(64, len(HiddenGlobalState)),
+        # )
 
     def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         state = batch["state"]
@@ -585,9 +603,9 @@ class LuxUNetModel(nn.Module):
         gx = gx.repeat(1, 1, sx, sy)
 
         x4 = torch.cat([x4, gx], dim=1)
-        x = self.global_avg_pool(x4).view(_n, -1)
+        # x = self.global_avg_pool(x4).view(_n, -1)
         # value_logits = self.value_net(x)
-        global_state_logits = self.global_state_net(x)
+        # global_state_logits = self.global_state_net(x)
 
         x = self.up1(x4, x3)
         x = self.up2(x, x2)
@@ -596,13 +614,14 @@ class LuxUNetModel(nn.Module):
         x = x.view(_n, -1, _x, _y)
         policy_logits = self.policy_net(x)
         sap_logits = self.sap_net(x)
+        sap_logits = torch.sigmoid(sap_logits)
         state_logits = self.state_net(x)
 
         return {
             "policy": policy_logits,
             "sap": sap_logits,
             "state": state_logits,
-            "global_state": global_state_logits,
+            # "global_state": global_state_logits,
             # "value": value_logits,
         }
 
@@ -664,6 +683,52 @@ class DiceLoss(nn.Module):
         return loss / torch.sum(self.weights)
 
 
+class FocalTverskyLoss(nn.Module):
+    def __init__(
+        self, alpha: float = 0.5, beta: float = 0.5, gamma: float = 1.0, smooth: float = 1e-6, reduction: str = "mean"
+    ):
+        """
+        Focal Tversky Loss
+        :param alpha: False Positive に対する重み(通常 0.5)
+        :param beta: False Negative に対する重み(通常 0.5)
+        :param gamma: Focal 項のパラメータ。gamma > 1 で難しい例に注目
+        :param smooth: 数値安定性のためのスムージング項
+        :param reduction: 損失のリダクション方法 ("mean", "sum" など)
+        """
+        super().__init__()
+        self.alpha = alpha
+        self.beta = beta
+        self.gamma = gamma
+        self.smooth = smooth
+        self.reduction = reduction
+
+    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """
+        :param inputs: モデルの出力(シグモイドを適用する前の生のロジットでなく、0〜1の確率の場合はそのままでもよい)
+                       形状は (batch, …) で想定
+        :param targets: 教師信号、0/1 の二値マスク
+        :return: Focal Tversky Loss
+        """
+        # 入力とターゲットを(batch, -1)にフラット化
+        inputs = inputs.view(inputs.size(0), -1)
+        targets = targets.view(targets.size(0), -1).float()
+
+        # TP, FP, FNの計算
+        TP = (inputs * targets).sum(dim=1)
+        FP = (inputs * (1 - targets)).sum(dim=1)
+        FN = ((1 - inputs) * targets).sum(dim=1)
+
+        Tversky = (TP + self.smooth) / (TP + self.alpha * FP + self.beta * FN + self.smooth)
+        focal_loss = (1 - Tversky) ** self.gamma
+
+        if self.reduction == "mean":
+            return focal_loss.mean()
+        elif self.reduction == "sum":
+            return focal_loss.sum()
+        else:
+            return focal_loss
+
+
 class MaskedFocalLoss(nn.Module):
     def __init__(self, alpha=0.25, gamma=2):
         super().__init__()
@@ -677,3 +742,51 @@ class MaskedFocalLoss(nn.Module):
         focal_loss = self.alpha * (1 - pt) ** self.gamma * bce_loss
         masked_focal_loss = focal_loss * mask
         return masked_focal_loss.sum() / mask.sum()
+
+
+class MaskedFocalTverskyLoss(nn.Module):
+    def __init__(
+        self, alpha: float = 0.5, beta: float = 0.5, gamma: float = 1.0, smooth: float = 1e-6, reduction: str = "mean"
+    ):
+        """
+        Focal Tversky Loss with mask support.
+        :param alpha: False Positive に対する重み(通常 0.5)
+        :param beta: False Negative に対する重み(通常 0.5)
+        :param gamma: Focal項のパラメータ。gamma > 1 で難しい例に注目
+        :param smooth: 数値安定性のためのスムージング項
+        :param reduction: 'mean' もしくは 'sum'
+        """
+        super().__init__()
+        self.alpha = alpha
+        self.beta = beta
+        self.gamma = gamma
+        self.smooth = smooth
+        self.reduction = reduction
+
+    def forward(self, inputs: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """
+        :param inputs: 予測値。既に0〜1の確率値になっているか、シグモイド適用済みの値であることを想定。
+                       形状は (batch, ...) であることを前提とする。
+        :param targets: 教師ラベル。0/1のバイナリマスク。
+        :param mask: 損失計算対象となる領域を示すバイナリマスク。inputs と同じ形状。
+        :return: Focal Tversky Loss
+        """
+        # 入力とターゲット、maskを (batch, -1) にフラット化
+        inputs = inputs.view(inputs.size(0), -1)
+        targets = targets.view(targets.size(0), -1).float()
+        mask = mask.view(mask.size(0), -1).float()
+
+        # マスクを考慮してTP, FP, FNを計算
+        TP = (inputs * targets * mask).sum(dim=1)
+        FP = (inputs * (1 - targets) * mask).sum(dim=1)
+        FN = ((1 - inputs) * targets * mask).sum(dim=1)
+
+        Tversky = (TP + self.smooth) / (TP + self.alpha * FP + self.beta * FN + self.smooth)
+        focal_loss = (1 - Tversky) ** self.gamma
+
+        if self.reduction == "mean":
+            return focal_loss.mean()
+        elif self.reduction == "sum":
+            return focal_loss.sum()
+        else:
+            return focal_loss

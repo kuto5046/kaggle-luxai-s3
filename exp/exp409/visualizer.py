@@ -32,9 +32,11 @@ st.set_page_config(layout="wide")
 class Config:
     seed: int = 2025
     n_stack: int = 4
-    team_name: str = "kuto & okumura"
+    team_name: str = "aDg4b"
     exp_name: str = Path(__file__).parent.name
-    checkpoint_path: Path = Path(f"/home/user/work/exp/{exp_name}/output/best_model.ckpt")
+    checkpoint_path: Path = Path(
+        f"/home/kawattataido/デスクトップ/programing/kaggle/kaggle-luxai-s3/exp/{exp_name}/output/best_model.ckpt"
+    )
 
 
 def sigmoid(x):
@@ -110,13 +112,14 @@ def extract_results(
         state = extract_state(obs, target_team_id, episode_store)
         global_state = extract_global_state(obs, target_team_id, env_params, episode_store)
         gt_state = extract_gt_state(gt_obs, target_team_id)
-        policy_map, _ = model.predict(obs, target_team_id, episode_store)
+        policy_map, _, sap_map = model.predict(obs, target_team_id, episode_store)
 
         results["obs"].append(obs)
         results["state"].append(state)
         results["gt_state"].append(gt_state)
         results["global_state"].append(global_state)
         results["policy_map"].append(policy_map)
+        results["sap_map"].append(sap_map)
         results["action"].append(next_actions)  # その状態からどう行動したかを知りたいのnext_actions
     return results
 
@@ -164,6 +167,29 @@ def visualize_unit_positions(unit_positions: list[tuple[int, int]], target_team_
         yaxis=dict(showgrid=False, zeroline=False),
     )
     st.plotly_chart(fig, key="unitの位置")
+
+
+def visualize_sap_map(sap_map: np.ndarray, title="SAP Map"):
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=sap_map,
+            showscale=True,
+        )
+    )
+    # グリッド線の追加
+    for i in range(25):
+        fig.add_shape(type="line", x0=i - 0.5, y0=-0.5, x1=i - 0.5, y1=23.5, line=dict(color="lightgray", width=1))
+        fig.add_shape(type="line", x0=-0.5, y0=i - 0.5, x1=23.5, y1=i - 0.5, line=dict(color="lightgray", width=1))
+
+    fig.update_layout(
+        title=title,
+        width=800,
+        height=800,
+        plot_bgcolor="white",
+        xaxis=dict(showgrid=False, zeroline=False),
+        yaxis=dict(showgrid=False, zeroline=False),
+    )
+    st.plotly_chart(fig, key="sapの位置")
 
 
 def visualize_policy(
@@ -287,13 +313,16 @@ def main():
         ############################################################
         unit_positions = obs["units"]["position"][target_team_id]
         policy_map = results["policy_map"][step_idx]
+        sap_map = results["sap_map"][step_idx]
         real_actions = results["action"][step_idx]
         st.subheader("Policy")
-        cols = st.columns([1, 2])
+        cols = st.columns([1, 2, 3])
         with cols[0]:
             visualize_unit_positions(unit_positions, target_team_id, title="Unit Positions")
         with cols[1]:
             visualize_policy(policy_map, real_actions, unit_positions, title="Policy", n_cols=8)
+        with cols[2]:
+            visualize_sap_map(sap_map, title="SAP Map")
 
 
 if __name__ == "__main__":
