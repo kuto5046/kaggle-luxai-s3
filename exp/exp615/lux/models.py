@@ -700,11 +700,11 @@ class LuxConvLSTMModel(nn.Module):
         self.state_net = OutConv(self.hidden_dim, hidden_state_space_size)
         self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
         self.global_state_net = nn.Sequential(
-            nn.Linear(128, 128),
+            nn.Linear(self.hidden_dim, self.hidden_dim),
             nn.ReLU(),
-            nn.Linear(128, 64),
+            nn.Linear(self.hidden_dim, self.hidden_dim // 2),
             nn.ReLU(),
-            nn.Linear(64, len(HiddenGlobalState)),
+            nn.Linear(self.hidden_dim // 2, len(HiddenGlobalState)),
         )
 
 

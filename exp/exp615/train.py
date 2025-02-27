@@ -44,11 +44,13 @@ class Config:
     lr: float = 0.001
     weight_decay: float = 0.01
     warmup_step_rate: float = 0.0  # no warmup
+    
     # model
-    num_repeats = 1
-    num_layers = 4
-    hidden_dim = 64
+    num_repeats: int = 1
+    num_layers: int = 4
+    hidden_dim: int = 64
     n_stack: int = 4
+    aug: bool = True
     
     # loss
     loss_weight_policy: float = 1.0
