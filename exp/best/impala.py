@@ -88,7 +88,7 @@ class Config:
     evaluation_duration: int = 4  # 1回の評価で何エピソード分評価するか
 
     # learner
-    training_minutes: int = 1
+    training_minutes: int = 10
     learner_queue_size: int = 20  # workerからLearnerに送られるバッチのキューの最大サイズ. [batch_size]*queue_sizeがcpuメモリに乗りbatchごとに学習する
     gamma: float = 0.99
     lr: float = 1e-4
@@ -516,11 +516,6 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
         return TorchCategorical
 
 
-def train_metric_value(results: dict[str, Any], key: str) -> float:
-    # 自身はOWN_POLICY_NAMEとして評価している
-    return results[OWN_POLICY_NAME][key]
-
-
 @ray.remote
 class EpisodeStatsCollector:
     def __init__(self):
@@ -589,6 +584,7 @@ class WandbLoggerCallback(RLlibCallback):
 
         # 各ワーカープロセス用にロガーを初期化
         self._setup_logger()
+        self._evaluation_wins = []
 
     def _setup_logger(self):
         """各ワーカープロセス用にロガーを設定"""
@@ -643,21 +639,28 @@ class WandbLoggerCallback(RLlibCallback):
 
         learner_metrics = [
             # loss
+            "num_non_trainable_parameters",
+            "gradients_default_optimizer_global_norm",
+            "diff_num_grad_updates_vs_sampler_policy",
+            "module_train_batch_size_mean",
+            "pi_loss",
+            "num_module_steps_trained_lifetime",
+            "weights_seq_no",
             "total_loss",
-            "vf_loss",
-            "vf_loss_unclipped",
-            "policy_loss",
-            "mean_kl_loss",
-            # other
-            "entropy",
-            "vf_explained_var",
             "default_optimizer_learning_rate",
+            "mean_pi_loss",
+            "num_module_steps_trained",
+            "mean_vf_loss",
+            "num_trainable_parameters",
+            "curr_entropy_coeff",
+            "vf_loss",
+            "entropy",
         ]
-        self.logger.info(f"Learners keys: {result['learners'].keys()}")
+
         for key in learner_metrics:
             wandb.log(
                 {
-                    f"train/{key}": train_metric_value(result["learners"], key),
+                    f"train/{key}": result["learners"][OWN_POLICY_NAME][key],
                 }
             )
 
@@ -695,16 +698,25 @@ class WandbLoggerCallback(RLlibCallback):
         # 自身はOWN_POLICY_NAMEとして評価している
         mean_rewards = evaluation_metrics["env_runners"]["module_episode_returns_mean"][OWN_POLICY_NAME]
         evaluation_minutes = evaluation_metrics["env_runners"]["env_to_module_sum_episodes_length_in"] / 60
-        # wins = sum(1 for r in mean_rewards if r > 0)  # 報酬が正の場合は勝利
-        # win_rate = wins / len(mean_rewards) if mean_rewards else 0.0
+        if len(self._evaluation_wins) == 0:
+            wins = 0
+            win_rate = 0
+        else:
+            wins = sum(self._evaluation_wins)
+            win_rate = wins / len(self._evaluation_wins)
 
         wandb.log(
             {
                 "evaluate/mean_rewards": mean_rewards,
                 "evaluate/evaluation_minutes": evaluation_minutes,
-                # "evaluate/win_rate": win_rate,
+                "evaluate/wins": wins,
+                "evaluate/win_rate": win_rate,
             }
         )
+
+        print(f"{wins=} {win_rate=}")
+        # reset
+        self._evaluation_wins = []
         # TODO: 保存時にバグがあるかも？
         # checkpoint_dir = algorithm.save_to_path(self.output_dir)
         # self.logger.info(f"Model saved to {checkpoint_dir}")
@@ -720,6 +732,13 @@ class WandbLoggerCallback(RLlibCallback):
         **kwargs,
     ) -> None:
         # エピソード完了を記録
+
+        episode_rewards = episode.get_rewards()
+        # episode合計値をとる
+        episode_total_reward = {k: sum(v) for k, v in episode_rewards.items()}
+        is_win = episode_total_reward["player_0"] > episode_total_reward["player_1"]
+        self._evaluation_wins.append(is_win)
+
         ray.get(self._stats_collector.add_episode.remote())
         # 統計を取得して記録
         eps_per_min, total_episodes = ray.get(self._stats_collector.get_stats.remote())
@@ -1006,9 +1025,9 @@ def main() -> None:
     config = create_rl_config(cfg)
     trainer = config.build_algo(env=cfg.env_name)
 
-    train_start_time = time()
     train_count = 0
     while True:
+        train_start_time = time()
         result = trainer.train()
         train_count += 1
         spend_minutes = (time() - train_start_time) / 60
