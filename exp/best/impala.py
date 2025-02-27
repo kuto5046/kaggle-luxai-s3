@@ -67,13 +67,13 @@ class Config:
     env_name: str = "lux-s3-v0"
     n_stack: int = 4
     root_dir: Path = Path(f"/home/user/work/exp/{exp_name}")
-    pretrained_path: Path | None = None  # root_dir / "output/best_model.ckpt"
+    pretrained_path: Path | None = root_dir / "output/best_model.ckpt"
     debug: bool = False
     output_dir: Path = root_dir / "output"
 
     # 以下の3つのrunnerにcpuとgpuを割り振る。cpuの合計値がcpu数を超えないように注意
     # データ収集用
-    num_env_runners: int = 10  # actorの数
+    num_env_runners: int = 20  # actorの数
     num_cpus_per_env_runner: int = 1
     rollout_fragment_length: int = 1  # 時系列を特に考えない場合1
 
@@ -83,20 +83,19 @@ class Config:
     num_gpus_per_learner: int = 1
 
     # 評価用
-    evaluation_num_env_runners: int = 0  # 評価用のenv runnerの数
-    evaluation_interval: int = 0  # 何回trainをしたら評価を実施するか
-    evaluation_duration: int = 1  # 1回の評価で何エピソード分評価するか
+    evaluation_num_env_runners: int = 2  # 評価用のenv runnerの数
+    evaluation_interval: int = 1  # 何回trainをしたら評価を実施するか
+    evaluation_duration: int = 20  # 1回の評価で何エピソード分評価するか
 
     # learner
-    training_minutes: int = 10
-    learner_queue_size: int = 2  # workerからLearnerに送られるバッチのキューの最大サイズ. [batch_size]*queue_sizeがcpuメモリに乗りbatchごとに学習する
+    training_minutes: int = 60 * 24  # 1日
+    learner_queue_size: int = 50  # workerからLearnerに送られるバッチのキューの最大サイズ. [batch_size]*queue_sizeがcpuメモリに乗りbatchごとに学習する
     gamma: float = 0.99
     lr: float = 1e-4
-    # batch size
-    # # 一応1episodeのサイズにしてるが不要かも。もしくはrollout_fragment_length部分で調整する
+    # batch size 一応1episodeのサイズにしてるが不要かも。もしくはrollout_fragment_length部分で調整する
     train_batch_size_per_learner: int = 512
     # 1回の学習データ(train_batch_size*queue_size)を何epoch分学習するか
-    num_epochs: int = 1
+    num_epochs: int = 2
     replay_proportion: float = 0.0  # リプレイバッファの割合
     # loss
     vtrace_clip_rho_threshold: float = 1.0  # 価値関数のlossの係数
@@ -460,6 +459,7 @@ class RLLibLuxEnv(MultiAgentEnv):
 class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
     @override(TorchRLModule)
     def setup(self):
+        torch.set_num_threads(1)
         self.policy_model = LuxUNetModel(
             state_space_size=len(State),
             global_state_space_size=len(GlobalState),
@@ -582,10 +582,10 @@ class EpisodeStatsCollector:
         }
 
 
-def setup_logger(cfg: Config):
+def setup_logger(output_dir: Path):
     """ロガーの設定"""
     # ログディレクトリの作成
-    log_dir = cfg.output_dir / "logs"
+    log_dir = output_dir
     log_dir.mkdir(parents=True, exist_ok=True)
 
     # ロガーの設定
@@ -625,7 +625,7 @@ class WandbLoggerCallback(RLlibCallback):
             WandbLoggerCallback._stats_collector = EpisodeStatsCollector.remote()
 
         # 各ワーカープロセス用にロガーを初期化
-        self.logger = setup_logger()
+        self.logger = setup_logger(self.output_dir)
 
     # 学習状況をwandbに流す用
     @override(RLlibCallback)
@@ -651,8 +651,15 @@ class WandbLoggerCallback(RLlibCallback):
         if "learners" not in result:
             return
 
-        self.logger.info(result)
-        self.logger.info(metrics_logger.get_state())
+        wandb.log(
+            {
+                "train/training_iteration": result["timers"]["training_iteration"],
+                "train/evaluation_iteration": result["timers"]["evaluation_iteration"],
+                "train/env_runner_time_between_sampling": result["env_runners"]["time_between_sampling"],
+                "train/time_this_iter_s": result["time_this_iter_s"],
+                "train/num_module_steps_trained": result["learners"][OWN_POLICY_NAME]["num_module_steps_trained"],
+            }
+        )
         learner_metrics = result["learners"][OWN_POLICY_NAME].keys()
         for key in learner_metrics:
             wandb.log(
@@ -697,7 +704,7 @@ class WandbLoggerCallback(RLlibCallback):
             {
                 "evaluate/mean_rewards": mean_rewards,
                 "evaluate/evaluation_minutes": evaluation_minutes,
-                "evaluate/wins": eval_stats["wins"],
+                # "evaluate/wins": eval_stats["wins"],
                 "evaluate/win_rate": eval_stats["win_rate"],
                 "evaluate/total_episodes": eval_stats["total"],
             }
@@ -709,7 +716,7 @@ class WandbLoggerCallback(RLlibCallback):
         ray.get(self._stats_collector.end_evaluation.remote())
 
         # TODO: 勝率が更新された場合に保存するようにする(評価の試合数がそれなりにないと微妙そう)
-        save_model(algorithm, self.output_dir, suffix=f"_model_eval_{self._current_evaluation_id}")
+        save_model(algorithm, self.output_dir, suffix=f"model_eval_{self._current_evaluation_id}")
 
     @override(RLlibCallback)
     def on_episode_end(
@@ -971,7 +978,7 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
             evaluation_interval=cfg.evaluation_interval,
             evaluation_duration=cfg.evaluation_duration,
             evaluation_duration_unit="episodes",
-            evaluation_sample_timeout_s=60 * 5,
+            evaluation_sample_timeout_s=60 * 20,
             evaluation_force_reset_envs_before_iteration=True,  # 各評価の前に環境をリセット
             evaluation_parallel_to_training=True,  # 評価と学習を並列に実行
         )
@@ -993,13 +1000,13 @@ def setup_wandb(cfg: Config):
 
 
 def save_model(trainer: Algorithm, output_dir: Path, suffix: str = "model"):
-    model_state_dict = trainer.learner_group.get_state()["learner"]["rl_module"][OWN_POLICY_NAME]
-    policy_state_dict = {
-        k.replace("policy_model.", ""): v for k, v in model_state_dict.items() if k.startswith("policy_model")
-    }
-    value_state_dict = {
-        k.replace("value_model.", ""): v for k, v in model_state_dict.items() if k.startswith("value_model")
-    }
+    """
+    rllibのapiを使わず直接モデルを保存する
+    モデルの名前はrlmoduleで定義した名前を使う
+    """
+    policy_state_dict = trainer.get_module(OWN_POLICY_NAME).policy_model
+    value_state_dict = trainer.get_module(OWN_POLICY_NAME).value_model
+
     torch.save(policy_state_dict, output_dir / f"policy_{suffix}.pth")
     torch.save(value_state_dict, output_dir / f"value_{suffix}.pth")
 
@@ -1009,7 +1016,7 @@ def main() -> None:
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
 
     # ロガーのセットアップ
-    logger = setup_logger(cfg)
+    logger = setup_logger(cfg.output_dir)
 
     setup_wandb(cfg)
     # debug mode
@@ -1028,13 +1035,12 @@ def main() -> None:
         train_count += 1
         spend_minutes = (time() - train_start_time) / 60
         logger.info(f"Training iteration {train_count} finished. Spent {spend_minutes:.1f} minutes")
-        break
         # 指定した時間経ったら学習を終了
-        # if spend_minutes > cfg.training_minutes:
-        #     logger.info(f"Training completed after {spend_minutes:.1f} minutes")
-        #     break
+        if spend_minutes > cfg.training_minutes:
+            logger.info(f"Training completed after {spend_minutes:.1f} minutes")
+            break
 
-    save_model(trainer, cfg.output_dir, suffix="_latest_model")
+    save_model(trainer, cfg.output_dir, suffix="latest_model")
 
 
 if __name__ == "__main__":
