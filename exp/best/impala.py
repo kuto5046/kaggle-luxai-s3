@@ -68,12 +68,12 @@ class Config:
     n_stack: int = 4
     root_dir: Path = Path(f"/home/user/work/exp/{exp_name}")
     pretrained_path: Path | None = None  # root_dir / "output/best_model.ckpt"
-    debug: bool = True
+    debug: bool = False
     output_dir: Path = root_dir / "output"
 
     # 以下の3つのrunnerにcpuとgpuを割り振る。cpuの合計値がcpu数を超えないように注意
     # データ収集用
-    num_env_runners: int = 20  # actorの数
+    num_env_runners: int = 10  # actorの数
     num_cpus_per_env_runner: int = 1
     rollout_fragment_length: int = 1  # 時系列を特に考えない場合1
 
@@ -83,23 +83,25 @@ class Config:
     num_gpus_per_learner: int = 1
 
     # 評価用
-    evaluation_num_env_runners: int = 2  # 評価用のenv runnerの数
+    evaluation_num_env_runners: int = 10  # 評価用のenv runnerの数
     evaluation_interval: int = 1  # 何回trainをしたら評価を実施するか
-    evaluation_duration: int = 4  # 1回の評価で何エピソード分評価するか
+    evaluation_duration: int = 10  # 1回の評価で何エピソード分評価するか
 
     # learner
     training_minutes: int = 10
-    learner_queue_size: int = 20  # workerからLearnerに送られるバッチのキューの最大サイズ. [batch_size]*queue_sizeがcpuメモリに乗りbatchごとに学習する
+    learner_queue_size: int = 2  # workerからLearnerに送られるバッチのキューの最大サイズ. [batch_size]*queue_sizeがcpuメモリに乗りbatchごとに学習する
     gamma: float = 0.99
     lr: float = 1e-4
     # batch size
     train_batch_size_per_learner: int = (
-        505  # 一応1episodeのサイズにしてるが不要かも。もしくはrollout_fragment_length部分で調整する
+        512  # 一応1episodeのサイズにしてるが不要かも。もしくはrollout_fragment_length部分で調整する
     )
     # 1回の学習データ(train_batch_size*queue_size)を何epoch分学習するか
     num_epochs: int = 1
-
+    replay_proportion: float = 0.0  # リプレイバッファの割合
     # loss
+    vtrace_clip_rho_threshold: float = 1.0  # 価値関数のlossの係数
+    vtrace_clip_pg_rho_threshold: float = 1.0  # ポリシー勾配のlossの係数
     vf_loss_coeff: float = 1.0  # 価値関数のlossの係数
     entropy_coeff: float = 1.0  # エントロピーのlossの係数(大きくすると)
 
@@ -521,23 +523,64 @@ class EpisodeStatsCollector:
     def __init__(self):
         self.episode_end_times = deque(maxlen=1000)
         self.total_episodes = 0
+        self.eval_total_episodes = 0
         self.last_log_time = time()
+        # 評価用の変数
+        self.evaluation_wins = []
+        self.current_evaluation_id = 0
+        self.is_evaluation_active = False
 
     def add_episode(self):
         self.episode_end_times.append(time())
         self.total_episodes += 1
+        self.eval_total_episodes += 1
 
-    def get_stats(self):
+    def start_evaluation(self):
+        """評価開始時に呼び出す"""
+        self.current_evaluation_id += 1
+        self.evaluation_wins = []
+        self.eval_total_episodes = 0
+        return self.current_evaluation_id
+
+    def end_evaluation(self):
+        """評価終了時に呼び出す"""
+        return self.evaluation_wins
+
+    def record_evaluation_result(self, is_win):
+        """評価エピソードの結果を記録"""
+        self.evaluation_wins.append(is_win)
+
+    def get_evaluation_stats(self):
+        """現在の評価統計を取得"""
+        wins = sum(self.evaluation_wins) if self.evaluation_wins else 0
+        total = len(self.evaluation_wins)
+        win_rate = wins / total if total > 0 else 0
+        return {
+            "wins": wins,
+            "total": total,
+            "win_rate": win_rate,
+        }
+
+    def get_speed_stats(self):
         if len(self.episode_end_times) < 2:
-            return 0.0, self.total_episodes
+            return {
+                "episode_per_minute": 0.0,
+                "total_episodes": self.total_episodes,
+            }
 
         window_duration = self.episode_end_times[-1] - self.episode_end_times[0]
         if window_duration == 0:
-            return 0.0, self.total_episodes
+            return {
+                "episode_per_minute": 0.0,
+                "total_episodes": self.total_episodes,
+            }
 
-        eps_per_sec = (len(self.episode_end_times) - 1) / window_duration
-        eps_per_min = eps_per_sec * 60
-        return eps_per_min, self.total_episodes
+        episode_per_sec = (len(self.episode_end_times) - 1) / window_duration
+        episode_per_minute = episode_per_sec * 60
+        return {
+            "episode_per_minute": episode_per_minute,
+            "total_episodes": self.total_episodes,
+        }
 
 
 def setup_logger(cfg: Config):
@@ -584,7 +627,6 @@ class WandbLoggerCallback(RLlibCallback):
 
         # 各ワーカープロセス用にロガーを初期化
         self._setup_logger()
-        self._evaluation_wins = []
 
     def _setup_logger(self):
         """各ワーカープロセス用にロガーを設定"""
@@ -656,7 +698,7 @@ class WandbLoggerCallback(RLlibCallback):
             "vf_loss",
             "entropy",
         ]
-
+        learner_metrics = result["learners"][OWN_POLICY_NAME].keys()
         for key in learner_metrics:
             wandb.log(
                 {
@@ -665,6 +707,18 @@ class WandbLoggerCallback(RLlibCallback):
             )
 
     # 学習したモデルの性能評価をwandbに流す用
+    def on_evaluate_start(
+        self,
+        *,
+        algorithm: "Algorithm",
+        metrics_logger: MetricsLogger | None = None,
+        **kwargs,
+    ) -> None:
+        """Called at the beginning of Algorithm.evaluate()."""
+        # 中央の評価トラッカーに評価開始を通知
+        self._current_evaluation_id = ray.get(self._stats_collector.start_evaluation.remote())
+        self.logger.info(f"Evaluation {self._current_evaluation_id} started")
+
     def on_evaluate_end(
         self,
         *,
@@ -673,55 +727,32 @@ class WandbLoggerCallback(RLlibCallback):
         evaluation_metrics: dict,
         **kwargs,
     ) -> None:
-        """Runs when the evaluation is done.
+        """Runs when the evaluation is done."""
 
-        Runs at the end of Algorithm.evaluate().
+        if not evaluation_metrics.get("env_runners"):
+            return
 
-        Args:
-            algorithm: Reference to the algorithm instance.
-            metrics_logger: The MetricsLogger object inside the `Algorithm`. Can be
-                used to log custom metrics after the most recent evaluation round.
-            evaluation_metrics: Results dict to be returned from algorithm.evaluate().
-                You can mutate this object to add additional metrics.
-            kwargs: Forward compatibility placeholder.
-
-        evaluation_metrics['env_runners'].keys()=dict_keys([
-        'agent_episode_returns_mean', 'timers', 'num_agent_steps_sampled_lifetime', 'episode_len_min', 'num_module_steps_sampled',
-        'num_agent_steps_sampled', 'episode_duration_sec_mean', 'episode_return_max', 'episode_len_mean', 'num_env_steps_sampled_lifetime',
-        'module_episode_returns_mean', 'num_episodes', 'num_episodes_lifetime', 'agent_steps', 'episode_return_min', 'num_module_steps_sampled_lifetime',
-        'num_env_steps_sampled', 'episode_len_max', 'env_to_module_sum_episodes_length_out', 'episode_return_mean', 'env_to_module_sum_episodes_length_in'
-        ])
-
-        agent_episode_returns_meanはkeyがplayer_0, player_1, ...となっている
-        module_episode_returns_meanはkeyが設定したpolicy名となっている
-        """
-        # 自身はOWN_POLICY_NAMEとして評価している
         mean_rewards = evaluation_metrics["env_runners"]["module_episode_returns_mean"][OWN_POLICY_NAME]
         evaluation_minutes = evaluation_metrics["env_runners"]["env_to_module_sum_episodes_length_in"] / 60
-        if len(self._evaluation_wins) == 0:
-            wins = 0
-            win_rate = 0
-        else:
-            wins = sum(self._evaluation_wins)
-            win_rate = wins / len(self._evaluation_wins)
 
+        # 中央の評価トラッカーから評価結果を取得
+        eval_stats = ray.get(self._stats_collector.get_evaluation_stats.remote())
+        # wandbに記録
         wandb.log(
             {
                 "evaluate/mean_rewards": mean_rewards,
                 "evaluate/evaluation_minutes": evaluation_minutes,
-                "evaluate/wins": wins,
-                "evaluate/win_rate": win_rate,
+                "evaluate/wins": eval_stats["wins"],
+                "evaluate/win_rate": eval_stats["win_rate"],
+                "evaluate/total_episodes": eval_stats["total"],
             }
         )
 
-        print(f"{wins=} {win_rate=}")
-        # reset
-        self._evaluation_wins = []
-        # TODO: 保存時にバグがあるかも？
-        # checkpoint_dir = algorithm.save_to_path(self.output_dir)
-        # self.logger.info(f"Model saved to {checkpoint_dir}")
+        self.logger.info(f"Evaluation {self._current_evaluation_id} completed episodes={eval_stats['total']}")
 
-    # データ収集状況をwandbに流す用
+        # 評価結果をリセット
+        ray.get(self._stats_collector.end_evaluation.remote())
+
     @override(RLlibCallback)
     def on_episode_end(
         self,
@@ -732,19 +763,19 @@ class WandbLoggerCallback(RLlibCallback):
         **kwargs,
     ) -> None:
         # エピソード完了を記録
+        ray.get(self._stats_collector.add_episode.remote())
 
         episode_rewards = episode.get_rewards()
-        # episode合計値をとる
         episode_total_reward = {k: sum(v) for k, v in episode_rewards.items()}
-        is_win = episode_total_reward["player_0"] > episode_total_reward["player_1"]
-        self._evaluation_wins.append(is_win)
+        is_win = (episode_total_reward["player_0"] > episode_total_reward["player_1"]) * 1
 
-        ray.get(self._stats_collector.add_episode.remote())
-        # 統計を取得して記録
-        eps_per_min, total_episodes = ray.get(self._stats_collector.get_stats.remote())
+        if env_runner.config.in_evaluation:
+            ray.get(self._stats_collector.record_evaluation_result.remote(is_win))
 
-        # if total_episodes % 10 == 0:
-        self.logger.info(f"Episode {total_episodes} finished. Collection speed: {eps_per_min:.2f} eps/min")
+        stats = ray.get(self._stats_collector.get_speed_stats.remote())
+        self.logger.info(
+            f"Episode {stats['total_episodes']} finished. {is_win=} Collection speed: {stats['episode_per_minute']:.2f} eps/min"
+        )
 
 
 class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
@@ -942,8 +973,11 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
             # learnerの設定
             train_batch_size_per_learner=cfg.train_batch_size_per_learner,
             learner_queue_size=cfg.learner_queue_size,
+            replay_proportion=cfg.replay_proportion,
             # loss
             vtrace=True,
+            vtrace_clip_rho_threshold=cfg.vtrace_clip_rho_threshold,
+            vtrace_clip_pg_rho_threshold=cfg.vtrace_clip_pg_rho_threshold,
             vf_loss_coeff=cfg.vf_loss_coeff,
             entropy_coeff=cfg.entropy_coeff,
         )
@@ -983,6 +1017,9 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
             evaluation_force_reset_envs_before_iteration=True,  # 各評価の前に環境をリセット
             evaluation_parallel_to_training=True,  # 評価と学習を並列に実行
         )
+        .checkpointing(
+            export_native_model_files=True,
+        )
     )
     return config
 
@@ -997,16 +1034,17 @@ def setup_wandb(cfg: Config):
     )
 
 
+def save_model(cfg: Config, trainer: Algorithm):
+    # torch　state_dictを保存
+    torch.save(trainer.get_policy(OWN_POLICY_NAME).get_state(), cfg.output_dir / "bset_rl_model.pt")
+
+
 def main() -> None:
     cfg = Config()
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
 
     # ロガーのセットアップ
     logger = setup_logger(cfg)
-
-    # WandbLoggerCallbackがロガーを使用できるようにする
-    # グローバル変数としてロガーを設定
-    global_logger = logger
 
     setup_wandb(cfg)
     # debug mode
@@ -1037,27 +1075,6 @@ def main() -> None:
         if spend_minutes > cfg.training_minutes:
             logger.info(f"Training completed after {spend_minutes:.1f} minutes")
             break
-
-    # 最終モデルの保存(バグがある)
-    # try:
-    #     final_checkpoint = trainer.save_to_path(cfg.output_dir / "final_model")
-    #     logger.info(f"Final model saved to {final_checkpoint}")
-    # except Exception as e:
-    #     logger.error(f"Failed to save final model: {e}")
-    #     # 代替の保存方法を試みる
-    #     try:
-    #         # RLモジュールの状態だけを保存する
-    #         module_state = trainer.get_policy(OWN_POLICY_NAME).get_state()
-    #         torch.save(
-    #             {"state_dict": module_state},
-    #             cfg.output_dir / "final_model_policy_only.pt"
-    #         )
-    #         logger.info(f"Policy state saved to {cfg.output_dir / 'final_model_policy_only.pt'}")
-    #     except Exception as e2:
-    #         logger.error(f"Failed to save policy state: {e2}")
-    # 最終モデルの保存
-    # final_checkpoint = trainer.save_to_path(cfg.output_dir / "final_model")
-    # logger.info(f"Final model saved to {final_checkpoint}")
 
 
 if __name__ == "__main__":
