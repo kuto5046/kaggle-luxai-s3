@@ -525,6 +525,42 @@ class OutConv(nn.Module):
         return self.conv(x)
 
 
+class UNet(nn.Module):
+    def __init__(self, n_channels: int, bilinear: bool = True, res: bool = False) -> None:
+        super().__init__()
+        self.bilinear = bilinear
+        # 入力直後の特徴抽出
+        self.inc = DoubleConv(n_channels, n_channels, res=res)
+        self.down1 = Down(n_channels, n_channels * 2, res=res)
+        self.down2 = Down(n_channels * 2, n_channels * 4, res=res)
+        self.down3 = Down(n_channels * 4, n_channels * 4, res=res)
+
+        factor = 2 if bilinear else 1
+        # up1: down3 の出力と down2 の skip connection を利用
+        self.up1 = Up(n_channels * 4 * 2, n_channels * 2 // factor, bilinear)
+        # up2: up1 の出力と down1 の skip connection を利用
+        # down1 の出力は n_channels*2, up1 の出力は n_channels*2//factor なので連結後は (n_channels*2 + n_channels*2//factor)
+        self.up2 = Up((n_channels * 2) + (n_channels * 2 // factor), n_channels // factor, bilinear)
+        # up3: up2 の出力と inc の skip connection を利用
+        self.up3 = Up((n_channels // factor) + n_channels, n_channels, bilinear)
+        # 出力層（必要に応じて出力チャネル数を変更）
+        self.outc = OutConv(n_channels, n_channels)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x0 = self.inc(x)  # inc: 入力直後の特徴 (例: [batch, n_channels, H, W])
+        x1 = self.down1(x0)  # [batch, n_channels*2, H/2, W/2]
+        x2 = self.down2(x1)  # [batch, n_channels*4, H/4, W/4]
+        x3 = self.down3(x2)  # [batch, n_channels*4, H/8, W/8]
+
+        x = self.up1(x3, x2)  # skip connection from x2
+        x = self.up2(
+            x, x1
+        )  # skip connection from x1; ここで連結後のチャンネル数は (n_channels*2) + (n_channels*2//factor)
+        x = self.up3(x, x0)  # skip connection from x0 (inc の出力)
+        x = self.outc(x)
+        return x
+
+
 class LuxUNetModel(nn.Module):
     def __init__(
         self,
@@ -539,37 +575,25 @@ class LuxUNetModel(nn.Module):
         super().__init__()
         self.bilinear = bilinear
 
-        self.inc = DoubleConv(state_space_size, 64, res=res)
-        self.down1 = Down(64, 128, res=res)
-        self.down2 = Down(128, 256, res=res)
-        self.down3 = Down(256, 256, res=res)
+        base_channels = 64
+
+        self.inc = DoubleConv(state_space_size, base_channels, res=res)
+        self.down1 = Down(base_channels, base_channels * 2, res=res)
+        self.down2 = Down(base_channels * 2, base_channels * 4, res=res)
+        self.down3 = Down(base_channels * 4, base_channels * 4, res=res)
 
         factor = 2 if bilinear else 1
 
-        # グローバル状態の情報を統合した後の特徴マップを各タスクに分岐
+        self.up1 = Up(base_channels * 4 * 2 + global_state_space_size, base_channels * 4 // factor, bilinear)
+        self.up2 = Up(base_channels * 4, base_channels * 2 // factor, bilinear)
+        self.up3 = Up(base_channels * 2, base_channels, bilinear)
 
-        # policy用の専用デコーダ
-        # self.policy_up1 = Up(256 * 2 + global_state_space_size, 256 // factor, bilinear)
-        # self.policy_up2 = Up(256, 128 // factor, bilinear)
-        # self.policy_up3 = Up(128, 64, bilinear)
+        self.sap_unet = UNet(base_channels, bilinear=bilinear, res=res)
+        self.other_unet = UNet(base_channels, bilinear=bilinear, res=res)
 
-        # # sap用の専用デコーダ
-        # self.sap_up1 = Up(256 * 2 + global_state_space_size, 256 // factor, bilinear)
-        # self.sap_up2 = Up(256, 128 // factor, bilinear)
-        # self.sap_up3 = Up(128, 64, bilinear)
-
-        # # state用の専用デコーダ
-        # self.state_up1 = Up(256 * 2 + global_state_space_size, 256 // factor, bilinear)
-        # self.state_up2 = Up(256, 128 // factor, bilinear)
-        # self.state_up3 = Up(128, 64, bilinear)
-
-        #
-        self.up1 = Up(256 * 2 + global_state_space_size, 256 // factor, bilinear)
-        self.up2 = Up(256, 128 // factor, bilinear)
-        self.up3 = Up(128, 64, bilinear)
-        self.policy_net = OutConv(64 * n_stack, action_space_size)
-        self.sap_net = OutConv(64 * n_stack, 1)
-        self.state_net = OutConv(64 * n_stack, hidden_state_space_size)
+        self.policy_net = OutConv(base_channels * n_stack, action_space_size)
+        self.sap_net = OutConv(base_channels * n_stack, 1)
+        self.state_net = OutConv(base_channels * n_stack, hidden_state_space_size)
         # self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
         # self.value_net = nn.Sequential(
         #     nn.Linear((256 + global_state_space_size) * n_stack, 128),
@@ -611,11 +635,15 @@ class LuxUNetModel(nn.Module):
         x = self.up2(x, x2)
         x = self.up3(x, x1)
 
-        x = x.view(_n, -1, _x, _y)
-        policy_logits = self.policy_net(x)
-        sap_logits = self.sap_net(x)
+        other_x = self.other_unet(x)
+        sap_x = self.sap_unet(x)
+
+        sap_x = sap_x.view(_n, -1, _x, _y)
+        other_x = other_x.view(_n, -1, _x, _y)
+        policy_logits = self.policy_net(other_x)
+        sap_logits = self.sap_net(sap_x)
         sap_logits = torch.sigmoid(sap_logits)
-        state_logits = self.state_net(x)
+        state_logits = self.state_net(other_x)
 
         return {
             "policy": policy_logits,
@@ -746,7 +774,7 @@ class MaskedFocalLoss(nn.Module):
 
 class MaskedFocalTverskyLoss(nn.Module):
     def __init__(
-        self, alpha: float = 0.5, beta: float = 0.5, gamma: float = 1.0, smooth: float = 1e-6, reduction: str = "mean"
+        self, alpha: float = 0.5, beta: float = 0.5, gamma: float = 1.0, smooth: float = 1e-5, reduction: str = "mean"
     ):
         """
         Focal Tversky Loss with mask support.
