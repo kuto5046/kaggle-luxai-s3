@@ -26,7 +26,7 @@ vis exp_name:
 # cdコマンドの効果は次のコマンドには引き継がれないので()で囲む
 sub exp_name:
     (cd /home/user/work/exp/{{exp_name}}/ && \
-    cp -r /home/user/work/.venv/lib/python3.10/site-packages/lightning ./ && \
+    cp -r /home/user/work/.venv/lib/python3.11/site-packages/lightning ./ && \
     tar -czf submission.tar.gz --exclude="*.tar.gz" --exclude="*.json" --exclude="*.pkl"  *)
     uv run kaggle competitions submit -c lux-ai-season-3 -f /home/user/work/exp/{{exp_name}}/submission.tar.gz -m "{{exp_name}}"
 
