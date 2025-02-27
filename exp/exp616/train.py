@@ -49,7 +49,7 @@ class Config:
     num_repeats: int = 1
     num_layers: int = 4
     hidden_dim: int = 64
-    n_stack: int = 4
+    n_stack: int = 8
     aug: bool = True
     
     # loss
