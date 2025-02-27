@@ -1,4 +1,3 @@
-import sys
 from time import time
 from typing import Any, Optional
 from pathlib import Path
@@ -13,6 +12,20 @@ import torch
 import gymnasium as gym
 import jax.numpy as jnp
 import flax.serialization
+from torch import nn
+from lux.utils import (
+    State,
+    Action,
+    GlobalState,
+    HiddenState,
+    EpisodeStore,
+    in_map,
+    extract_state,
+    extract_global_state,
+    get_valid_policy_map,
+)
+from lux.models import Down, DoubleConv, LuxUNetModel
+from lux.params import EnvParams
 from luxai_s3.env import LuxAIS3Env
 from luxai_s3.utils import to_numpy
 from luxai_s3.params import env_params_ranges
@@ -42,23 +55,6 @@ from ray.rllib.algorithms.impala.torch.vtrace_torch_v2 import (
 
 import wandb
 
-sys.path.append("./")
-from torch import nn
-
-from exp.best.lux.utils import (
-    State,
-    Action,
-    GlobalState,
-    HiddenState,
-    EpisodeStore,
-    in_map,
-    extract_state,
-    extract_global_state,
-    get_valid_policy_map,
-)
-from exp.best.lux.models import Down, DoubleConv, LuxUNetModel
-from exp.best.lux.params import EnvParams
-
 
 @dataclass
 class Config:
@@ -66,7 +62,7 @@ class Config:
     notes: str = "rlをrayで動かす"
     model_name: str = "lux_unet"
     env_name: str = "lux-s3-v0"
-    n_stack: int = 1
+    n_stack: int = 4
     root_dir: Path = Path(f"/home/user/work/exp/{exp_name}")
     pretrained_path: Path | None = None  # root_dir / "output/best_model.ckpt"
     debug: bool = True
@@ -74,8 +70,9 @@ class Config:
 
     # 以下の3つのrunnerにcpuとgpuを割り振る。cpuの合計値がcpu数を超えないように注意
     # データ収集用
-    num_env_runners: int = 2  # actorの数
+    num_env_runners: int = 20  # actorの数
     num_cpus_per_env_runner: int = 1
+    rollout_fragment_length: int = 1  # 時系列を特に考えない場合1
 
     # 学習用(GPUの数=learnerと考えて良い)
     num_learners: int = 0  # 0の場合local learnerを使用することを意味する(learnner=1)
@@ -84,18 +81,24 @@ class Config:
 
     # 評価用
     evaluation_num_env_runners: int = 2  # 評価用のenv runnerの数
-    evaluation_interval: int = 10  # 何回trainをしたら評価を実施するか
-    evaluation_duration: int = 10  # 1回の評価で何エピソード分評価するか
+    evaluation_interval: int = 1  # 何回trainをしたら評価を実施するか
+    evaluation_duration: int = 4  # 1回の評価で何エピソード分評価するか
 
     # learner
-    training_minutes: int = 5
-    learner_queue_size: int = 2  # Learnerに送られるトレーニングバッチのキューの最大サイズ
+    training_minutes: int = 1
+    learner_queue_size: int = 20  # workerからLearnerに送られるバッチのキューの最大サイズ. [batch_size]*queue_sizeがcpuメモリに乗りbatchごとに学習する
     gamma: float = 0.99
     lr: float = 1e-4
-    # 1epochで学習するデータ量。これが一度にGPUメモリに乗るみたいなのであまり大きくしないほうがいい
-    train_batch_size_per_learner: int = 505 * 3  # 1episode
-    # 1回の学習データ(train_batch_size)を何epoch分学習するか
+    # batch size
+    train_batch_size_per_learner: int = (
+        505  # 一応1episodeのサイズにしてるが不要かも。もしくはrollout_fragment_length部分で調整する
+    )
+    # 1回の学習データ(train_batch_size*queue_size)を何epoch分学習するか
     num_epochs: int = 1
+
+    # loss
+    vf_loss_coeff: float = 1.0  # 価値関数のlossの係数
+    entropy_coeff: float = 1.0  # エントロピーのlossの係数(大きくすると)
 
     # def __post_init__(self):
     #     if self.debug:
@@ -217,7 +220,6 @@ def to_action(
         x, y = unit_pos
         action = action_map[y, x]
 
-        # print(policy, file=sys.stderr)
         if action == Action.SAP:
             # 範囲内にいる敵ユニットを取得
             nearby_enemy_unit_ids = get_nearby_enemy_unit_ids(unit_pos, opp_unit_positions, env_params.unit_sap_range)
@@ -567,26 +569,25 @@ class WandbLoggerCallback(RLlibCallback):
                 You can mutate this object to add additional metrics.
             kwargs: Forward compatibility placeholder.
         """
-        pass
-        # print(f"{result=}")
-        # learner_metrics = [
-        #     # loss
-        #     "total_loss",
-        #     "vf_loss",
-        #     "vf_loss_unclipped",
-        #     "policy_loss",
-        #     "mean_kl_loss",
-        #     # other
-        #     "entropy",
-        #     "vf_explained_var",
-        #     "default_optimizer_learning_rate",
-        # ]
-        # for key in learner_metrics:
-        #     wandb.log(
-        #         {
-        #             f"train/{key}": train_metric_value(result["learners"], key),
-        #         }
-        #     )
+        learner_metrics = [
+            # loss
+            "total_loss",
+            "vf_loss",
+            "vf_loss_unclipped",
+            "policy_loss",
+            "mean_kl_loss",
+            # other
+            "entropy",
+            "vf_explained_var",
+            "default_optimizer_learning_rate",
+        ]
+        print(f"{result['learners'].keys()=}")
+        for key in learner_metrics:
+            wandb.log(
+                {
+                    f"train/{key}": train_metric_value(result["learners"], key),
+                }
+            )
 
     # 学習したモデルの性能評価をwandbに流す用
     def on_evaluate_end(
@@ -608,25 +609,34 @@ class WandbLoggerCallback(RLlibCallback):
             evaluation_metrics: Results dict to be returned from algorithm.evaluate().
                 You can mutate this object to add additional metrics.
             kwargs: Forward compatibility placeholder.
+
+        evaluation_metrics['env_runners'].keys()=dict_keys([
+        'agent_episode_returns_mean', 'timers', 'num_agent_steps_sampled_lifetime', 'episode_len_min', 'num_module_steps_sampled',
+        'num_agent_steps_sampled', 'episode_duration_sec_mean', 'episode_return_max', 'episode_len_mean', 'num_env_steps_sampled_lifetime',
+        'module_episode_returns_mean', 'num_episodes', 'num_episodes_lifetime', 'agent_steps', 'episode_return_min', 'num_module_steps_sampled_lifetime',
+        'num_env_steps_sampled', 'episode_len_max', 'env_to_module_sum_episodes_length_out', 'episode_return_mean', 'env_to_module_sum_episodes_length_in'
+        ])
         """
         # 自身はplayer_0として評価している
-        print("#########################")
-        print(f"{evaluation_metrics.keys()=}")
-        print("#########################")
-        episode_rewards = evaluation_metrics["env_runners"]["agent_episode_returns"]["player_0"]
-        wins = sum(1 for r in episode_rewards if r > 0)  # 報酬が正の場合は勝利
-        win_rate = wins / len(episode_rewards) if episode_rewards else 0.0
+        # print("#########################")
+        # print(f"{evaluation_metrics['env_runners']['agent_episode_returns_mean']=}")
+        # print(f"{evaluation_metrics['env_runners']['module_episode_returns_mean']=}")
+        # print(f"{evaluation_metrics['env_runners']['episode_return_mean']=}")
+        # print("#########################")
+        # episode_rewards = evaluation_metrics["env_runners"]["agent_episode_returns_mean"]["player_0"]
+        # wins = sum(1 for r in episode_rewards if r > 0)  # 報酬が正の場合は勝利
+        # win_rate = wins / len(episode_rewards) if episode_rewards else 0.0
 
-        wandb.log(
-            {
-                # player_0を自身として評価している
-                "evaluate/agent_episode_returns_mean": evaluation_metrics["env_runners"]["agent_episode_returns_mean"][
-                    "player_0"
-                ],
-                "evaluate/episode_duration_sec_mean": evaluation_metrics["env_runners"]["episode_duration_sec_mean"],
-                "evaluate/win_rate": win_rate,
-            }
-        )
+        # wandb.log(
+        #     {
+        #         # player_0を自身として評価している
+        #         "evaluate/agent_episode_returns_mean": evaluation_metrics["env_runners"]["agent_episode_returns_mean"][
+        #             "player_0"
+        #         ],
+        #         "evaluate/episode_duration_sec_mean": evaluation_metrics["env_runners"]["episode_duration_sec_mean"],
+        #         "evaluate/win_rate": win_rate,
+        #     }
+        # )
         checkpoint_dir = algorithm.save_to_path(self.output_dir)
         print(f"save to {checkpoint_dir}")
 
@@ -665,11 +675,8 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
     ) -> TensorType:
         module = self.module[module_id].unwrapped()
 
-        for key, value in batch.items():
-            if isinstance(value, torch.Tensor):
-                print(f"{key=} {value.shape=}")
-            else:
-                print(f"{key=} {type(value)=}")
+        # 最初にmap情報をbatch方向に展開する処理を入れる
+        # これにより通常の実装と同じように計算できる
 
         # TODO (sven): Now that we do the +1ts trick to be less vulnerable about
         #  bootstrap values at the end of rollouts in the new stack, we might make
@@ -678,16 +685,13 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
         #  of concerns (sampling vs learning).
         rollout_frag_or_episode_len = config.get_rollout_fragment_length()
         recurrent_seq_len = batch.get("seq_lens")
-        print(f"{rollout_frag_or_episode_len=}")
-        print(f"{recurrent_seq_len=}")
 
-        loss_mask = batch[Columns.LOSS_MASK].float()
+        loss_mask = fwd_out[Columns.LOSS_MASK].float()
         loss_mask_time_major = make_time_major(
             loss_mask,
             trajectory_len=rollout_frag_or_episode_len,
             recurrent_seq_len=recurrent_seq_len,
         )
-        print(f"{loss_mask_time_major.shape=}")
         size_loss_mask = torch.sum(loss_mask)
 
         # Behavior actions logp and target actions logp.
@@ -746,6 +750,11 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
             ).type(dtype=torch.float32)
         ) * config.gamma
 
+        # (time_dim, batch_size*24*24) マップ形式のデータ
+        # これをユニットがいる位置のみ抽出して1ステップに1つのデータ(time_dim, batch_size)となるようにsumをとる(対数確率)
+        target_actions_logp_time_major = (target_actions_logp_time_major * loss_mask_time_major).sum(dim=2)
+        behaviour_actions_logp_time_major = (behaviour_actions_logp_time_major * loss_mask_time_major).sum(dim=2)
+
         # Note that vtrace will compute the main loop on the CPU for better performance.
         vtrace_adjusted_target_values, pg_advantages = vtrace_torch(
             target_action_log_probs=target_actions_logp_time_major,
@@ -759,12 +768,12 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
         )
 
         # The policy gradients loss.
-        pi_loss = -torch.sum(target_actions_logp_time_major * pg_advantages * loss_mask_time_major)
+        pi_loss = -torch.sum(target_actions_logp_time_major * pg_advantages)
         mean_pi_loss = pi_loss / size_loss_mask
 
         # The baseline loss.
         delta = values_time_major - vtrace_adjusted_target_values
-        vf_loss = 0.5 * torch.sum(torch.pow(delta, 2.0) * loss_mask_time_major)
+        vf_loss = 0.5 * torch.sum(torch.pow(delta, 2.0))
         mean_vf_loss = vf_loss / size_loss_mask
 
         # The entropy loss.
@@ -825,7 +834,7 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
             sample_timeout_s=60 * 5,
             # batch_sizeから自動で適切な値を計算してくれるためこの設定が推奨されている
             # rollout_fragment_length = "auto",
-            rollout_fragment_length=101,
+            rollout_fragment_length=cfg.rollout_fragment_length,
         )
         # モデルを学習するlearnerの数。gpuの数と合わせる
         # Can't set both `num_cpus_per_learner` > 1 and  `num_gpus_per_learner` > 0! Either set `num_cpus_per_learner` > 1 (and `num_gpus_per_learner`=0)
@@ -840,21 +849,22 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
         .training(
             learner_class=CustomIMPALATorchLearner,
             # 一般的な学習の設定
-            # opt_type="adam",
-            # gamma=cfg.gamma,
-            # lr=cfg.lr,
+            opt_type="adam",
+            gamma=cfg.gamma,
+            lr=cfg.lr,
+            num_epochs=cfg.num_epochs,
+            # learnerの設定
             train_batch_size_per_learner=cfg.train_batch_size_per_learner,
             learner_queue_size=cfg.learner_queue_size,
-            # num_epochs=cfg.num_epochs,
             # loss
-            # vf_loss_coeff=cfg.vf_loss_coeff,
-            # entropy_coeff=cfg.entropy_coeff,
-            # v-trace
-            # vtrace=True,
+            vtrace=True,
+            vf_loss_coeff=cfg.vf_loss_coeff,
+            entropy_coeff=cfg.entropy_coeff,
         )
         # マルチエージェント設定
         # https://github.com/ray-project/ray/blob/2a85cef1ad8105d8dda01d709da7b0eaeb337caa/rllib/examples/multi_agent/rock_paper_scissors_heuristic_vs_learned.py#L94
         # https://github.com/ray-project/ray/blob/2a85cef1ad8105d8dda01d709da7b0eaeb337caa/rllib/examples/multi_agent/rock_paper_scissors_learned_vs_learned.py#L65
+        # TODO: 本当はself-playにして評価のみbest policyと対戦させたいが評価時にpolicyを指定する方法がわからない
         .multi_agent(
             # RLで扱うagent(policy)の名前
             policies={"p0", "best"},
@@ -883,8 +893,9 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
             evaluation_interval=cfg.evaluation_interval,
             evaluation_duration=cfg.evaluation_duration,
             evaluation_duration_unit="episodes",
-            # run evaluation and training in parallel
-            # evaluation_parallel_to_training=True,
+            evaluation_sample_timeout_s=60 * 5,
+            evaluation_force_reset_envs_before_iteration=True,  # 各評価の前に環境をリセット
+            evaluation_parallel_to_training=True,  # 評価と学習を並列に実行
         )
     )
     return config
@@ -920,15 +931,17 @@ def main() -> None:
     trainer = config.build_algo(env=cfg.env_name)
 
     train_start_time = time()
+    train_count = 0
     while True:
         result = trainer.train()
+        train_count += 1
+        spend_minutes = (time() - train_start_time) / 60
+        # print(f"{train_count=} is finished. spend {spend_minutes:.1f} minutes")
+        print("train finished")
         # print(f"{result.keys()=}")
         # 指定した時間経ったら学習を終了
-        if time() - train_start_time > cfg.training_minutes * 60:
-            break
-
-    # プログラムを終了
-    # os._exit(0)
+        # if spend_minutes > cfg.training_minutes:
+        break
 
 
 if __name__ == "__main__":
