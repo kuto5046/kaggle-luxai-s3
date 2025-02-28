@@ -567,6 +567,7 @@ class EpisodeStatsCollector:
                 "total_episodes": self.total_episodes,
             }
 
+        # queueに溜まっているepisode終了時間の差分を計算
         window_duration = self.episode_end_times[-1] - self.episode_end_times[0]
         if window_duration == 0:
             return {
@@ -574,6 +575,7 @@ class EpisodeStatsCollector:
                 "total_episodes": self.total_episodes,
             }
 
+        # 1秒間に何エピソード終了したか
         episode_per_sec = (len(self.episode_end_times) - 1) / window_duration
         episode_per_minute = episode_per_sec * 60
         return {
@@ -651,16 +653,34 @@ class WandbLoggerCallback(RLlibCallback):
         if "learners" not in result:
             return
 
+        # 学習状況をwandbに流す用
         wandb.log(
             {
-                "train/training_iteration": result["timers"]["training_iteration"],
-                "train/evaluation_iteration": result["timers"]["evaluation_iteration"],
+                "train/training_iteration": result["timers"]["training_iteration"],  # 何回めの学習か
                 "train/env_runner_time_between_sampling": result["env_runners"]["time_between_sampling"],
-                "train/time_this_iter_s": result["time_this_iter_s"],
-                "train/num_module_steps_trained": result["learners"][OWN_POLICY_NAME]["num_module_steps_trained"],
+                "train/time_this_iter_s": result["time_this_iter_s"],  # 1回の学習時間
+                "train/num_training_step_calls_per_iteration": result["num_training_step_calls_per_iteration"],
             }
         )
-        learner_metrics = result["learners"][OWN_POLICY_NAME].keys()
+        # learner_metrics = result["learners"][OWN_POLICY_NAME].keys()
+        learner_metrics = [
+            # "num_non_trainable_parameters",  # 一定
+            "gradients_default_optimizer_global_norm",
+            "diff_num_grad_updates_vs_sampler_policy",
+            # "module_train_batch_size_mean",  # 一定
+            "pi_loss",
+            "num_module_steps_trained_lifetime",
+            # "weights_seq_no",  # 一定
+            "total_loss",
+            # "default_optimizer_learning_rate",  # 一定
+            "mean_pi_loss",
+            "num_module_steps_trained",
+            "mean_vf_loss",
+            # "num_trainable_parameters",  # 一定
+            # "curr_entropy_coeff",  # 一定
+            "vf_loss",
+            "entropy",
+        ]
         for key in learner_metrics:
             wandb.log(
                 {
