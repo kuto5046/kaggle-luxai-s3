@@ -209,7 +209,7 @@ def get_legal_sap_policy(
 
 cfg = Config()
 seed_everything(cfg.seed, workers=True)
-imitation_model = ILAgent(EnvParams, cfg.checkpoint_path, cfg.n_stack, cfg.res)
+imitation_model = ILAgent(EnvParams, cfg.checkpoint_path, cfg.n_stack)
 
 
 class Agent:
