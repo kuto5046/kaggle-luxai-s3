@@ -13,19 +13,20 @@ import torch
 import gymnasium as gym
 import jax.numpy as jnp
 import flax.serialization
-from torch import nn
 from lux.utils import (
     State,
     Action,
     GlobalState,
     HiddenState,
     EpisodeStore,
-    in_map,
     extract_state,
+    calc_relative_pos,
     extract_global_state,
     get_valid_policy_map,
+    get_nearby_enemy_unit_ids,
+    get_nearby_point_positions,
 )
-from lux.models import Down, DoubleConv, LuxUNetModel
+from lux.models import LuxUNetModel, LuxValueConvModel
 from lux.params import EnvParams
 from luxai_s3.env import LuxAIS3Env
 from luxai_s3.utils import to_numpy
@@ -110,93 +111,6 @@ class Config:
     #         self.minibatch_size = 256
     #         self.train_batch_size_per_learner = 505
     #         self.num_epochs = 1
-
-
-# 相対位置を計算
-def calc_relative_pos(base_pos: np.ndarray, target_pos: np.ndarray) -> np.ndarray:
-    return target_pos - base_pos
-
-
-# マスの半径kマス以内に該当するかどうか
-def is_within_k_tiles(base_pos: np.ndarray, target_pos: np.ndarray, k: int) -> bool:
-    return np.abs(base_pos[0] - target_pos[0]) <= k and np.abs(base_pos[1] - target_pos[1]) <= k
-
-
-# 隣接するマスにあるポイントマスを取得
-def get_nearby_point_positions(pos: np.ndarray, point_map: np.ndarray, k: int = 1) -> list[np.ndarray]:
-    # posを中心にkマス以内のマスを取得
-    nearby_positions = []
-    up_pos = (pos[0], pos[1] - k)
-    if in_map(up_pos) and point_map[up_pos[1], up_pos[0]] == 1:
-        nearby_positions.append(up_pos)
-    down_pos = (pos[0], pos[1] + k)
-    if in_map(down_pos) and point_map[down_pos[1], down_pos[0]] == 1:
-        nearby_positions.append(down_pos)
-    left_pos = (pos[0] - k, pos[1])
-    if in_map(left_pos) and point_map[left_pos[1], left_pos[0]] == 1:
-        nearby_positions.append(left_pos)
-    right_pos = (pos[0] + k, pos[1])
-    if in_map(right_pos) and point_map[right_pos[1], right_pos[0]] == 1:
-        nearby_positions.append(right_pos)
-    return nearby_positions
-
-
-# 自身の周囲kタイル以内にいる敵ユニットを抽出
-def get_nearby_enemy_unit_ids(
-    unit_pos: tuple[int, int], opp_unit_positions: list[tuple[int, int]], k: int
-) -> list[int]:
-    return [unit_id for unit_id, pos in enumerate(opp_unit_positions) if is_within_k_tiles(unit_pos, pos, k)]
-
-
-class LuxValueConvModel(nn.Module):
-    def __init__(
-        self,
-        state_space_size: int,
-        global_state_space_size: int,
-        n_stack: int,
-        bilinear: bool = True,
-        res: bool = True,
-    ) -> None:
-        super().__init__()
-        self.bilinear = bilinear
-
-        self.inc = DoubleConv(state_space_size, 64, res=res)
-        self.down1 = Down(64, 128, res=res)
-        self.down2 = Down(128, 256, res=res)
-        self.down3 = Down(256, 256, res=res)
-
-        self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
-        self.value_net = nn.Sequential(
-            nn.Linear((256 + global_state_space_size) * n_stack, 128),
-            nn.ReLU(),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, 1),
-        )
-
-    def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        state = batch["state"]
-        global_state = batch["global_state"]
-        _n, _t, _c, _x, _y = state.shape
-        x = state.view(-1, _c, _x, _y)
-        x1 = self.inc(x)
-        x2 = self.down1(x1)
-        x3 = self.down2(x2)
-        x4 = self.down3(x3)
-
-        # sx, syのマップにグローバルステートをブロードキャスト
-        sx, sy = x4.shape[2:]
-        _n, _t, _c = global_state.shape
-        gx = global_state.view(-1, _c, 1, 1)
-        gx = gx.repeat(1, 1, sx, sy)
-
-        x4 = torch.cat([x4, gx], dim=1)
-        x = self.global_avg_pool(x4).view(_n, -1)
-        value_logits = self.value_net(x)
-
-        return {
-            "value": value_logits,
-        }
 
 
 def to_action(
