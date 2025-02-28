@@ -48,6 +48,7 @@ class LuxAugmentBase:
         action = np.where(action == -1, 2 + offset, action)
         return action
 
+
 # 自陣を(0,0)にする
 class LuxAugmentStandardize(LuxAugmentBase):
     def __init__(self) -> None:
@@ -237,6 +238,7 @@ class LaxLitModel(LightningModule):
             n_stack=cfg.n_stack,
             # res=cfg.res,
         )
+        # self.model = torch.compile(self.model)
         self.criterion1 = DiceLoss(n_classes=len(Action))
         # self.criterion1 = MaskedBCEWithLogitsLoss()
         self.criterion2 = nn.BCEWithLogitsLoss()
@@ -444,16 +446,25 @@ def one_hot_encoder(input_tensor: torch.Tensor, n_classes: int) -> torch.Tensor:
 class DoubleConv(nn.Module):
     """(convolution => [BN] => ReLU) * 2"""
 
-    def __init__(self, in_channels: int, out_channels: int, mid_channels: int | None = None, res: bool = False) -> None:
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        mid_channels: int | None = None,
+        res: bool = False,
+        kernel_size: int = 3,
+        batch_norm: bool = True,
+    ) -> None:
         super().__init__()
         if not mid_channels:
             mid_channels = out_channels
+        padding = kernel_size // 2
         self.double_conv = nn.Sequential(
-            nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(mid_channels),
+            nn.Conv2d(in_channels, mid_channels, kernel_size=kernel_size, padding=padding, bias=False),
+            nn.BatchNorm2d(mid_channels) if batch_norm is not None else nn.Identity(),
             nn.ReLU(inplace=True),
-            nn.Conv2d(mid_channels, out_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(out_channels),
+            nn.Conv2d(mid_channels, out_channels, kernel_size=kernel_size, padding=padding, bias=False),
+            nn.BatchNorm2d(out_channels) if batch_norm is not None else nn.Identity(),
             nn.ReLU(inplace=True),
         )
         self.res = res
@@ -644,8 +655,16 @@ class SimpleConvLSTMCell(nn.Module):
         padding = kernel_size // 2 if isinstance(kernel_size, int) else (kernel_size[0] // 2, kernel_size[1] // 2)
         self.hidden_channels = hidden_channels
         # 入力 x と隠れ状態 h をチャネル方向に連結して 4 倍のチャネル数で一括畳み込み
-        self.conv = nn.Conv2d(
-            input_channels + hidden_channels, 4 * hidden_channels, kernel_size, padding=padding, bias=bias
+        # self.conv = nn.Conv2d(
+        #     input_channels + hidden_channels, 4 * hidden_channels, kernel_size, padding=padding, bias=bias
+        # )
+        self.conv = DoubleConv(
+            input_channels + hidden_channels,
+            4 * hidden_channels,
+            mid_channels=hidden_channels * 2,
+            res=True,
+            kernel_size=kernel_size,
+            batch_norm=False,
         )
 
     def forward(self, x, hidden):
@@ -667,6 +686,37 @@ class SimpleConvLSTMCell(nn.Module):
         return h_new, c_new
 
 
+class SimpleConvLSTMCellVer2(nn.Module):
+    def __init__(self, input_channels, hidden_channels, kernel_size, bias=True):
+        """
+        input_channels  : 入力のチャネル数
+        hidden_channels : 隠れ状態のチャネル数
+        kernel_size     : 畳み込みカーネルサイズ（int または tuple）
+        bias            : バイアスの有無
+        """
+        super().__init__()
+        # 畳み込みによるパディングは、カーネルサイズの半径
+        padding = kernel_size // 2 if isinstance(kernel_size, int) else (kernel_size[0] // 2, kernel_size[1] // 2)
+        self.hidden_channels = hidden_channels
+        # self.conv = nn.Conv2d(
+        #     input_channels + hidden_channels, hidden_channels * 2, kernel_size, padding=padding, bias=bias
+        # )
+        self.conv = DoubleConv(
+            input_channels + hidden_channels, hidden_channels * 2, res=True, kernel_size=kernel_size, batch_norm=False
+        )
+
+    def forward(self, x, hidden):
+        """
+        x     : 入力テンソル (batch, input_channels, H, W)
+        hidden: タプル (h, c) 各テンソルの shape は (batch, hidden_channels, H, W)
+        """
+        h, c = hidden
+        combined = torch.cat([x, h], dim=1)
+        conv_out = self.conv(combined)
+        i, f = torch.chunk(conv_out, 2, dim=1)
+        return i, f
+
+
 class ConvLSTM(nn.Module):
     def __init__(self, input_channels, hidden_channels, kernel_size, num_layers=1, bias=True, batch_first=False):
         """
@@ -684,6 +734,7 @@ class ConvLSTM(nn.Module):
         cell_list = []
         for i in range(num_layers):
             cur_in_channels = input_channels if i == 0 else hidden_channels
+            # cell_list.append(SimpleConvLSTMCellVer2(cur_in_channels, hidden_channels, kernel_size, bias))
             cell_list.append(SimpleConvLSTMCell(cur_in_channels, hidden_channels, kernel_size, bias))
         self.cell_list = nn.ModuleList(cell_list)
 
@@ -696,35 +747,86 @@ class ConvLSTM(nn.Module):
                 各状態の shape は (batch, hidden_channels, H, W)
                 省略時はゼロで初期化
         """
+        # if self.batch_first:
+        #     # (batch, seq, C, H, W) -> (seq, batch, C, H, W)
+        #     x = x.transpose(0, 1)
+        # seq_len, batch_size, _, H, W = x.size()
+
+        # # 各層の初期状態を用意
+        # if hidden is None:
+        #     hidden = []
+        #     for i in range(self.num_layers):
+        #         h = torch.zeros(batch_size, self.cell_list[i].hidden_channels, H, W, device=x.device)
+        #         c = torch.zeros(batch_size, self.cell_list[i].hidden_channels, H, W, device=x.device)
+        #         hidden.append((h, c))
+
+        # layer_input = x
+        # last_state_list = []
+        # # 各層ごとに時系列を処理
+        # for i in range(self.num_layers):
+        #     h, c = hidden[i]
+        #     outputs = []
+        #     for t in range(seq_len):
+        #         h, c = self.cell_list[i](layer_input[t], (h, c))
+        #         outputs.append(h)
+        #     layer_output = torch.stack(outputs, dim=0)
+        #     layer_input = layer_output  # 次層への入力
+        #     last_state_list.append((h, c))
+
+        # if self.batch_first:
+        #     layer_output = layer_output.transpose(0, 1)
+        # return layer_output, last_state_list
+
         if self.batch_first:
-            # (batch, seq, C, H, W) -> (seq, batch, C, H, W)
-            x = x.transpose(0, 1)
+            x = x.transpose(0, 1)  # (seq_len, batch, C, H, W)
         seq_len, batch_size, _, H, W = x.size()
+        num_layers = self.num_layers
 
-        # 各層の初期状態を用意
-        if hidden is None:
-            hidden = []
-            for i in range(self.num_layers):
-                h = torch.zeros(batch_size, self.cell_list[i].hidden_channels, H, W, device=x.device)
-                c = torch.zeros(batch_size, self.cell_list[i].hidden_channels, H, W, device=x.device)
-                hidden.append((h, c))
+        # 各層の初期状態を用意（セルごとの初期値）
+        hidden_states = []
+        for i in range(num_layers):
+            if hidden is None:
+                h0 = torch.zeros(batch_size, self.cell_list[i].hidden_channels, H, W, device=x.device)
+                c0 = torch.zeros(batch_size, self.cell_list[i].hidden_channels, H, W, device=x.device)
+            else:
+                h0, c0 = hidden[i]
+            hidden_states.append((h0, c0))
 
-        layer_input = x
-        last_state_list = []
-        # 各層ごとに時系列を処理
-        for i in range(self.num_layers):
-            h, c = hidden[i]
-            outputs = []
-            for t in range(seq_len):
-                h, c = self.cell_list[i](layer_input[t], (h, c))
-                outputs.append(h)
-            layer_output = torch.stack(outputs, dim=0)
-            layer_input = layer_output  # 次層への入力
-            last_state_list.append((h, c))
+        # 各セル (layer, t) の出力を格納するグリッド（2次元リスト）
+        h_grid = [[None for _ in range(seq_len)] for _ in range(num_layers)]
+        c_grid = [[None for _ in range(seq_len)] for _ in range(num_layers)]
 
+        # wavefront parallelism:
+        # 対角線 d = layer + time について、同じ d のセルは互いに依存しないため並列計算可能
+        for d in range(num_layers + seq_len - 1):
+            for layer in range(num_layers):
+                t = d - layer
+                if t < 0 or t >= seq_len:
+                    continue
+                # 入力は、layer == 0 の場合は x[t]、それ以外は下層の同時刻の出力
+                cell_input = x[t] if layer == 0 else h_grid[layer - 1][t]
+                # 同一層の前時刻の出力がなければ初期状態を用いる
+                if t == 0:
+                    h_prev, c_prev = hidden_states[layer]
+                else:
+                    h_prev, c_prev = h_grid[layer][t - 1], c_grid[layer][t - 1]
+                h_prev, c_prev = h0, c0  # DEBUG
+                cell = self.cell_list[layer]
+                h_new, c_new = cell(cell_input, (h_prev, c_prev))
+                h_grid[layer][t] = h_new
+                c_grid[layer][t] = c_new
+
+        # 最終層の出力を結果としてまとめる
+        outputs = torch.stack(h_grid[-1], dim=0)  # (seq_len, batch, hidden_channels, H, W)
         if self.batch_first:
-            layer_output = layer_output.transpose(0, 1)
-        return layer_output, last_state_list
+            outputs = outputs.transpose(0, 1)  # (batch, seq_len, hidden_channels, H, W)
+        # 各層の最終状態も返す
+        final_states = []
+        for layer in range(num_layers):
+            # final_states.append((h_grid[layer][-1], c_grid[layer][-1]))
+            final_states.append((h0, c0))  # DEBUG
+        return outputs, final_states
+
 
 # 使用例
 if __name__ == "__main__":
@@ -749,16 +851,31 @@ class LuxLSTMModel(nn.Module):
         action_space_size: int,
         hidden_state_space_size: int,
         n_stack: int,
-        num_layers: int = 6,
-        hidden_channels: int = 64,
+        num_layers: int = 8,
+        mid_channels: int = 32,
+        hidden_channels: int = 32,
         kernel_size: int = 5,
         return_hidden: bool = False,
         # bilinear: bool = True,
         # res: bool = False,
     ) -> None:
         super().__init__()
+
+        self.debug = False
+
+        # DEBUG
+        if self.debug:
+            self.conv = nn.Sequential(
+                DoubleConv(state_space_size + global_state_space_size, hidden_channels),
+                *[DoubleConv(in_channels=hidden_channels, out_channels=hidden_channels, res=True) for _ in range(8)],
+                nn.Conv2d(hidden_channels, action_space_size, kernel_size=1),
+            )
+            self.return_hidden = return_hidden
+            return
+
+        self.conv = nn.Conv2d(state_space_size + global_state_space_size, hidden_channels, kernel_size=1)
         self.convlstm = ConvLSTM(
-            input_channels=state_space_size + global_state_space_size,
+            input_channels=mid_channels,
             hidden_channels=hidden_channels,
             kernel_size=kernel_size,
             num_layers=num_layers,
@@ -782,6 +899,23 @@ class LuxLSTMModel(nn.Module):
         x = torch.cat([state, gx], dim=2)
         # print(f"x: {x.shape}")
 
+        # DEBUG
+        if self.debug:
+            x = x.view(-1, _c + _cg, _x, _y)
+            x = self.conv(x)
+            x = x.view(_n, _t, -1, _x, _y)
+            # print(f"x: {x.shape}")
+            output = {
+                "policy": x,
+            }
+            if self.return_hidden:
+                return output, hidden
+            else:
+                return output
+
+        x = x.view(-1, _c + _cg, _x, _y)
+        x = self.conv(x)
+        x = x.view(_n, _t, -1, _x, _y)
         x, hidden = self.convlstm(x, hidden)
         # print(f"convlstm: {x.shape}")
         # flatten
