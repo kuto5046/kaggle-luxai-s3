@@ -34,7 +34,7 @@ class Config:
     output_dir = root_dir / f"exp/{exp_name}/output"
 
     # trainer
-    epoch: int = 20
+    epoch: int = 30
     limit_train_batches: float = 1.0
     limit_val_batches: float = 1.0
     use_amp: bool = False
@@ -43,7 +43,7 @@ class Config:
     ckpt_path: str = None
     lr: float = 0.001
     weight_decay: float = 0.01
-    warmup_step_rate: float = 0.1
+    warmup_step_rate: float = 0.15
     # model
     res: bool = True
     aug: bool = True
