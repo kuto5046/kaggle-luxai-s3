@@ -1,3 +1,4 @@
+import random
 import logging
 from time import time
 from typing import Any, Optional
@@ -57,36 +58,44 @@ from ray.rllib.algorithms.impala.torch.vtrace_torch_v2 import (
 
 import wandb
 
+# policy名
 OWN_POLICY_NAME = "p0"
+SELF_PLAY_POLICY_NAME = "self-play"
+BEST_POLICY_NAME = "best"
+LB_BEST_POLICY_NAME = "lb_best"  # TODO: モデルや特徴量が異なるため未使用だが本当は使いたい
 
 
 @dataclass
 class Config:
     exp_name: str = Path(__file__).parent.name
-    notes: str = "rlをrayで動かす"
+    notes: str = "entropy lossが大きすぎるので調整。"
     model_name: str = "lux_unet"
     env_name: str = "lux-s3-v0"
     n_stack: int = 4
     root_dir: Path = Path(f"/home/user/work/exp/{exp_name}")
-    pretrained_path: Path | None = root_dir / "output/best_model.ckpt"
-    debug: bool = False
+    best_pretrained_path: Path | None = Path("/home/user/work/exp/best/output/best_model.ckpt")
+    lb_best_pretrained_path: Path | None = Path("/home/user/work/exp/best/output/best_model.ckpt")
+    # lb_best_pretrained_path: Path | None = Path(f"/home/user/work/exp/lb_best/output/best_model.ckpt")
+    debug: bool = True
     output_dir: Path = root_dir / "output"
 
-    # 以下の3つのrunnerにcpuとgpuを割り振る。cpuの合計値がcpu数を超えないように注意
+    # 以下の3つのrunnerにcpuとgpuを割り振る。cpuの合計値がcpu数を超えないように注意(現在は24をactor: 21,learner: 1,evaluator:2に割り振る)
     # データ収集用
-    num_env_runners: int = 20  # actorの数
+    num_env_runners: int = 21  # actorの数
     num_cpus_per_env_runner: int = 1
     rollout_fragment_length: int = 1  # 時系列を特に考えない場合1
 
     # 学習用(GPUの数=learnerと考えて良い)
-    num_learners: int = 0  # 0の場合local learnerを使用することを意味する(learnner=1)
+    num_learners: int = 0  # 0の場合local learnerを使用することを意味する gpu数が1の場合は0にする
     num_cpus_per_learner: int = 1
     num_gpus_per_learner: int = 1
 
     # 評価用
-    evaluation_num_env_runners: int = 3  # 評価用のenv runnerの数
-    evaluation_interval: int = 1  # 何回trainをしたら評価を実施するか
-    evaluation_duration: int = 20  # 1回の評価で何エピソード分評価するか
+    evaluation_num_env_runners: int = 2  # 評価用のenv runnerの数
+    evaluation_interval: int = 10  # 何回trainをしたら評価を実施するか
+    evaluation_duration: int = (
+        50  # 1回の評価で何エピソード分評価するか(学習と並列してやるため50達成できないこともあるかも)
+    )
 
     # learner
     training_minutes: int = 60 * 24  # 1日
@@ -102,15 +111,18 @@ class Config:
     vtrace_clip_rho_threshold: float = 1.0  # 価値関数のlossの係数
     vtrace_clip_pg_rho_threshold: float = 1.0  # ポリシー勾配のlossの係数
     vf_loss_coeff: float = 1.0  # 価値関数のlossの係数
-    entropy_coeff: float = 1.0  # エントロピーのlossの係数(大きくすると)
+    entropy_coeff: float = 0.01  # エントロピーのlossの係数(大きくすると探索が活発になる)
 
-    # def __post_init__(self):
-    #     if self.debug:
-    #         self.num_env_runners = 1
-    #         self.num_cpus_per_env_runner = 1
-    #         self.minibatch_size = 256
-    #         self.train_batch_size_per_learner = 505
-    #         self.num_epochs = 1
+    def __post_init__(self):
+        if self.debug:
+            self.num_env_runners = 1
+            self.num_cpus_per_env_runner = 1
+            self.evaluation_num_env_runners = 1
+            self.evaluation_interval = 1
+            self.evaluation_duration = 2
+            self.training_minutes = 5
+            self.learner_queue_size = 1
+            self.num_epochs = 1
 
 
 def to_action(
@@ -290,10 +302,15 @@ class RLLibLuxEnv(MultiAgentEnv):
 
         agent0_state = extract_state(obs["player_0"], 0, self.episode_store1)
         agent1_state = extract_state(obs["player_1"], 1, self.episode_store2)
+        # 自陣が(0, 0)になるようにstateを反転(state, height, width)
+        agent1_state = np.flip(agent1_state, [1, 2])
+
         agent0_global_state = extract_global_state(obs["player_0"], 0, self.env_params, self.episode_store1)
         agent1_global_state = extract_global_state(obs["player_1"], 1, self.env_params, self.episode_store2)
         agent0_legal_action_mask = get_valid_policy_map(obs["player_0"], 0, self.episode_store1)
         agent1_legal_action_mask = get_valid_policy_map(obs["player_1"], 1, self.episode_store2)
+        # 自陣が(0, 0)になるようにmask mapを反転(action, height, width)
+        agent1_legal_action_mask = np.flip(agent1_legal_action_mask, [1, 2])
 
         self.agent0_states.append(agent0_state)
         self.agent1_states.append(agent1_state)
@@ -373,7 +390,7 @@ class RLLibLuxEnv(MultiAgentEnv):
 class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
     @override(TorchRLModule)
     def setup(self):
-        torch.set_num_threads(1)
+        # torch.set_num_threads(1)
         self.policy_model = LuxUNetModel(
             state_space_size=len(State),
             global_state_space_size=len(GlobalState),
@@ -435,7 +452,7 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
 @ray.remote
 class EpisodeStatsCollector:
     def __init__(self):
-        self.episode_end_times = deque(maxlen=1000)
+        self.episode_end_times = deque(maxlen=100)  # 直近100エピソードの終了時間を保存して速度を計測する
         self.total_episodes = 0
         self.eval_total_episodes = 0
         self.last_log_time = time()
@@ -568,13 +585,21 @@ class WandbLoggerCallback(RLlibCallback):
         if "learners" not in result:
             return
 
+        # 1回の学習で学習したデータ数
+        time_this_iter_s = result["time_this_iter_s"]
+        num_training_step_calls_per_iteration = result["num_training_step_calls_per_iteration"]
+        sample_size = result["num_env_steps_sampled_lifetime"]
+        total_steps = num_training_step_calls_per_iteration * sample_size
+        total_steps_per_minute = (total_steps / time_this_iter_s) * 60
+
         # 学習状況をwandbに流す用
         wandb.log(
             {
                 "train/training_iteration": result["timers"]["training_iteration"],  # 何回めの学習か
                 "train/env_runner_time_between_sampling": result["env_runners"]["time_between_sampling"],
-                "train/time_this_iter_s": result["time_this_iter_s"],  # 1回の学習時間
-                "train/num_training_step_calls_per_iteration": result["num_training_step_calls_per_iteration"],
+                "train/time_this_iter_s": time_this_iter_s,  # 1回の学習時間
+                "train/num_training_step_calls_per_iteration": num_training_step_calls_per_iteration,  # 1回の学習で何回training_stepが呼ばれたか これにbatch_sizeをかけたものが1回の学習で学習したデータ数になる
+                "train/total_steps_per_minute": total_steps_per_minute,  # 1分あたりの学習step数。学習速度(データ収集速度)的なものを見たい
             }
         )
         # learner_metrics = result["learners"][OWN_POLICY_NAME].keys()
@@ -583,7 +608,7 @@ class WandbLoggerCallback(RLlibCallback):
             "gradients_default_optimizer_global_norm",
             "diff_num_grad_updates_vs_sampler_policy",
             # "module_train_batch_size_mean",  # 一定
-            "pi_loss",
+            # "pi_loss",  # mean_pi_lossと同じ
             "num_module_steps_trained_lifetime",
             # "weights_seq_no",  # 一定
             "total_loss",
@@ -593,7 +618,7 @@ class WandbLoggerCallback(RLlibCallback):
             "mean_vf_loss",
             # "num_trainable_parameters",  # 一定
             # "curr_entropy_coeff",  # 一定
-            "vf_loss",
+            # "vf_loss",  # mean_vf_lossと同じ
             "entropy",
         ]
         for key in learner_metrics:
@@ -629,6 +654,10 @@ class WandbLoggerCallback(RLlibCallback):
         if not evaluation_metrics.get("env_runners"):
             return
 
+        # 対戦相手のポリシー名
+        policy_names = list(evaluation_metrics["env_runners"]["module_episode_returns_mean"].keys())
+        self.logger.info(f"evaluation policy names: {policy_names}")
+
         mean_rewards = evaluation_metrics["env_runners"]["module_episode_returns_mean"][OWN_POLICY_NAME]
         evaluation_minutes = evaluation_metrics["env_runners"]["env_to_module_sum_episodes_length_in"] / 60
 
@@ -639,9 +668,8 @@ class WandbLoggerCallback(RLlibCallback):
             {
                 "evaluate/mean_rewards": mean_rewards,
                 "evaluate/evaluation_minutes": evaluation_minutes,
-                # "evaluate/wins": eval_stats["wins"],
                 "evaluate/win_rate": eval_stats["win_rate"],
-                "evaluate/total_episodes": eval_stats["total"],
+                "evaluate/num_episodes": eval_stats["total"],
             }
         )
 
@@ -786,6 +814,8 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
 
         # The policy gradients loss.
         pi_loss = -torch.sum(target_actions_logp_time_major * pg_advantages)
+
+        # size_loss_maskで割ることで1step-1ユニットあたりのlossになる
         mean_pi_loss = pi_loss / size_loss_mask
 
         # The baseline loss.
@@ -824,17 +854,26 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
     tmp_env = env_creator({"n_stack": cfg.n_stack})
     observation_space = tmp_env.get_observation_space("player_0")
     action_space = tmp_env.get_action_space("player_0")
-    rl_module_spec = RLModuleSpec(
+    best_rl_module_spec = RLModuleSpec(
         module_class=LuxUnetTorchRLModule,
         observation_space=observation_space,
         action_space=action_space,
         # モデル内部でself.model_config["key"]でアクセスできる
         model_config={
             "n_stack": cfg.n_stack,
-            "pretrained_path": cfg.pretrained_path,
+            "pretrained_path": cfg.best_pretrained_path,
         },
     )
-
+    lb_best_rl_module_spec = RLModuleSpec(
+        module_class=LuxUnetTorchRLModule,
+        observation_space=observation_space,
+        action_space=action_space,
+        # モデル内部でself.model_config["key"]でアクセスできる
+        model_config={
+            "n_stack": cfg.n_stack,
+            "pretrained_path": cfg.lb_best_pretrained_path,
+        },
+    )
     config = (
         IMPALAConfig()
         .api_stack(
@@ -884,22 +923,38 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
         # マルチエージェント設定
         # https://github.com/ray-project/ray/blob/2a85cef1ad8105d8dda01d709da7b0eaeb337caa/rllib/examples/multi_agent/rock_paper_scissors_heuristic_vs_learned.py#L94
         # https://github.com/ray-project/ray/blob/2a85cef1ad8105d8dda01d709da7b0eaeb337caa/rllib/examples/multi_agent/rock_paper_scissors_learned_vs_learned.py#L65
-        # TODO: 本当はself-playにして評価のみbest policyと対戦させたいが評価時にpolicyを指定する方法がわからない
         .multi_agent(
             # RLで扱うagent(policy)の名前
-            policies={OWN_POLICY_NAME, "best"},
+            policies={
+                OWN_POLICY_NAME,
+                SELF_PLAY_POLICY_NAME,
+                BEST_POLICY_NAME,
+                # LB_BEST_POLICY_NAME,
+            },
             # 各agentのポリシーを決める関数
-            policy_mapping_fn=lambda aid, episode, **kwargs: (OWN_POLICY_NAME if aid == "player_0" else "best"),
-            # 学習はOWN_POLICY_NAMEだけ学習
-            policies_to_train=[OWN_POLICY_NAME],
+            policy_mapping_fn=lambda aid, episode, **kwargs: (
+                OWN_POLICY_NAME
+                if aid == "player_0"
+                else random.choice(
+                    [
+                        SELF_PLAY_POLICY_NAME,
+                        BEST_POLICY_NAME,
+                        # LB_BEST_POLICY_NAME,
+                    ]
+                )
+            ),
+            # 学習は自身のpolicyとself-playのpolicyを学習
+            policies_to_train=[OWN_POLICY_NAME, SELF_PLAY_POLICY_NAME],
         )
         # https://docs.ray.io/en/latest/rllib/rllib-rlmodule.html#construction-through-rlmodulespecs
         .rl_module(
             rl_module_spec=MultiRLModuleSpec(
                 # policy名とモデルの紐づけ
                 rl_module_specs={
-                    OWN_POLICY_NAME: rl_module_spec,
-                    "best": rl_module_spec,
+                    OWN_POLICY_NAME: lb_best_rl_module_spec,
+                    SELF_PLAY_POLICY_NAME: lb_best_rl_module_spec,
+                    BEST_POLICY_NAME: best_rl_module_spec,
+                    # LB_BEST_POLICY_NAME: lb_best_rl_module_spec,
                 }
             )
         )
@@ -916,6 +971,15 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
             evaluation_sample_timeout_s=60 * 20,
             evaluation_force_reset_envs_before_iteration=True,  # 各評価の前に環境をリセット
             evaluation_parallel_to_training=True,  # 評価と学習を並列に実行
+            # 評価用の上書き設定.これにより評価時はlb_bestポリシーと自身の対戦になる
+            evaluation_config={
+                "multi_agent": {
+                    "policies": {OWN_POLICY_NAME, BEST_POLICY_NAME},
+                    "policy_mapping_fn": lambda aid, episode, **kwargs: (
+                        OWN_POLICY_NAME if aid == "player_0" else BEST_POLICY_NAME
+                    ),
+                }
+            },
         )
         # .checkpointing(
         #     export_native_model_files=True,
