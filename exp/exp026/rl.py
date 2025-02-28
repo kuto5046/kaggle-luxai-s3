@@ -84,19 +84,19 @@ class Config:
     num_gpus_per_learner: int = 1
 
     # 評価用
-    evaluation_num_env_runners: int = 2  # 評価用のenv runnerの数
+    evaluation_num_env_runners: int = 3  # 評価用のenv runnerの数
     evaluation_interval: int = 1  # 何回trainをしたら評価を実施するか
     evaluation_duration: int = 20  # 1回の評価で何エピソード分評価するか
 
     # learner
     training_minutes: int = 60 * 24  # 1日
-    learner_queue_size: int = 50  # workerからLearnerに送られるバッチのキューの最大サイズ. [batch_size]*queue_sizeがcpuメモリに乗りbatchごとに学習する
+    learner_queue_size: int = 100  # workerからLearnerに送られるバッチのキューの最大サイズ. [batch_size]*queue_sizeがcpuメモリに乗りbatchごとに学習する
     gamma: float = 0.99
     lr: float = 1e-4
     # batch size 一応1episodeのサイズにしてるが不要かも。もしくはrollout_fragment_length部分で調整する
     train_batch_size_per_learner: int = 512
     # 1回の学習データ(train_batch_size*queue_size)を何epoch分学習するか
-    num_epochs: int = 2
+    num_epochs: int = 5
     replay_proportion: float = 0.0  # リプレイバッファの割合
     # loss
     vtrace_clip_rho_threshold: float = 1.0  # 価値関数のlossの係数
@@ -393,6 +393,7 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
             ckpt = torch.load(self.model_config["pretrained_path"], weights_only=True, map_location=torch.device("cpu"))
             state_dict = {k.replace("model.", ""): v for k, v in ckpt["state_dict"].items()}
             self.policy_model.load_state_dict(state_dict)
+            print(f"Loaded model from {self.model_config['pretrained_path']}")
 
         self._values = None
 
@@ -916,9 +917,9 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
             evaluation_force_reset_envs_before_iteration=True,  # 各評価の前に環境をリセット
             evaluation_parallel_to_training=True,  # 評価と学習を並列に実行
         )
-        .checkpointing(
-            export_native_model_files=True,
-        )
+        # .checkpointing(
+        #     export_native_model_files=True,
+        # )
     )
     return config
 
