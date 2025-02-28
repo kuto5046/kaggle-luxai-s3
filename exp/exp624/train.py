@@ -38,7 +38,7 @@ class Config:
     limit_train_batches: float = 1.0
     limit_val_batches: float = 1.0
     use_amp: bool = True
-    batch_size: int = 128
+    batch_size: int = 256
     num_workers: int = 24
     ckpt_path: str = None
     lr: float = 0.001
@@ -49,7 +49,7 @@ class Config:
     num_repeats: int = 3
     num_layers: int = 3
     hidden_dim: int = 64
-    n_stack: int = 8
+    n_stack: int = 16
     kernel_size: int = 5
     aug: bool = True
     
