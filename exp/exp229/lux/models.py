@@ -69,11 +69,11 @@ class LuxAugmentStandardize(LuxAugmentBase):
             # Flip vertically↑↓(# switch up(1) and down(3))
             # Flip horizontally →← (switch left(2) and right(4))
             state = np.flip(state, axis=(2, 3)).copy()
-            hidden_state = np.flip(hidden_state, axis=(1, 2)).copy()
-            action = np.flip(action, axis=(0, 1)).copy()
+            hidden_state = np.flip(hidden_state, axis=(2, 3)).copy()
+            action = np.flip(action, axis=(1, 2)).copy()
             action = self.switch_action(action, Action.UP, Action.DOWN)
             action = self.switch_action(action, Action.LEFT, Action.RIGHT)
-            sap = np.flip(sap, axis=(0, 1)).copy()
+            sap = np.flip(sap, axis=(1, 2)).copy()
 
         inputs["state"] = state
         inputs["hidden_state"] = hidden_state
@@ -95,11 +95,11 @@ class LuxAugmentTranspose(LuxAugmentBase):
 
         if random.random() < self.p:
             state = np.transpose(state, (0, 1, 3, 2)).copy()
-            hidden_state = np.transpose(hidden_state, (0, 2, 1)).copy()
-            action = np.transpose(action, (1, 0)).copy()
+            hidden_state = np.transpose(hidden_state, (0, 1, 3, 2)).copy()
+            action = np.transpose(action, (0, 2, 1)).copy()
             action = self.switch_action(action, Action.UP, Action.LEFT)
             action = self.switch_action(action, Action.DOWN, Action.RIGHT)
-            sap = np.transpose(sap, (1, 0)).copy()
+            sap = np.transpose(sap, (0, 2, 1)).copy()
 
         inputs["state"] = state
         inputs["hidden_state"] = hidden_state
@@ -111,54 +111,66 @@ class LuxAugmentTranspose(LuxAugmentBase):
 class LaxDataset(Dataset):
     def __init__(self, df: pl.DataFrame, cfg: dataclass, mode: str = "train") -> None:
         super().__init__()
+        if cfg.n_stack != 505:
+            raise NotImplementedError("n_stack must be 505 when training LSTM!")
         self.cfg = cfg
         self.mode = mode
-        self.ids = []
+        self.episode_ids = []
         for episode_id, max_step in df[["EpisodeId", "MaxStep"]].to_numpy():
-            for step_idx in range(1, int(max_step)):  # step_idx=0は初期状態なのでスキップ
-                self.ids.append((episode_id, step_idx))
+            if max_step != 505:
+                raise NotImplementedError("max_step must be 505 when training LSTM!")
+            self.episode_ids.append(episode_id)
         self.h5_file = h5py.File(self.cfg.feature_dir / "episodes.h5", "r")
         self.transform_standardize = transforms.Compose([LuxAugmentStandardize()])
         self.transform = transforms.Compose([LuxAugmentTranspose()])
         self.aug = cfg.aug
 
     def __len__(self) -> int:
-        return len(self.ids)
+        return len(self.episode_ids)
 
     def __getitem__(self, idx: int) -> dict[str, np.ndarray]:
-        episode_id, step_idx = self.ids[idx]
+        episode_id = self.episode_ids[idx]
         states = []
         global_states = []
-        for i in range(self.cfg.n_stack - 1, -1, -1):
-            if step_idx - i >= 0:
-                state = np.array(self.h5_file[str(episode_id)]["states"][str(step_idx - i)]).astype(np.float32)
-                global_state = np.array(self.h5_file[str(episode_id)]["global_states"][str(step_idx - i)]).astype(
-                    np.float32
-                )
-            else:
-                state = np.zeros((len(State), EnvParams.map_height, EnvParams.map_width), dtype=np.float32)
-                global_state = np.zeros(len(GlobalState), dtype=np.float32)
+        hidden_states = []
+        hidden_global_states = []
+        actions = []
+        saps = []
+        wins = []
+        for i in range(self.cfg.n_stack):
+            state = np.array(self.h5_file[str(episode_id)]["states"][str(i)]).astype(np.float32)
+            global_state = np.array(self.h5_file[str(episode_id)]["global_states"][str(i)]).astype(np.float32)
+            hidden_state = np.array(self.h5_file[str(episode_id)]["hidden_states"][str(i)]).astype(np.float32)
+            hidden_global_state = np.array(self.h5_file[str(episode_id)]["hidden_global_states"][str(i)]).astype(
+                np.float32
+            )
+            action, sap = np.array(self.h5_file[str(episode_id)]["actions"][str(i)]).astype(np.float32)
+            win = np.array(self.h5_file[str(episode_id)]["win"][str(i)]).astype(np.float32)
+
             states.append(state)
             global_states.append(global_state)
-        state = np.stack(states, axis=0)  # (n_stack, channel, x, y)
-        global_state = np.stack(global_states, axis=0)  # (n_stack, channel)
+            hidden_states.append(hidden_state)
+            hidden_global_states.append(hidden_global_state)
+            actions.append(action)
+            saps.append(sap)
+            wins.append(win)
 
-        hidden_state = np.array(self.h5_file[str(episode_id)]["hidden_states"][str(step_idx)]).astype(np.float32)
-        hidden_global_state = np.array(self.h5_file[str(episode_id)]["hidden_global_states"][str(step_idx)]).astype(
-            np.float32
-        )
-        actions = np.array(self.h5_file[str(episode_id)]["actions"][str(step_idx)]).astype(np.float32)
-        action = actions[0]
-        sap = actions[1]
-        win = np.array(self.h5_file[str(episode_id)]["win"][str(step_idx)]).astype(np.float32)
+        states = np.stack(states, axis=0)  # (n_stack, channel, x, y)
+        global_states = np.stack(global_states, axis=0)  # (n_stack, channel)
+        hidden_states = np.stack(hidden_states, axis=0)  # (n_stack, channel, x, y)
+        hidden_global_states = np.stack(hidden_global_states, axis=0)  # (n_stack, channel)
+        actions = np.stack(actions, axis=0)  # (n_stack, x, y)
+        saps = np.stack(saps, axis=0)  # (n_stack, x, y)
+        wins = np.stack(wins, axis=0)  # (n_stack,)
+
         inputs = {
-            "state": state,
-            "global_state": global_state,
-            "hidden_state": hidden_state,
-            "hidden_global_state": hidden_global_state,
-            "action": action,
-            "sap": sap,
-            "win": win,
+            "state": states,
+            "global_state": global_states,
+            "hidden_state": hidden_states,
+            "hidden_global_state": hidden_global_states,
+            "action": actions,
+            "sap": saps,
+            "win": wins,
         }
         inputs = self.transform_standardize(inputs)
         if self.mode == "train" and self.aug:
@@ -247,23 +259,34 @@ class LaxLitModel(LightningModule):
     def _share_step(self, batch: Any, mode: str = "train") -> torch.Tensor:
         outputs = self(batch)
 
-        policy_preds = torch.softmax(outputs["policy"], dim=1)
-        policy_targets = one_hot_encoder(batch["action"], n_classes=len(Action))
-        # policy_mask = (batch["state"][:, -1, State.OWN_UNIT_COUNT] > 0).unsqueeze(1)  # (batch_size, 1, w, h)
-        # policy_loss = self.criterion1(policy_preds, policy_targets, policy_mask)
+        output_policy = outputs["policy"]
+        batch_action = batch["action"]
+
+        # first 2 dims to 1
+        print(f"output_policy.shape: {output_policy.shape}")
+        print(f"batch_action.shape: {batch_action.shape}")
+        output_policy = output_policy.flatten(0, 1)
+        batch_action = batch_action.flatten(0, 1)
+        print(f"output_policy.shape: {output_policy.shape}")
+        print(f"batch_action.shape: {batch_action.shape}")
+
+        policy_preds = torch.softmax(output_policy, dim=1)
+        policy_targets = one_hot_encoder(batch_action, n_classes=len(Action))
         policy_loss = self.criterion1(policy_preds, policy_targets)
 
+        # 頭がバグったので policy loss 以外は一旦無視
         # value_loss = self.criterion2(outputs["value"].flatten(), batch["win"])
-        state_loss = self.criterion3(outputs["state"].flatten(), batch["hidden_state"].flatten())
-        global_state_loss = self.criterion3(outputs["global_state"].flatten(), batch["hidden_global_state"].flatten())
+        # state_loss = self.criterion3(outputs["state"].flatten(), batch["hidden_state"].flatten())
+        # global_state_loss = self.criterion3(outputs["global_state"].flatten(), batch["hidden_global_state"].flatten())
 
         # sap_available_mask = (batch["state"][:, -1, State.SAP_AVAILABLE_AREA] > 0)  # (batch_size, w, h)
         # sap_loss = self.criterion4(outputs["sap"].squeeze(1), batch["sap"], sap_available_mask)
+
         loss = (
             policy_loss * self.cfg.loss_weight_policy
-            + state_loss * self.cfg.loss_weight_state
+            # + state_loss * self.cfg.loss_weight_state
             # + value_loss * self.cfg.loss_weight_value
-            + global_state_loss * self.cfg.loss_weight_global_state
+            # + global_state_loss * self.cfg.loss_weight_global_state
             # + sap_loss * self.cfg.loss_weight_sap
         )
 
@@ -291,23 +314,23 @@ class LaxLitModel(LightningModule):
         #     prog_bar=False,
         #     logger=True,
         # )
-        self.log(
-            f"StateLoss/{mode}",
-            state_loss,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=False,
-            logger=True,
-        )
+        # self.log(
+        #     f"StateLoss/{mode}",
+        #     state_loss,
+        #     on_step=False,
+        #     on_epoch=True,
+        #     prog_bar=False,
+        #     logger=True,
+        # )
 
-        self.log(
-            f"GlobalStateLoss/{mode}",
-            global_state_loss,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=False,
-            logger=True,
-        )
+        # self.log(
+        #     f"GlobalStateLoss/{mode}",
+        #     global_state_loss,
+        #     on_step=False,
+        #     on_epoch=True,
+        #     prog_bar=False,
+        #     logger=True,
+        # )
         self.log(
             f"Loss/{mode}",
             loss,
@@ -317,9 +340,13 @@ class LaxLitModel(LightningModule):
             logger=True,
         )
 
-        preds = torch.softmax(outputs["policy"], dim=1).argmax(dim=1).flatten()
-        gts = batch["action"].flatten()
-        unit_masks = (batch["state"][:, -1, State.OWN_UNIT_COUNT] > 0).flatten()  # unitが存在するところだけで計算する
+        preds = output_policy.argmax(dim=1).flatten()
+        gts = batch_action.flatten()
+        unit_masks = (batch["state"][:, :, State.OWN_UNIT_COUNT] > 0).flatten()  # unitが存在するところだけで計算する
+
+        print(f"preds.shape: {preds.shape}")
+        print(f"gts.shape: {gts.shape}")
+        print(f"unit_masks.shape: {unit_masks.shape}")
 
         preds = preds[unit_masks]
         gts = gts[unit_masks]
@@ -506,6 +533,295 @@ class OutConv(nn.Module):
         return self.conv(x)
 
 
+def _to_tuple(x):
+    if isinstance(x, int):
+        return (x, x)
+    return x
+
+
+# Written by ChatGPT
+class CustomConvLSTMCell(nn.Module):
+    def __init__(
+        self, input_channels, hidden_channels, kernel_size, proj_channels=0, bias=True, device=None, dtype=None
+    ):
+        """
+        input_channels : 入力テンソルのチャネル数
+        hidden_channels: セル内部の隠れ状態・セル状態のチャネル数
+        kernel_size    : 畳み込みカーネルサイズ（int または tuple）
+        proj_channels  : 0 の場合は通常の ConvLSTM、0 より大きい場合は出力に 1x1 畳み込みによる射影を適用
+        bias           : バイアスの有無
+        device, dtype  : パラメータ作成時のデバイス、型
+        """
+        super().__init__()
+        self.input_channels = input_channels
+        self.hidden_channels = hidden_channels
+        self.proj_channels = proj_channels
+        self.use_proj = proj_channels > 0
+
+        kernel_size = _to_tuple(kernel_size)
+        self.kernel_size = kernel_size
+        # 空間サイズを変えずに出力するためのパディング（各辺半径）
+        self.padding = (kernel_size[0] // 2, kernel_size[1] // 2)
+
+        # 畳み込みによるゲートの重み
+        # 入力からゲートへの変換: 出力チャネルは 4 * hidden_channels
+        self.weight_x = nn.Parameter(
+            torch.empty(4 * hidden_channels, input_channels, kernel_size[0], kernel_size[1], device=device, dtype=dtype)
+        )
+        # 隠れ状態からゲートへの変換
+        # ※projection を使う場合、前時刻の h のチャネル数は proj_channels となる
+        hidden_dim = proj_channels if self.use_proj else hidden_channels
+        self.weight_h = nn.Parameter(
+            torch.empty(4 * hidden_channels, hidden_dim, kernel_size[0], kernel_size[1], device=device, dtype=dtype)
+        )
+        if bias:
+            self.bias = nn.Parameter(torch.empty(4 * hidden_channels, device=device, dtype=dtype))
+        else:
+            self.register_parameter("bias", None)
+
+        # projection 用のパラメータ（1x1 畳み込み）： hidden_channels → proj_channels
+        if self.use_proj:
+            self.weight_proj = nn.Parameter(
+                torch.empty(proj_channels, hidden_channels, 1, 1, device=device, dtype=dtype)
+            )
+        else:
+            self.register_parameter("weight_proj", None)
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        stdv = 1.0 / (self.hidden_channels**0.5)
+        for param in self.parameters():
+            if param is not None:
+                nn.init.uniform_(param, -stdv, stdv)
+
+    def forward(self, x, hx):
+        """
+        x  : 入力テンソル (batch, input_channels, H, W)
+        hx : タプル (h_prev, c_prev)
+             h_prev: (batch, proj_channels if use_proj else hidden_channels, H, W)
+             c_prev: (batch, hidden_channels, H, W)
+        """
+        h_prev, c_prev = hx
+
+        # 入力と隠れ状態からの畳み込み
+        conv_x = F.conv2d(x, self.weight_x, bias=None, padding=self.padding)
+        conv_h = F.conv2d(h_prev, self.weight_h, bias=None, padding=self.padding)
+        gates = conv_x + conv_h
+        if self.bias is not None:
+            # バイアスは (1, 4*hidden_channels, 1, 1) の形状にして加算
+            gates = gates + self.bias.view(1, -1, 1, 1)
+
+        # ゲートを 4 つに分割
+        i_gate, f_gate, g_gate, o_gate = torch.chunk(gates, 4, dim=1)
+        i_gate = torch.sigmoid(i_gate)
+        f_gate = torch.sigmoid(f_gate)
+        g_gate = torch.tanh(g_gate)
+        o_gate = torch.sigmoid(o_gate)
+
+        c_new = f_gate * c_prev + i_gate * g_gate
+        h_new = o_gate * torch.tanh(c_new)
+
+        if self.use_proj:
+            # 1x1 畳み込みによる projection
+            h_new = F.conv2d(h_new, self.weight_proj, bias=None, padding=0)
+
+        return h_new, c_new
+
+
+# Written by ChatGPT
+class CustomConvLSTM(nn.Module):
+    def __init__(
+        self,
+        input_channels,
+        hidden_channels,
+        kernel_size,
+        num_layers=1,
+        bias=True,
+        batch_first=False,
+        dropout=0.0,
+        bidirectional=False,
+        proj_channels=0,
+        device=None,
+        dtype=None,
+    ):
+        """
+        引数は torch.nn.LSTM と同様ですが、ConvLSTM 用です。
+
+        input_channels : 入力テンソルのチャネル数
+        hidden_channels: 各層の隠れ状態（およびセル状態）のチャネル数
+        kernel_size    : 畳み込みカーネルサイズ（int または tuple）
+        num_layers     : 層数
+        bias           : バイアスの有無
+        batch_first    : 入出力テンソルの shape が (batch, seq, C, H, W) なら True
+        dropout        : 各層間で適用する dropout 率（最終層以外）
+        bidirectional  : 双方向 ConvLSTM にするか否か
+        proj_channels  : 0 の場合は通常の ConvLSTM、0 より大きいと出力に projection を適用
+        device, dtype  : パラメータ作成時のデバイス、型
+        """
+        super().__init__()
+        self.input_channels = input_channels
+        self.hidden_channels = hidden_channels
+        self.kernel_size = kernel_size
+        self.num_layers = num_layers
+        self.bias = bias
+        self.batch_first = batch_first
+        self.dropout = dropout
+        self.bidirectional = bidirectional
+        self.proj_channels = proj_channels
+        self.device = device
+        self.dtype = dtype
+
+        self.num_directions = 2 if bidirectional else 1
+
+        # 各層ごとの ConvLSTMCell を ModuleList で管理
+        self.layers = nn.ModuleList()
+        for layer in range(num_layers):
+            layer_input_channels = (
+                input_channels
+                if layer == 0
+                else ((proj_channels if proj_channels > 0 else hidden_channels) * self.num_directions)
+            )
+            cells = nn.ModuleList()
+            # 順方向セル
+            cell_fw = CustomConvLSTMCell(
+                layer_input_channels,
+                hidden_channels,
+                kernel_size,
+                proj_channels=proj_channels,
+                bias=bias,
+                device=device,
+                dtype=dtype,
+            )
+            cells.append(cell_fw)
+            if self.bidirectional:
+                cell_bw = CustomConvLSTMCell(
+                    layer_input_channels,
+                    hidden_channels,
+                    kernel_size,
+                    proj_channels=proj_channels,
+                    bias=bias,
+                    device=device,
+                    dtype=dtype,
+                )
+                cells.append(cell_bw)
+            self.layers.append(cells)
+
+    def forward(self, input, hx=None):
+        """
+        input : 入力系列
+                batch_first==False の場合 shape: (seq_len, batch, C, H, W)
+                batch_first==True の場合 shape: (batch, seq_len, C, H, W)
+        hx    : (h0, c0) のタプル
+                h0 の shape: (num_layers * num_directions, batch, output_channels, H, W)
+                  ※output_channels は (proj_channels if proj_channels > 0 else hidden_channels)
+                c0 の shape: (num_layers * num_directions, batch, hidden_channels, H, W)
+                省略時はゼロ初期化
+        """
+        if self.batch_first:
+            # (batch, seq, C, H, W) -> (seq, batch, C, H, W)
+            input = input.transpose(0, 1)
+        seq_len, batch_size, _, H, W = input.size()
+
+        output_channels = self.proj_channels if self.proj_channels > 0 else self.hidden_channels
+        total_directions = self.num_directions
+
+        if hx is None:
+            h0 = input.new_zeros(self.num_layers * total_directions, batch_size, output_channels, H, W)
+            c0 = input.new_zeros(self.num_layers * total_directions, batch_size, self.hidden_channels, H, W)
+        else:
+            h0, c0 = hx
+
+        layer_input = input
+        final_h = []
+        final_c = []
+
+        for layer in range(self.num_layers):
+            cells = self.layers[layer]
+            # 各方向の初期状態を取り出し
+            h_layer = []
+            c_layer = []
+            for d in range(total_directions):
+                idx = layer * total_directions + d
+                h_layer.append(h0[idx])
+                c_layer.append(c0[idx])
+            outputs = [None] * total_directions
+
+            # 順方向処理
+            out_fw = []
+            h_fw, c_fw = h_layer[0], c_layer[0]
+            for t in range(seq_len):
+                x_t = layer_input[t]
+                h_fw, c_fw = cells[0](x_t, (h_fw, c_fw))
+                out_fw.append(h_fw)
+            outputs[0] = out_fw
+            final_h.append(h_fw)
+            final_c.append(c_fw)
+
+            if self.bidirectional:
+                # 逆方向処理（時系列を逆順に）
+                out_bw = []
+                h_bw, c_bw = h_layer[1], c_layer[1]
+                for t in reversed(range(seq_len)):
+                    x_t = layer_input[t]
+                    h_bw, c_bw = cells[1](x_t, (h_bw, c_bw))
+                    out_bw.append(h_bw)
+                out_bw = out_bw[::-1]  # 時間軸の順序を元に戻す
+                outputs[1] = out_bw
+                final_h.append(h_bw)
+                final_c.append(c_bw)
+                # 各時刻ごとに両方向の出力をチャネル方向で連結
+                layer_output = [torch.cat((fw, bw), dim=1) for fw, bw in zip(outputs[0], outputs[1])]
+            else:
+                layer_output = outputs[0]
+
+            layer_output = torch.stack(layer_output, dim=0)  # (seq_len, batch, C_out, H, W)
+            if self.dropout > 0.0 and layer < self.num_layers - 1:
+                layer_output = F.dropout(layer_output, p=self.dropout, training=self.training)
+            layer_input = layer_output
+
+        output = layer_input
+        final_h = torch.stack(final_h, dim=0)  # (num_layers*num_directions, batch, output_channels, H, W)
+        final_c = torch.stack(final_c, dim=0)  # (num_layers*num_directions, batch, hidden_channels, H, W)
+        if self.batch_first:
+            output = output.transpose(0, 1)  # (batch, seq_len, C_out, H, W)
+        return output, (final_h, final_c)
+
+
+# # 使用例
+# if __name__ == "__main__":
+#     # 設定例
+#     seq_len = 5
+#     batch_size = 2
+#     input_channels = 3
+#     hidden_channels = 8
+#     num_layers = 2
+#     dropout = 0.2
+#     bidirectional = True
+#     proj_channels = 5  # 0 の場合は projection なし
+#     kernel_size = 3
+
+#     # 入力データ: batch_first=True の場合 (batch, seq, C, H, W)
+#     H, W = 16, 16
+#     x = torch.randn(batch_size, seq_len, input_channels, H, W)
+
+#     convlstm = CustomConvLSTM(
+#         input_channels,
+#         hidden_channels,
+#         kernel_size,
+#         num_layers=num_layers,
+#         bias=True,
+#         batch_first=True,
+#         dropout=dropout,
+#         bidirectional=bidirectional,
+#         proj_channels=proj_channels,
+#     )
+#     output, (h_n, c_n) = convlstm(x)
+#     print("出力系列の形状:", output.shape)
+#     print("最終隠れ状態の形状:", h_n.shape)
+#     print("最終セル状態の形状:", c_n.shape)
+
+
 class LuxUNetModel(nn.Module):
     def __init__(
         self,
@@ -548,8 +864,29 @@ class LuxUNetModel(nn.Module):
             nn.ReLU(),
             nn.Linear(64, len(HiddenGlobalState)),
         )
+        self.tmp_param = nn.Parameter(torch.randn(1))
 
     def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        state = batch["state"]
+        global_state = batch["global_state"]
+        print(f"state: {state.shape}")
+        print(f"global_state: {global_state.shape}")
+        _n, _t, _c, _x, _y = state.shape
+        # _ng, _tg, _cg = global_state.shape
+        policy_logits = torch.zeros(_n, _t, len(Action), _x, _y, device=state.device) * self.tmp_param
+        state_logits = torch.zeros(_n, _t, len(HiddenState), _x, _y, device=state.device)
+        global_state_logits = torch.zeros(_n, _t, len(HiddenGlobalState), device=state.device)
+        print(f"policy_logits: {policy_logits.shape}")
+        print(f"state_logits: {state_logits.shape}")
+        print(f"global_state_logits: {global_state_logits.shape}")
+        return {
+            "policy": policy_logits,
+            # "sap": sap_logits,
+            "state": state_logits,
+            "global_state": global_state_logits,
+            # "value": value_logits,
+        }
+
         state = batch["state"]
         global_state = batch["global_state"]
         _n, _t, _c, _x, _y = state.shape

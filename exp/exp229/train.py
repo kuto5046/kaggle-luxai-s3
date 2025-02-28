@@ -38,8 +38,8 @@ class Config:
     limit_train_batches: float = 1.0
     limit_val_batches: float = 1.0
     use_amp: bool = False
-    batch_size: int = 1024
-    num_workers: int = 20
+    batch_size: int = 2
+    num_workers: int = 1
     ckpt_path: str = None
     lr: float = 0.001
     weight_decay: float = 0.01
@@ -47,7 +47,7 @@ class Config:
     # model
     res: bool = True
     aug: bool = True
-    n_stack: int = 4
+    n_stack: int = 505
     # loss
     loss_weight_policy: float = 1.0
     loss_weight_state: float = 1.0
@@ -115,7 +115,7 @@ class TrainPipeline:
     def setup_logger(self) -> None:
         self.pl_logger = WandbLogger(
             project="kaggle-luxai-s3",
-            entity="kawattataido",
+            entity="cnumber",
             # name=f"{self.cfg.exp_name}",
             group=self.cfg.exp_name,
             mode="disabled" if self.cfg.debug else "online",
