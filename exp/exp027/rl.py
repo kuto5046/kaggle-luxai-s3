@@ -59,10 +59,12 @@ from ray.rllib.algorithms.impala.torch.vtrace_torch_v2 import (
 import wandb
 
 # policy名
-OWN_POLICY_NAME = "p0"
-SELF_PLAY_POLICY_NAME = "self-play"
-BEST_POLICY_NAME = "best"
-LB_BEST_POLICY_NAME = "lb_best"  # TODO: モデルや特徴量が異なるため未使用だが本当は使いたい
+OWN_POLICY = "p0"
+SELF_PLAY_POLICY = (
+    "self-play"  # TODO: 評価時に対戦相手をbestのみに制御することができていないため未使用だが本当は使いたい
+)
+BEST_POLICY = "best"
+LB_BEST_POLICY = "lb_best"  # TODO: モデルや特徴量が異なるため未使用だが本当は使いたい
 
 
 @dataclass
@@ -120,7 +122,7 @@ class Config:
             self.evaluation_num_env_runners = 1
             self.evaluation_interval = 1
             self.evaluation_duration = 2
-            self.training_minutes = 5
+            self.training_minutes = 3
             self.learner_queue_size = 1
             self.num_epochs = 1
 
@@ -602,7 +604,7 @@ class WandbLoggerCallback(RLlibCallback):
                 "train/total_steps_per_minute": total_steps_per_minute,  # 1分あたりの学習step数。学習速度(データ収集速度)的なものを見たい
             }
         )
-        # learner_metrics = result["learners"][OWN_POLICY_NAME].keys()
+        # learner_metrics = result["learners"][OWN_POLICY].keys()
         learner_metrics = [
             # "num_non_trainable_parameters",  # 一定
             "gradients_default_optimizer_global_norm",
@@ -624,7 +626,7 @@ class WandbLoggerCallback(RLlibCallback):
         for key in learner_metrics:
             wandb.log(
                 {
-                    f"train/{key}": result["learners"][OWN_POLICY_NAME][key],
+                    f"train/{key}": result["learners"][OWN_POLICY][key],
                 }
             )
 
@@ -658,7 +660,7 @@ class WandbLoggerCallback(RLlibCallback):
         policy_names = list(evaluation_metrics["env_runners"]["module_episode_returns_mean"].keys())
         self.logger.info(f"evaluation policy names: {policy_names}")
 
-        mean_rewards = evaluation_metrics["env_runners"]["module_episode_returns_mean"][OWN_POLICY_NAME]
+        mean_rewards = evaluation_metrics["env_runners"]["module_episode_returns_mean"][OWN_POLICY]
         evaluation_minutes = evaluation_metrics["env_runners"]["env_to_module_sum_episodes_length_in"] / 60
 
         # 中央の評価トラッカーから評価結果を取得
@@ -926,35 +928,38 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
         .multi_agent(
             # RLで扱うagent(policy)の名前
             policies={
-                OWN_POLICY_NAME,
-                SELF_PLAY_POLICY_NAME,
-                BEST_POLICY_NAME,
-                # LB_BEST_POLICY_NAME,
+                OWN_POLICY,
+                # SELF_PLAY_POLICY,
+                BEST_POLICY,
+                # LB_BEST_POLICY,
             },
             # 各agentのポリシーを決める関数
             policy_mapping_fn=lambda aid, episode, **kwargs: (
-                OWN_POLICY_NAME
+                OWN_POLICY
                 if aid == "player_0"
                 else random.choice(
                     [
-                        SELF_PLAY_POLICY_NAME,
-                        BEST_POLICY_NAME,
-                        # LB_BEST_POLICY_NAME,
+                        # SELF_PLAY_POLICY,
+                        BEST_POLICY,
+                        # LB_BEST_POLICY,
                     ]
                 )
             ),
             # 学習は自身のpolicyとself-playのpolicyを学習
-            policies_to_train=[OWN_POLICY_NAME, SELF_PLAY_POLICY_NAME],
+            policies_to_train=[
+                OWN_POLICY,
+                # SELF_PLAY_POLICY
+            ],
         )
         # https://docs.ray.io/en/latest/rllib/rllib-rlmodule.html#construction-through-rlmodulespecs
         .rl_module(
             rl_module_spec=MultiRLModuleSpec(
                 # policy名とモデルの紐づけ
                 rl_module_specs={
-                    OWN_POLICY_NAME: lb_best_rl_module_spec,
-                    SELF_PLAY_POLICY_NAME: lb_best_rl_module_spec,
-                    BEST_POLICY_NAME: best_rl_module_spec,
-                    # LB_BEST_POLICY_NAME: lb_best_rl_module_spec,
+                    OWN_POLICY: lb_best_rl_module_spec,
+                    # SELF_PLAY_POLICY: lb_best_rl_module_spec,
+                    BEST_POLICY: best_rl_module_spec,
+                    # LB_BEST_POLICY: lb_best_rl_module_spec,
                 }
             )
         )
@@ -972,14 +977,14 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
             evaluation_force_reset_envs_before_iteration=True,  # 各評価の前に環境をリセット
             evaluation_parallel_to_training=True,  # 評価と学習を並列に実行
             # 評価用の上書き設定.これにより評価時はlb_bestポリシーと自身の対戦になる
-            evaluation_config={
-                "multi_agent": {
-                    "policies": {OWN_POLICY_NAME, BEST_POLICY_NAME},
-                    "policy_mapping_fn": lambda aid, episode, **kwargs: (
-                        OWN_POLICY_NAME if aid == "player_0" else BEST_POLICY_NAME
-                    ),
-                }
-            },
+            # evaluation_config={
+            #     "multi_agent": {
+            #         "policies": {OWN_POLICY: None, BEST_POLICY: None},
+            #         "policy_mapping_fn": lambda aid, episode, **kwargs: (
+            #             OWN_POLICY if aid == "player_0" else BEST_POLICY
+            #         ),
+            #     }
+            # },
         )
         # .checkpointing(
         #     export_native_model_files=True,
@@ -1003,8 +1008,8 @@ def save_model(trainer: Algorithm, output_dir: Path, suffix: str = "model"):
     rllibのapiを使わず直接モデルを保存する
     モデルの名前はrlmoduleで定義した名前を使う
     """
-    policy_state_dict = trainer.get_module(OWN_POLICY_NAME).policy_model
-    value_state_dict = trainer.get_module(OWN_POLICY_NAME).value_model
+    policy_state_dict = trainer.get_module(OWN_POLICY).policy_model
+    value_state_dict = trainer.get_module(OWN_POLICY).value_model
 
     torch.save(policy_state_dict, output_dir / f"policy_{suffix}.pth")
     torch.save(value_state_dict, output_dir / f"value_{suffix}.pth")
