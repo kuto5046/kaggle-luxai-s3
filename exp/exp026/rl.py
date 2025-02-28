@@ -290,10 +290,15 @@ class RLLibLuxEnv(MultiAgentEnv):
 
         agent0_state = extract_state(obs["player_0"], 0, self.episode_store1)
         agent1_state = extract_state(obs["player_1"], 1, self.episode_store2)
+        # 自陣が(0, 0)になるようにstateを反転(state, height, width)
+        agent1_state = np.flip(agent1_state, [1, 2])
+
         agent0_global_state = extract_global_state(obs["player_0"], 0, self.env_params, self.episode_store1)
         agent1_global_state = extract_global_state(obs["player_1"], 1, self.env_params, self.episode_store2)
         agent0_legal_action_mask = get_valid_policy_map(obs["player_0"], 0, self.episode_store1)
         agent1_legal_action_mask = get_valid_policy_map(obs["player_1"], 1, self.episode_store2)
+        # 自陣が(0, 0)になるようにmask mapを反転(action, height, width)
+        agent1_legal_action_mask = np.flip(agent1_legal_action_mask, [1, 2])
 
         self.agent0_states.append(agent0_state)
         self.agent1_states.append(agent1_state)
