@@ -44,8 +44,8 @@ class Config:
     validation: bool = False
 
     use_only_win_data: bool = True
-    ignore_after_3_wins: bool = True
-    only_win_final_match: bool = True
+    ignore_after_3_wins: bool = False
+    only_win_final_match: bool = False
 
 
 def get_fold(_train: pl.DataFrame, cv: list[tuple[np.ndarray, np.ndarray]]) -> pl.DataFrame:
