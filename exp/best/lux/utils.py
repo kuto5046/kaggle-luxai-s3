@@ -149,7 +149,8 @@ class EnergyNodeGuesser:
         return energy_tile_patterns
 
     def _will_drift(self, obs: dict[str, Any]) -> bool:
-        return obs["steps"] in self._drift_steps
+        steps = obs["steps"] if isinstance(obs["steps"], int) else obs["steps"].item()
+        return steps in self._drift_steps
 
     def _drift_energy_node(self, obs: dict[str, Any]) -> None:
         # driftさせる
@@ -261,8 +262,9 @@ class EnergyNodeGuesser:
         likelihoods = np.zeros(len(self._drift_speed_prob))
         max_magnitude = max(env_params_ranges["energy_node_drift_magnitude"])
         non_move_prob = 1 / (2 * max_magnitude + 1) ** 2
+        steps = obs["steps"] if isinstance(obs["steps"], int) else obs["steps"].item()
         for i in range(len(self._drift_speed_prob)):
-            if obs["steps"] in self.ok_drift_steps[i]:
+            if steps in self.ok_drift_steps[i]:
                 if drifted:
                     # 動くはずで動いている場合
                     likelihoods[i] = 1 - non_move_prob
@@ -1428,3 +1430,39 @@ def can_move(pos: tuple[int, int], energy: int, dir: int, tile_type_map: np.ndar
 
 def can_sap(x: int, y: int, energy: int, unit_sap_cost: int, tile_type_map: np.ndarray):
     return energy >= unit_sap_cost and tile_type_map[y, x] != TileType.ASTEROID
+
+
+# 相対位置を計算
+def calc_relative_pos(base_pos: np.ndarray, target_pos: np.ndarray) -> np.ndarray:
+    return target_pos - base_pos
+
+
+# マスの半径kマス以内に該当するかどうか
+def is_within_k_tiles(base_pos: np.ndarray, target_pos: np.ndarray, k: int) -> bool:
+    return np.abs(base_pos[0] - target_pos[0]) <= k and np.abs(base_pos[1] - target_pos[1]) <= k
+
+
+# 隣接するマスにあるポイントマスを取得
+def get_nearby_point_positions(pos: np.ndarray, point_map: np.ndarray, k: int = 1) -> list[np.ndarray]:
+    # posを中心にkマス以内のマスを取得
+    nearby_positions = []
+    up_pos = (pos[0], pos[1] - k)
+    if in_map(up_pos) and point_map[up_pos[1], up_pos[0]] == 1:
+        nearby_positions.append(up_pos)
+    down_pos = (pos[0], pos[1] + k)
+    if in_map(down_pos) and point_map[down_pos[1], down_pos[0]] == 1:
+        nearby_positions.append(down_pos)
+    left_pos = (pos[0] - k, pos[1])
+    if in_map(left_pos) and point_map[left_pos[1], left_pos[0]] == 1:
+        nearby_positions.append(left_pos)
+    right_pos = (pos[0] + k, pos[1])
+    if in_map(right_pos) and point_map[right_pos[1], right_pos[0]] == 1:
+        nearby_positions.append(right_pos)
+    return nearby_positions
+
+
+# 自身の周囲kタイル以内にいる敵ユニットを抽出
+def get_nearby_enemy_unit_ids(
+    unit_pos: tuple[int, int], opp_unit_positions: list[tuple[int, int]], k: int
+) -> list[int]:
+    return [unit_id for unit_id, pos in enumerate(opp_unit_positions) if is_within_k_tiles(unit_pos, pos, k)]

@@ -17,9 +17,12 @@ from lux.utils import (
     in_map,
     calc_next_pos,
     extract_state,
+    calc_relative_pos,
     get_valid_sap_map,
     extract_global_state,
     get_valid_policy_map,
+    get_nearby_enemy_unit_ids,
+    get_nearby_point_positions,
 )
 from lux.models import LuxUNetModel
 from lux.params import EnvParams
@@ -34,6 +37,8 @@ class Config:
     n_stack: int = 4
     # 同じマスに複数のユニットが移動する場合のペナルティ、0=重複を許可(greedy)、1=重複を禁止
     overlap_penalty: float = 2.0
+
+    tta: bool = False
 
     checkpoint_path: Path = Path(__file__).parent / "output/best_model.ckpt"
 
@@ -140,7 +145,26 @@ class ILAgent:
             self.stack_states.append(np.zeros((len(State), 24, 24)))
             self.stack_global_states.append(np.zeros(len(GlobalState)))
 
-    def predict(self, obs: dict[str, Any], team_id: int, episode_store: EpisodeStore) -> tuple[np.ndarray, np.ndarray]:
+    def transpose_state(self, state: torch.Tensor) -> torch.Tensor:
+        assert state.dim() == 5
+        return state.permute(0, 1, 2, 4, 3)
+
+    def transpose_global_state(self, global_state: torch.Tensor) -> torch.Tensor:
+        return global_state
+
+    def transpose_policy(self, policy: torch.Tensor) -> torch.Tensor:
+        assert policy.dim() == 4
+        policy = policy.permute(0, 1, 3, 2)
+        policy[:, Action.UP], policy[:, Action.LEFT] = policy[:, Action.LEFT].clone(), policy[:, Action.UP].clone()
+        policy[:, Action.DOWN], policy[:, Action.RIGHT] = (
+            policy[:, Action.RIGHT].clone(),
+            policy[:, Action.DOWN].clone(),
+        )
+        return policy
+
+    def predict(
+        self, obs: dict[str, Any], team_id: int, episode_store: EpisodeStore, cfg: Config
+    ) -> tuple[np.ndarray, np.ndarray]:
         state = extract_state(obs, team_id, episode_store)
         global_state = extract_global_state(obs, team_id, self.env_cfg, episode_store)
         self.stack_states.append(state)
@@ -156,11 +180,18 @@ class ILAgent:
             states["state"] = torch.flip(states["state"], [3, 4])
 
         with torch.no_grad():
+            if cfg.tta:
+                states["state"] = torch.cat([states["state"], self.transpose_state(states["state"])], dim=0)
+                states["global_state"] = torch.cat(
+                    [states["global_state"], self.transpose_global_state(states["global_state"])], dim=0
+                )
             if torch.cuda.is_available():
                 states = {k: v.cuda() for k, v in states.items()}
             output = self.model(states)
             if torch.cuda.is_available():
                 output = {k: v.cpu() for k, v in output.items()}
+            if cfg.tta:
+                output["policy"] = (output["policy"][:1] + self.transpose_policy(output["policy"][1:])) / 2
             policy_map = output["policy"].squeeze().numpy()
 
         if do_flip:
@@ -225,7 +256,7 @@ class Agent:
             self.episode_store.reset()
         else:
             self.episode_store.update(obs, self.prev_actions)
-        policy_map, point_map = imitation_model.predict(obs, self.team_id, self.episode_store)
+        policy_map, point_map = imitation_model.predict(obs, self.team_id, self.episode_store, self.cfg)
 
         unit_mask = np.array(obs["units_mask"][self.team_id])  # shape (max_units, )
         unit_positions = np.array(obs["units"]["position"][self.team_id])  # shape (max_units, 2)
@@ -426,39 +457,3 @@ class Agent:
                 else:
                     actions[unit_id] = [action, 0, 0]
                     break
-
-
-# 相対位置を計算
-def calc_relative_pos(base_pos: np.ndarray, target_pos: np.ndarray) -> np.ndarray:
-    return target_pos - base_pos
-
-
-# マスの半径kマス以内に該当するかどうか
-def is_within_k_tiles(base_pos: np.ndarray, target_pos: np.ndarray, k: int) -> bool:
-    return np.abs(base_pos[0] - target_pos[0]) <= k and np.abs(base_pos[1] - target_pos[1]) <= k
-
-
-# 隣接するマスにあるポイントマスを取得
-def get_nearby_point_positions(pos: np.ndarray, point_map: np.ndarray, k: int = 1) -> list[np.ndarray]:
-    # posを中心にkマス以内のマスを取得
-    nearby_positions = []
-    up_pos = (pos[0], pos[1] - k)
-    if in_map(up_pos) and point_map[up_pos[1], up_pos[0]] == 1:
-        nearby_positions.append(up_pos)
-    down_pos = (pos[0], pos[1] + k)
-    if in_map(down_pos) and point_map[down_pos[1], down_pos[0]] == 1:
-        nearby_positions.append(down_pos)
-    left_pos = (pos[0] - k, pos[1])
-    if in_map(left_pos) and point_map[left_pos[1], left_pos[0]] == 1:
-        nearby_positions.append(left_pos)
-    right_pos = (pos[0] + k, pos[1])
-    if in_map(right_pos) and point_map[right_pos[1], right_pos[0]] == 1:
-        nearby_positions.append(right_pos)
-    return nearby_positions
-
-
-# 自身の周囲kタイル以内にいる敵ユニットを抽出
-def get_nearby_enemy_unit_ids(
-    unit_pos: tuple[int, int], opp_unit_positions: list[tuple[int, int]], k: int
-) -> list[int]:
-    return [unit_id for unit_id, pos in enumerate(opp_unit_positions) if is_within_k_tiles(unit_pos, pos, k)]
