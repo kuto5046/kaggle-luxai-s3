@@ -126,6 +126,7 @@ class LaxDataset(Dataset):
         self.aug = cfg.aug
 
     def __len__(self) -> int:
+        # return 10
         return len(self.episode_ids)
 
     def __getitem__(self, idx: int) -> dict[str, np.ndarray]:
@@ -228,13 +229,13 @@ class LaxLitModel(LightningModule):
         super().__init__()
         self.cfg = cfg
         self.output_dir = self.cfg.output_dir
-        self.model = LuxUNetModel(
+        self.model = LuxLSTMModel(
             state_space_size=len(State),
             global_state_space_size=len(GlobalState),
             action_space_size=len(Action),
             hidden_state_space_size=len(HiddenState),
             n_stack=cfg.n_stack,
-            res=cfg.res,
+            # res=cfg.res,
         )
         self.criterion1 = DiceLoss(n_classes=len(Action))
         # self.criterion1 = MaskedBCEWithLogitsLoss()
@@ -263,12 +264,12 @@ class LaxLitModel(LightningModule):
         batch_action = batch["action"]
 
         # first 2 dims to 1
-        print(f"output_policy.shape: {output_policy.shape}")
-        print(f"batch_action.shape: {batch_action.shape}")
+        # print(f"output_policy.shape: {output_policy.shape}")
+        # print(f"batch_action.shape: {batch_action.shape}")
         output_policy = output_policy.flatten(0, 1)
         batch_action = batch_action.flatten(0, 1)
-        print(f"output_policy.shape: {output_policy.shape}")
-        print(f"batch_action.shape: {batch_action.shape}")
+        # print(f"output_policy.shape: {output_policy.shape}")
+        # print(f"batch_action.shape: {batch_action.shape}")
 
         policy_preds = torch.softmax(output_policy, dim=1)
         policy_targets = one_hot_encoder(batch_action, n_classes=len(Action))
@@ -344,9 +345,9 @@ class LaxLitModel(LightningModule):
         gts = batch_action.flatten()
         unit_masks = (batch["state"][:, :, State.OWN_UNIT_COUNT] > 0).flatten()  # unitが存在するところだけで計算する
 
-        print(f"preds.shape: {preds.shape}")
-        print(f"gts.shape: {gts.shape}")
-        print(f"unit_masks.shape: {unit_masks.shape}")
+        # print(f"preds.shape: {preds.shape}")
+        # print(f"gts.shape: {gts.shape}")
+        # print(f"unit_masks.shape: {unit_masks.shape}")
 
         preds = preds[unit_masks]
         gts = gts[unit_masks]
@@ -630,199 +631,117 @@ class CustomConvLSTMCell(nn.Module):
 
 
 # Written by ChatGPT
-class CustomConvLSTM(nn.Module):
-    def __init__(
-        self,
-        input_channels,
-        hidden_channels,
-        kernel_size,
-        num_layers=1,
-        bias=True,
-        batch_first=False,
-        dropout=0.0,
-        bidirectional=False,
-        proj_channels=0,
-        device=None,
-        dtype=None,
-    ):
+class SimpleConvLSTMCell(nn.Module):
+    def __init__(self, input_channels, hidden_channels, kernel_size, bias=True):
         """
-        引数は torch.nn.LSTM と同様ですが、ConvLSTM 用です。
-
-        input_channels : 入力テンソルのチャネル数
-        hidden_channels: 各層の隠れ状態（およびセル状態）のチャネル数
-        kernel_size    : 畳み込みカーネルサイズ（int または tuple）
-        num_layers     : 層数
-        bias           : バイアスの有無
-        batch_first    : 入出力テンソルの shape が (batch, seq, C, H, W) なら True
-        dropout        : 各層間で適用する dropout 率（最終層以外）
-        bidirectional  : 双方向 ConvLSTM にするか否か
-        proj_channels  : 0 の場合は通常の ConvLSTM、0 より大きいと出力に projection を適用
-        device, dtype  : パラメータ作成時のデバイス、型
+        input_channels  : 入力のチャネル数
+        hidden_channels : 隠れ状態のチャネル数
+        kernel_size     : 畳み込みカーネルサイズ（int または tuple）
+        bias            : バイアスの有無
         """
         super().__init__()
-        self.input_channels = input_channels
+        # 畳み込みによるパディングは、カーネルサイズの半径
+        padding = kernel_size // 2 if isinstance(kernel_size, int) else (kernel_size[0] // 2, kernel_size[1] // 2)
         self.hidden_channels = hidden_channels
-        self.kernel_size = kernel_size
-        self.num_layers = num_layers
-        self.bias = bias
-        self.batch_first = batch_first
-        self.dropout = dropout
-        self.bidirectional = bidirectional
-        self.proj_channels = proj_channels
-        self.device = device
-        self.dtype = dtype
+        # 入力 x と隠れ状態 h をチャネル方向に連結して 4 倍のチャネル数で一括畳み込み
+        self.conv = nn.Conv2d(
+            input_channels + hidden_channels, 4 * hidden_channels, kernel_size, padding=padding, bias=bias
+        )
 
-        self.num_directions = 2 if bidirectional else 1
-
-        # 各層ごとの ConvLSTMCell を ModuleList で管理
-        self.layers = nn.ModuleList()
-        for layer in range(num_layers):
-            layer_input_channels = (
-                input_channels
-                if layer == 0
-                else ((proj_channels if proj_channels > 0 else hidden_channels) * self.num_directions)
-            )
-            cells = nn.ModuleList()
-            # 順方向セル
-            cell_fw = CustomConvLSTMCell(
-                layer_input_channels,
-                hidden_channels,
-                kernel_size,
-                proj_channels=proj_channels,
-                bias=bias,
-                device=device,
-                dtype=dtype,
-            )
-            cells.append(cell_fw)
-            if self.bidirectional:
-                cell_bw = CustomConvLSTMCell(
-                    layer_input_channels,
-                    hidden_channels,
-                    kernel_size,
-                    proj_channels=proj_channels,
-                    bias=bias,
-                    device=device,
-                    dtype=dtype,
-                )
-                cells.append(cell_bw)
-            self.layers.append(cells)
-
-    def forward(self, input, hx=None):
+    def forward(self, x, hidden):
         """
-        input : 入力系列
-                batch_first==False の場合 shape: (seq_len, batch, C, H, W)
-                batch_first==True の場合 shape: (batch, seq_len, C, H, W)
-        hx    : (h0, c0) のタプル
-                h0 の shape: (num_layers * num_directions, batch, output_channels, H, W)
-                  ※output_channels は (proj_channels if proj_channels > 0 else hidden_channels)
-                c0 の shape: (num_layers * num_directions, batch, hidden_channels, H, W)
-                省略時はゼロ初期化
+        x     : 入力テンソル (batch, input_channels, H, W)
+        hidden: タプル (h, c) 各テンソルの shape は (batch, hidden_channels, H, W)
+        """
+        h, c = hidden
+        combined = torch.cat([x, h], dim=1)
+        conv_out = self.conv(combined)
+        # 4 つのゲートに分割
+        i, f, g, o = torch.chunk(conv_out, 4, dim=1)
+        i = torch.sigmoid(i)
+        f = torch.sigmoid(f)
+        g = torch.tanh(g)
+        o = torch.sigmoid(o)
+        c_new = f * c + i * g
+        h_new = o * torch.tanh(c_new)
+        return h_new, c_new
+
+
+class ConvLSTM(nn.Module):
+    def __init__(self, input_channels, hidden_channels, kernel_size, num_layers=1, bias=True, batch_first=False):
+        """
+        input_channels  : 入力のチャネル数
+        hidden_channels : 各層の隠れ状態のチャネル数
+        kernel_size     : 畳み込みカーネルサイズ
+        num_layers      : LSTM の層数
+        bias            : バイアスの有無
+        batch_first     : 入出力テンソルが (batch, seq, C, H, W) なら True
+        """
+        super().__init__()
+        self.num_layers = num_layers
+        self.batch_first = batch_first
+
+        cell_list = []
+        for i in range(num_layers):
+            cur_in_channels = input_channels if i == 0 else hidden_channels
+            cell_list.append(SimpleConvLSTMCell(cur_in_channels, hidden_channels, kernel_size, bias))
+        self.cell_list = nn.ModuleList(cell_list)
+
+    def forward(self, x, hidden=None):
+        """
+        x : 入力テンソル
+            batch_first=False の場合 (seq_len, batch, C, H, W)
+            batch_first=True の場合 (batch, seq_len, C, H, W)
+        hidden: オプションで各層の初期状態 [(h0, c0), ...]
+                各状態の shape は (batch, hidden_channels, H, W)
+                省略時はゼロで初期化
         """
         if self.batch_first:
             # (batch, seq, C, H, W) -> (seq, batch, C, H, W)
-            input = input.transpose(0, 1)
-        seq_len, batch_size, _, H, W = input.size()
+            x = x.transpose(0, 1)
+        seq_len, batch_size, _, H, W = x.size()
 
-        output_channels = self.proj_channels if self.proj_channels > 0 else self.hidden_channels
-        total_directions = self.num_directions
+        # 各層の初期状態を用意
+        if hidden is None:
+            hidden = []
+            for i in range(self.num_layers):
+                h = torch.zeros(batch_size, self.cell_list[i].hidden_channels, H, W, device=x.device)
+                c = torch.zeros(batch_size, self.cell_list[i].hidden_channels, H, W, device=x.device)
+                hidden.append((h, c))
 
-        if hx is None:
-            h0 = input.new_zeros(self.num_layers * total_directions, batch_size, output_channels, H, W)
-            c0 = input.new_zeros(self.num_layers * total_directions, batch_size, self.hidden_channels, H, W)
-        else:
-            h0, c0 = hx
-
-        layer_input = input
-        final_h = []
-        final_c = []
-
-        for layer in range(self.num_layers):
-            cells = self.layers[layer]
-            # 各方向の初期状態を取り出し
-            h_layer = []
-            c_layer = []
-            for d in range(total_directions):
-                idx = layer * total_directions + d
-                h_layer.append(h0[idx])
-                c_layer.append(c0[idx])
-            outputs = [None] * total_directions
-
-            # 順方向処理
-            out_fw = []
-            h_fw, c_fw = h_layer[0], c_layer[0]
+        layer_input = x
+        last_state_list = []
+        # 各層ごとに時系列を処理
+        for i in range(self.num_layers):
+            h, c = hidden[i]
+            outputs = []
             for t in range(seq_len):
-                x_t = layer_input[t]
-                h_fw, c_fw = cells[0](x_t, (h_fw, c_fw))
-                out_fw.append(h_fw)
-            outputs[0] = out_fw
-            final_h.append(h_fw)
-            final_c.append(c_fw)
+                h, c = self.cell_list[i](layer_input[t], (h, c))
+                outputs.append(h)
+            layer_output = torch.stack(outputs, dim=0)
+            layer_input = layer_output  # 次層への入力
+            last_state_list.append((h, c))
 
-            if self.bidirectional:
-                # 逆方向処理（時系列を逆順に）
-                out_bw = []
-                h_bw, c_bw = h_layer[1], c_layer[1]
-                for t in reversed(range(seq_len)):
-                    x_t = layer_input[t]
-                    h_bw, c_bw = cells[1](x_t, (h_bw, c_bw))
-                    out_bw.append(h_bw)
-                out_bw = out_bw[::-1]  # 時間軸の順序を元に戻す
-                outputs[1] = out_bw
-                final_h.append(h_bw)
-                final_c.append(c_bw)
-                # 各時刻ごとに両方向の出力をチャネル方向で連結
-                layer_output = [torch.cat((fw, bw), dim=1) for fw, bw in zip(outputs[0], outputs[1])]
-            else:
-                layer_output = outputs[0]
-
-            layer_output = torch.stack(layer_output, dim=0)  # (seq_len, batch, C_out, H, W)
-            if self.dropout > 0.0 and layer < self.num_layers - 1:
-                layer_output = F.dropout(layer_output, p=self.dropout, training=self.training)
-            layer_input = layer_output
-
-        output = layer_input
-        final_h = torch.stack(final_h, dim=0)  # (num_layers*num_directions, batch, output_channels, H, W)
-        final_c = torch.stack(final_c, dim=0)  # (num_layers*num_directions, batch, hidden_channels, H, W)
         if self.batch_first:
-            output = output.transpose(0, 1)  # (batch, seq_len, C_out, H, W)
-        return output, (final_h, final_c)
+            layer_output = layer_output.transpose(0, 1)
+        return layer_output, last_state_list
+
+# 使用例
+if __name__ == "__main__":
+    batch_size = 2
+    seq_len = 5
+    input_channels = 3
+    hidden_channels = 8
+    kernel_size = 3
+    # batch_first=True の場合の入力形状: (batch, seq, C, H, W)
+    x = torch.randn(batch_size, seq_len, input_channels, 16, 16)
+
+    convlstm = ConvLSTM(input_channels, hidden_channels, kernel_size, num_layers=2, batch_first=True)
+    output, states = convlstm(x)
+    print("出力 shape:", output.shape)  # (batch, seq, hidden_channels, H, W)
 
 
-# # 使用例
-# if __name__ == "__main__":
-#     # 設定例
-#     seq_len = 5
-#     batch_size = 2
-#     input_channels = 3
-#     hidden_channels = 8
-#     num_layers = 2
-#     dropout = 0.2
-#     bidirectional = True
-#     proj_channels = 5  # 0 の場合は projection なし
-#     kernel_size = 3
-
-#     # 入力データ: batch_first=True の場合 (batch, seq, C, H, W)
-#     H, W = 16, 16
-#     x = torch.randn(batch_size, seq_len, input_channels, H, W)
-
-#     convlstm = CustomConvLSTM(
-#         input_channels,
-#         hidden_channels,
-#         kernel_size,
-#         num_layers=num_layers,
-#         bias=True,
-#         batch_first=True,
-#         dropout=dropout,
-#         bidirectional=bidirectional,
-#         proj_channels=proj_channels,
-#     )
-#     output, (h_n, c_n) = convlstm(x)
-#     print("出力系列の形状:", output.shape)
-#     print("最終隠れ状態の形状:", h_n.shape)
-#     print("最終セル状態の形状:", c_n.shape)
-
-
-class LuxUNetModel(nn.Module):
+class LuxLSTMModel(nn.Module):
     def __init__(
         self,
         state_space_size: int,
@@ -830,99 +749,60 @@ class LuxUNetModel(nn.Module):
         action_space_size: int,
         hidden_state_space_size: int,
         n_stack: int,
-        bilinear: bool = True,
-        res: bool = False,
+        num_layers: int = 6,
+        hidden_channels: int = 64,
+        kernel_size: int = 5,
+        return_hidden: bool = False,
+        # bilinear: bool = True,
+        # res: bool = False,
     ) -> None:
         super().__init__()
-        self.bilinear = bilinear
-
-        self.inc = DoubleConv(state_space_size, 64, res=res)
-        self.down1 = Down(64, 128, res=res)
-        self.down2 = Down(128, 256, res=res)
-        self.down3 = Down(256, 256, res=res)
-
-        #
-        factor = 2 if bilinear else 1
-        self.up1 = Up(256 * 2 + global_state_space_size, 256 // factor, bilinear)
-        self.up2 = Up(256, 128 // factor, bilinear)
-        self.up3 = Up(128, 64, bilinear)
-        self.policy_net = OutConv(64 * n_stack, action_space_size)
-        # self.sap_net = OutConv(64 * n_stack, 1)
-        self.state_net = OutConv(64 * n_stack, hidden_state_space_size)
-        self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
-        # self.value_net = nn.Sequential(
-        #     nn.Linear((256 + global_state_space_size) * n_stack, 128),
-        #     nn.ReLU(),
-        #     nn.Linear(128, 64),
-        #     nn.ReLU(),
-        #     nn.Linear(64, 1),
-        # )
-        self.global_state_net = nn.Sequential(
-            nn.Linear((256 + global_state_space_size) * n_stack, 128),
-            nn.ReLU(),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, len(HiddenGlobalState)),
+        self.convlstm = ConvLSTM(
+            input_channels=state_space_size + global_state_space_size,
+            hidden_channels=hidden_channels,
+            kernel_size=kernel_size,
+            num_layers=num_layers,
+            bias=True,
+            batch_first=True,
         )
-        self.tmp_param = nn.Parameter(torch.randn(1))
+        self.net_policy = nn.Sequential(nn.Conv2d(hidden_channels, action_space_size, kernel_size=1))
+        self.return_hidden = return_hidden
 
-    def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    def forward(
+        self, batch: dict[str, torch.Tensor], hidden: None | list[tuple[torch.Tensor, torch.Tensor]] = None
+    ) -> dict[str, torch.Tensor]:
         state = batch["state"]
         global_state = batch["global_state"]
-        print(f"state: {state.shape}")
-        print(f"global_state: {global_state.shape}")
+        # print(f"state: {state.shape}")
         _n, _t, _c, _x, _y = state.shape
-        # _ng, _tg, _cg = global_state.shape
-        policy_logits = torch.zeros(_n, _t, len(Action), _x, _y, device=state.device) * self.tmp_param
-        state_logits = torch.zeros(_n, _t, len(HiddenState), _x, _y, device=state.device)
-        global_state_logits = torch.zeros(_n, _t, len(HiddenGlobalState), device=state.device)
-        print(f"policy_logits: {policy_logits.shape}")
-        print(f"state_logits: {state_logits.shape}")
-        print(f"global_state_logits: {global_state_logits.shape}")
-        return {
+        _ng, _tg, _cg = global_state.shape
+
+        gx = global_state.view(_ng, _tg, _cg, 1, 1).expand(_ng, _tg, _cg, _x, _y)
+        # print(f"global_state: {gx.shape}")
+        x = torch.cat([state, gx], dim=2)
+        # print(f"x: {x.shape}")
+
+        x, hidden = self.convlstm(x, hidden)
+        # print(f"convlstm: {x.shape}")
+        # flatten
+        x = x.flatten(0, 1)
+        policy_logits = self.net_policy(x)
+        # reshape
+        policy_logits = policy_logits.view(_n, _t, len(Action), _x, _y)
+
+        # print(f"policy_logits: {policy_logits.shape}")
+        assert policy_logits.shape == (state.shape[0], state.shape[1], len(Action), state.shape[3], state.shape[4])
+        output = {
             "policy": policy_logits,
             # "sap": sap_logits,
-            "state": state_logits,
-            "global_state": global_state_logits,
+            # "state": state_logits,
+            # "global_state": global_state_logits,
             # "value": value_logits,
         }
-
-        state = batch["state"]
-        global_state = batch["global_state"]
-        _n, _t, _c, _x, _y = state.shape
-        x = state.view(-1, _c, _x, _y)
-        x1 = self.inc(x)
-        x2 = self.down1(x1)
-        x3 = self.down2(x2)
-        x4 = self.down3(x3)
-
-        # sx, syのマップにグローバルステートをブロードキャスト
-        sx, sy = x4.shape[2:]
-        _n, _t, _c = global_state.shape
-        gx = global_state.view(-1, _c, 1, 1)
-        gx = gx.repeat(1, 1, sx, sy)
-
-        x4 = torch.cat([x4, gx], dim=1)
-        x = self.global_avg_pool(x4).view(_n, -1)
-        # value_logits = self.value_net(x)
-        global_state_logits = self.global_state_net(x)
-
-        x = self.up1(x4, x3)
-        x = self.up2(x, x2)
-        x = self.up3(x, x1)
-
-        x = x.view(_n, -1, _x, _y)
-        policy_logits = self.policy_net(x)
-        # sap_logits = self.sap_net(x)
-        state_logits = self.state_net(x)
-
-        return {
-            "policy": policy_logits,
-            # "sap": sap_logits,
-            "state": state_logits,
-            "global_state": global_state_logits,
-            # "value": value_logits,
-        }
+        if self.return_hidden:
+            return output, hidden
+        else:
+            return output
 
 
 def save_model(model, output_dir: Path, latest: bool = False):

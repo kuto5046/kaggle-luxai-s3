@@ -38,8 +38,8 @@ class Config:
     limit_train_batches: float = 1.0
     limit_val_batches: float = 1.0
     use_amp: bool = False
-    batch_size: int = 2
-    num_workers: int = 1
+    batch_size: int = 4
+    num_workers: int = 20
     ckpt_path: str = None
     lr: float = 0.001
     weight_decay: float = 0.01

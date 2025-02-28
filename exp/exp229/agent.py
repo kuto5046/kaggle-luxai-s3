@@ -21,7 +21,7 @@ from lux.utils import (
     extract_global_state,
     get_valid_policy_map,
 )
-from lux.models import LuxUNetModel
+from lux.models import LuxLSTMModel
 from lux.params import EnvParams
 from scipy.special import softmax
 
@@ -31,7 +31,7 @@ class Config:
     # 確率的な行動を取るかどうか
     stochastic: bool = True  # Falseにするとargmaxで行動を選択する
     res: bool = True
-    n_stack: int = 4
+    n_stack: int = 505
     # 同じマスに複数のユニットが移動する場合のペナルティ、0=重複を許可(greedy)、1=重複を禁止
     overlap_penalty: float = 2.0
 
@@ -119,13 +119,14 @@ class MinimumCostFlow:
 
 class ILAgent:
     def __init__(self, env_cfg: EnvParams, checkpoint_path: Path, n_stack: int, res: bool = True) -> None:
-        self.model = LuxUNetModel(
+        self.model = LuxLSTMModel(
             state_space_size=len(State),
             global_state_space_size=len(GlobalState),
             action_space_size=len(Action),
             hidden_state_space_size=len(HiddenState),
             n_stack=n_stack,
-            res=res,
+            return_hidden=True,
+            # res=res,
         )
         ckpt = torch.load(checkpoint_path, weights_only=True, map_location="cpu")
         state_dict = {k.replace("model.", ""): v for k, v in ckpt["state_dict"].items()}
@@ -135,12 +136,7 @@ class ILAgent:
             self.model.cuda()
         self.player = None
         self.env_cfg = env_cfg
-        # n_stack分のstateを保持するqueue
-        self.stack_states = deque(maxlen=n_stack)
-        self.stack_global_states = deque(maxlen=n_stack)
-        for i in range(n_stack):
-            self.stack_states.append(np.zeros((len(State), 24, 24)))
-            self.stack_global_states.append(np.zeros(len(GlobalState)))
+        self.hidden = None
 
     def transpose_state(self, state: torch.Tensor) -> torch.Tensor:
         assert state.dim() == 5
@@ -164,12 +160,17 @@ class ILAgent:
     ) -> tuple[np.ndarray, np.ndarray]:
         state = extract_state(obs, team_id, episode_store)
         global_state = extract_global_state(obs, team_id, self.env_cfg, episode_store)
-        self.stack_states.append(state)
-        self.stack_global_states.append(global_state)
+        # print(f"state: {state.shape}, global_state: {global_state.shape}", file=sys.stderr)
         states = {
-            "state": torch.from_numpy(np.stack(list(self.stack_states), axis=0)).unsqueeze(0).float(),
-            "global_state": torch.from_numpy(np.stack(list(self.stack_global_states), axis=0)).unsqueeze(0).float(),
+            "state": torch.from_numpy(state).unsqueeze(0).unsqueeze(0).float(),
+            "global_state": torch.from_numpy(global_state).unsqueeze(0).unsqueeze(0).float(),
         }
+        # self.stack_states.append(state)
+        # self.stack_global_states.append(global_state)
+        # states = {
+        #     "state": torch.from_numpy(np.stack(list(self.stack_states), axis=0)).unsqueeze(0).float(),
+        #     "global_state": torch.from_numpy(np.stack(list(self.stack_global_states), axis=0)).unsqueeze(0).float(),
+        # }
 
         # 自陣が(0, 0)になるようにstateを反転
         do_flip = team_id == 1
@@ -184,12 +185,13 @@ class ILAgent:
                 )
             if torch.cuda.is_available():
                 states = {k: v.cuda() for k, v in states.items()}
-            output = self.model(states)
+            output, self.hidden = self.model(states, self.hidden)
             if torch.cuda.is_available():
                 output = {k: v.cpu() for k, v in output.items()}
+            # print(f"policy: {output['policy'].shape}", file=sys.stderr)
             if cfg.tta:
                 output["policy"] = (output["policy"][:1] + self.transpose_policy(output["policy"][1:])) / 2
-            policy_map = output["policy"].squeeze().numpy()
+            policy_map = output["policy"].squeeze().squeeze().numpy()
 
         if do_flip:
             policy_map = np.flip(policy_map, axis=(1, 2)).copy()
