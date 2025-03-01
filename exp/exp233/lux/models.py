@@ -977,7 +977,7 @@ class LuxLSTMModel(nn.Module):
         x = self.up3(x, x1)
 
         x = x.view(_n, _t, -1, _x, _y)
-        x, _ = self.convlstm(x, hidden)
+        x, hidden = self.convlstm(x, hidden)
         x = x.flatten(0, 1)
 
         # print(f"x: {x.shape}")
