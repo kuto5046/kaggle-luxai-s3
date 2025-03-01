@@ -577,20 +577,20 @@ class LuxUNetModel(nn.Module):
         self.up1 = Up(256 * 2 + global_state_space_size, 256 // factor, bilinear)
         self.up2 = Up(256, 128 // factor, bilinear)
         self.up3 = Up(128, 64, bilinear)
-        self._policy_nett1 = ResidualBlock(
+        self.sap_net1 = ResidualBlock(
             64 * n_stack, 64, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False
         )
-        self._policy_nett2 = ResidualBlock(64, 64, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False)
-        self._policy_net3 = OutConvWithNorm(64, action_space_size)
-        self._sap_net_from_policy = ResidualBlock(
-            action_space_size, 16, EnvParams.map_width, EnvParams.map_width, kernel_size=15, squeeze_excitation=False
+        self.sap_net2 = ResidualBlock(64, 64, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False)
+        self.sap_net3 = OutConvWithNorm(64, 1)
+        self.policy_net1_from_sap = ResidualBlock(
+            1, 16, EnvParams.map_width, EnvParams.map_width, kernel_size=15, squeeze_excitation=False
         )
         self.concat_norm = nn.BatchNorm2d(64 * n_stack + 16)
-        self._sap_nett2 = ResidualBlock(
+        self.policy_net2 = ResidualBlock(
             64 * n_stack + 16, 64, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False
         )
-        self._sap_nett3 = ResidualBlock(64, 64, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False)
-        self._sap_nett4 = OutConvWithNorm(64, 1)
+        self.policy_net3 = ResidualBlock(64, 64, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False)
+        self.policy_net4 = OutConv(64, action_space_size)
 
     def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         state = batch["state"]
@@ -618,22 +618,22 @@ class LuxUNetModel(nn.Module):
         x = self.up3(x, x1)
         x = x.view(_n, -1, _x, _y)
 
-        policy_logits = self._policy_nett1(x)
-        policy_logits2 = self._policy_nett2(policy_logits)
-        policy_logits3 = self._policy_net3(policy_logits2)
+        sap_logits1 = self.sap_net1(x)
+        sap_logits2 = self.sap_net2(sap_logits1)
+        sap_logits = self.sap_net3(sap_logits2)
 
-        # sap_net の出力は logits のまま扱う(ここで sigmoid はかけない)
-        _sap_logits1 = self._sap_net_from_policy(policy_logits3)
-        # x は [N, 64*n_stack, H, W]、_sap_logits1 は [N, 16, H, W] なので連結後のチャネル数は 64*n_stack+16
-        sap_features = torch.cat([x, _sap_logits1], dim=1)
+        # sap_net の出力は logits のまま扱うd(ここで sigmoid はかけない)
+        policy_logits1 = self.policy_net1_from_sap(sap_logits)
+        # x は [N, 64*n_stack, H, W]、policy_logits1 は [N, 16, H, W] なので連結後のチャネル数は 64*n_stack+16
+        policy_features = torch.cat([x, policy_logits1], dim=1)
         # 連結後に正規化を適用
-        sap_features = self.concat_norm(sap_features)
-        sap_logits = self._sap_nett2(sap_features)
-        sap_logits = self._sap_nett3(sap_logits)
-        sap_logits = self._sap_nett4(sap_logits)
+        policy_features = self.concat_norm(policy_features)
+        policy_logits = self.policy_net2(torch.cat([x, policy_features], dim=1))
+        policy_logits = self.policy_net3(policy_logits)
+        policy_logits = self.policy_net4(policy_logits)
 
         return {
-            "policy": policy_logits3,
+            "policy": policy_logits,
             "sap": sap_logits,
             # "state": state_logits,
             # "global_state": global_state_logits,
@@ -652,7 +652,7 @@ class MaskedFocalTverskyLoss(nn.Module):
         :param gamma: Focal項のパラメータ。gamma > 1 で難しい例に注目
         :param smooth: 数値安定性のためのスムージング項
         :param reduction: 'mean' もしくは 'sum'
-        ※この損失関数は、モデルの出力として logits(シグモイド未適用値)を入力として受け取ります。
+        ※この損失関数は、モデルの出力として logitsd(シグモイド未適用値)を入力として受け取ります。
         """
         super().__init__()
         self.alpha = alpha
@@ -663,7 +663,7 @@ class MaskedFocalTverskyLoss(nn.Module):
 
     def forward(self, inputs: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """
-        :param inputs: 予測値。logits(シグモイド未適用値)を想定。
+        :param inputs: 予測値。logitsd(シグモイド未適用値)を想定。
                        形状は (batch, ...) であることを前提とする。
         :param targets: 教師ラベル。0/1のバイナリマスク。
         :param mask: 損失計算対象となる領域を示すバイナリマスク。inputs と同じ形状。

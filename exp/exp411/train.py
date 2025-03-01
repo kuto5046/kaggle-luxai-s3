@@ -53,7 +53,7 @@ class Config:
     loss_weight_state: float = 1.0
     loss_weight_global_state: float = 0.0
     # loss_weight_value: float = 0.0
-    loss_weight_sap: float = 0.1
+    loss_weight_sap: float = 1.0
 
     @classmethod
     def from_args(cls) -> "Config":
