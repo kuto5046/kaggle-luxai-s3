@@ -137,6 +137,7 @@ class ILAgent:
         self.player = None
         self.env_cfg = env_cfg
         self.hidden = None
+        self.step = 0
 
     def transpose_state(self, state: torch.Tensor) -> torch.Tensor:
         assert state.dim() == 5
@@ -177,6 +178,9 @@ class ILAgent:
         if do_flip:
             states["state"] = torch.flip(states["state"], [3, 4])
 
+        if self.step % 101 == 0:
+            self.hidden = None
+
         with torch.no_grad():
             if cfg.tta:
                 states["state"] = torch.cat([states["state"], self.transpose_state(states["state"])], dim=0)
@@ -206,6 +210,8 @@ class ILAgent:
 
         policy_map = get_legal_policy(obs, policy_map, team_id, episode_store)
         point_map = state[State.POINTS]
+
+        self.step += 1
 
         return policy_map, point_map
 

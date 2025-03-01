@@ -823,8 +823,8 @@ class ConvLSTM(nn.Module):
                 # h_prev, c_prev = h0, c0  # DEBUG
                 cell = self.cell_list[layer]
                 h_new, c_new = cell(cell_input, (h_prev, c_prev))
-                if self.res and layer % 2 == 0 and layer > 0:
-                    h_new = h_new + h_grid[layer - 2][t]
+                # if self.res and layer % 2 == 0 and layer > 0:
+                #     h_new = h_new + h_grid[layer - 2][t]
                 h_grid[layer][t] = h_new
                 c_grid[layer][t] = c_new
 
@@ -884,33 +884,41 @@ class LuxLSTMModel(nn.Module):
             self.return_hidden = return_hidden
             return
 
-        self.hidden_channels = hidden_channels
-        self.conv1 = nn.Sequential(
-            DoubleConv(state_space_size + global_state_space_size, hidden_channels),
-            *[
-                DoubleConv(
-                    in_channels=hidden_channels, out_channels=hidden_channels, res=True, kernel_size=5, batch_norm=False
-                )
-                for _ in range(8)
-            ],
-        )
+        self.return_hidden = return_hidden
+        res = True
+        bilinear = True
+        self.inc = DoubleConv(state_space_size + global_state_space_size, 64, res=res)
+        self.down1 = Down(64, 128, res=res)
+        self.down2 = Down(128, 256, res=res)
+        self.down3 = Down(256, 256, res=res)
+        factor = 2 if bilinear else 1
+        self.up1 = Up(256 * 2 + global_state_space_size, 256 // factor, bilinear)
+        self.up2 = Up(256, 128 // factor, bilinear)
+        self.up3 = Up(128, 64, bilinear)
+        # self.policy_net = OutConv(64 * n_stack, action_space_size)
+        self.policy_net = OutConv(64, action_space_size)
+
+        # self.hidden_channels = hidden_channels
+        # self.conv1 = nn.Sequential(
+        #     DoubleConv(state_space_size + global_state_space_size, hidden_channels),
+        #     *[
+        #         DoubleConv(
+        #             in_channels=hidden_channels, out_channels=hidden_channels, res=True, kernel_size=5, batch_norm=False
+        #         )
+        #         for _ in range(8)
+        #     ],
+        # )
         self.convlstm = ConvLSTM(
-            input_channels=hidden_channels,
-            hidden_channels=hidden_channels,
+            input_channels=64,
+            hidden_channels=64,
             kernel_size=kernel_size,
             num_layers=1,
             bias=True,
             batch_first=True,
             res=True,
         )
-        # self.conv2 = nn.Sequential(
-        #     *[
-        #         DoubleConv(in_channels=hidden_channels, out_channels=hidden_channels, res=True, kernel_size=5, batch_norm=False)
-        #         for _ in range(4)
-        #     ],
-        # )
-        self.net_policy = nn.Sequential(nn.Conv2d(hidden_channels, action_space_size, kernel_size=1))
-        self.return_hidden = return_hidden
+        # self.net_policy = nn.Sequential(nn.Conv2d(hidden_channels, action_space_size, kernel_size=1))
+        # self.return_hidden = return_hidden
 
     def forward(
         self, batch: dict[str, torch.Tensor], hidden: None | list[tuple[torch.Tensor, torch.Tensor]] = None
@@ -941,20 +949,49 @@ class LuxLSTMModel(nn.Module):
                 return output
 
         x = x.view(-1, _c + _cg, _x, _y)
-        x = self.conv1(x)
+        x1 = self.inc(x)
+        x2 = self.down1(x1)
+        x3 = self.down2(x2)
+        x4 = self.down3(x3)
+
+        sx, sy = x4.shape[2:]
+        _n, _t, _c = global_state.shape
+        gx = global_state.view(-1, _c, 1, 1)
+        gx = gx.repeat(1, 1, sx, sy)
+
+        x4 = torch.cat([x4, gx], dim=1)
+        # x = self.global_avg_pool(x4).view(_n, -1)
+        # value_logits = self.value_net(x)
+        # global_state_logits = self.global_state_net(x)
+
+        x = self.up1(x4, x3)
+        x = self.up2(x, x2)
+        x = self.up3(x, x1)
+
         x = x.view(_n, _t, -1, _x, _y)
-        # x, hidden = self.convlstm(x, hidden)
-        # print(f"convlstm after reshape: {x.shape}")
-        # x = x.reshape(_n * _t, -1, _x, _y)
-        # print(f"convlstm before reshape: {x.shape}")
-        # x = self.conv2(x)
-        # x = x.reshape(_n, _t, -1, _x, _y)
-        # print(f"convlstm: {x.shape}")
-        # flatten
+        x, _ = self.convlstm(x, hidden)
         x = x.flatten(0, 1)
-        policy_logits = self.net_policy(x)
-        # reshape
-        policy_logits = policy_logits.view(_n, _t, len(Action), _x, _y)
+
+        # print(f"x: {x.shape}")
+        policy_logits = self.policy_net(x)
+        policy_logits = policy_logits.view(_n, _t, -1, _x, _y)
+        # print(f"policy_logits: {policy_logits.shape}")
+
+        # x = x.view(-1, _c + _cg, _x, _y)
+        # x = self.conv1(x)
+        # x = x.view(_n, _t, -1, _x, _y)
+        # # x, hidden = self.convlstm(x, hidden)
+        # # print(f"convlstm after reshape: {x.shape}")
+        # # x = x.reshape(_n * _t, -1, _x, _y)
+        # # print(f"convlstm before reshape: {x.shape}")
+        # # x = self.conv2(x)
+        # # x = x.reshape(_n, _t, -1, _x, _y)
+        # # print(f"convlstm: {x.shape}")
+        # # flatten
+        # x = x.flatten(0, 1)
+        # policy_logits = self.net_policy(x)
+        # # reshape
+        # policy_logits = policy_logits.view(_n, _t, len(Action), _x, _y)
 
         # print(f"policy_logits: {policy_logits.shape}")
         assert policy_logits.shape == (state.shape[0], state.shape[1], len(Action), state.shape[3], state.shape[4])
