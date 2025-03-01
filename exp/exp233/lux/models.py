@@ -117,14 +117,22 @@ class LaxDataset(Dataset):
         self.cfg = cfg
         self.mode = mode
         self.ids = []
-        self.n_match = 5
+        self.n_match = 32
         for episode_id, max_step in df[["EpisodeId", "MaxStep"]].to_numpy():
             if max_step != 505:
                 raise NotImplementedError("max_step must be 505 when training LSTM!")
             # for step in range(0, max_step):
             #     self.ids.append((episode_id, step))
-            for match in range(0, 505, self.n_match):
-                self.ids.append((episode_id, match))
+            # for match in range(0, 505, self.n_match):
+            #     self.ids.append((episode_id, match))
+            for game in range(0, 505, 101):
+                for match in range(0, 101, self.n_match):
+                    if match + self.n_match > 101:
+                        continue
+                    match_begin = game + match
+                    match_end = match_begin + self.n_match
+                    self.ids.append((episode_id, match_begin, match_end))
+
         self.h5_file = h5py.File(self.cfg.feature_dir / "episodes.h5", "r")
         self.transform_standardize = transforms.Compose([LuxAugmentStandardize()])
         self.transform = transforms.Compose([LuxAugmentTranspose()])
@@ -136,7 +144,7 @@ class LaxDataset(Dataset):
 
     def __getitem__(self, idx: int) -> dict[str, np.ndarray]:
         # episode_id, step = self.ids[idx]
-        episode_id, match = self.ids[idx]
+        episode_id, match_begin, match_end = self.ids[idx]
         states = []
         global_states = []
         hidden_states = []
@@ -146,7 +154,7 @@ class LaxDataset(Dataset):
         wins = []
         # for i in range(self.cfg.n_stack):
         # for i in [step]:
-        for i in range(match, match + self.n_match):
+        for i in range(match_begin, match_end):
             state = np.array(self.h5_file[str(episode_id)]["states"][str(i)]).astype(np.float32)
             global_state = np.array(self.h5_file[str(episode_id)]["global_states"][str(i)]).astype(np.float32)
             hidden_state = np.array(self.h5_file[str(episode_id)]["hidden_states"][str(i)]).astype(np.float32)
