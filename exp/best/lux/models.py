@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import h5py
 import numpy as np
 import torch
+import wandb
 import polars as pl
 import torch.nn.functional as F
 from torch import nn, optim
@@ -15,9 +16,7 @@ from torchmetrics import Accuracy, MetricCollection
 from transformers import get_cosine_schedule_with_warmup
 from torch.utils.data import Dataset, DataLoader
 
-import wandb
-
-from .utils import State, Action, GlobalState, HiddenState, to_np
+from .utils import State, Action, GlobalState, to_np
 from .params import EnvParams
 
 
@@ -236,7 +235,9 @@ class LaxLitModel(LightningModule):
         # self.criterion1 = MaskedBCEWithLogitsLoss()
         self.criterion2 = nn.BCEWithLogitsLoss()
         self.criterion3 = nn.MSELoss()
-        self.criterion4 = MaskedFocalTverskyLoss(alpha=0.3, beta=0.7, gamma=1.0, smooth=1e-3) # sapを行わない背景が多数で学習が進まない問題を解決するための損失関数
+        self.criterion4 = MaskedFocalTverskyLoss(
+            alpha=0.3, beta=0.7, gamma=1.0, smooth=1e-3
+        )  # sapを行わない背景が多数で学習が進まない問題を解決するための損失関数
 
         metrics = self.get_metrics()
         self.train_metrics = metrics.clone(postfix="/train")
@@ -560,7 +561,7 @@ class LuxUNetModel(nn.Module):
             64 * n_stack, 64, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False
         )
         self.sap_net2 = ResidualBlock(64, 64, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False)
-        self.sap_net3 = OutConvWithNorm(64, 1) # かなり極端な値を出力するので正規化することで学習を安定化させる
+        self.sap_net3 = OutConvWithNorm(64, 1)  # かなり極端な値を出力するので正規化することで学習を安定化させる
         # sap候補位置をpolicyの特徴マップに統合. sap rangeの最大値が7なのでkernel_size=15にしている
         self.policy_net1_from_sap = ResidualBlock(
             1, 16, EnvParams.map_width, EnvParams.map_width, kernel_size=15, squeeze_excitation=False
@@ -570,7 +571,7 @@ class LuxUNetModel(nn.Module):
             64 * n_stack + 16, 64, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False
         )
         self.policy_net3 = ResidualBlock(64, 64, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False)
-        self.policy_net4 = OutConv(64, action_space_size) # ここでWithNormを使うとCenterが全部Sapと予測されてしまった。
+        self.policy_net4 = OutConv(64, action_space_size)  # ここでWithNormを使うとCenterが全部Sapと予測されてしまった。
 
     def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         state = batch["state"]
@@ -774,6 +775,7 @@ class ResidualBlock(nn.Module):
         x = self.squeeze_excitation(self.norm2(x))
         x = x + self.change_n_channels(identity)
         return self.final_act(x)
+
 
 class LuxValueConvModel(nn.Module):
     def __init__(

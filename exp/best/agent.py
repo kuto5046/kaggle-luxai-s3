@@ -1,4 +1,3 @@
-import sys
 import time
 from heapq import heappop, heappush  # for dijkstra in MinimumCostFlow
 from typing import Any
@@ -12,7 +11,6 @@ from lux.utils import (
     State,
     Action,
     GlobalState,
-    HiddenState,
     EpisodeStore,
     in_map,
     calc_next_pos,
@@ -278,9 +276,7 @@ class Agent:
             self.episode_store.reset()
         else:
             self.episode_store.update(obs, self.prev_actions)
-        policy_map, _point_map, sap_map = imitation_model.predict(
-            obs, self.team_id, self.episode_store, self.cfg
-        )
+        policy_map, _point_map, sap_map = imitation_model.predict(obs, self.team_id, self.episode_store, self.cfg)
 
         unit_mask = np.array(obs["units_mask"][self.team_id])  # shape (max_units, )
         unit_positions = np.array(obs["units"]["position"][self.team_id])  # shape (max_units, 2)
@@ -597,4 +593,3 @@ class Agent:
                     break
             if selected_action["action_id"] == Action.SAP:
                 actions[unit_id] = [Action.SAP, selected_action["sap_pos"][0], selected_action["sap_pos"][1]]
-
