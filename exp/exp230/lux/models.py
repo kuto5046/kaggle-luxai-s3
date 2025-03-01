@@ -655,17 +655,17 @@ class SimpleConvLSTMCell(nn.Module):
         padding = kernel_size // 2 if isinstance(kernel_size, int) else (kernel_size[0] // 2, kernel_size[1] // 2)
         self.hidden_channels = hidden_channels
         # 入力 x と隠れ状態 h をチャネル方向に連結して 4 倍のチャネル数で一括畳み込み
-        # self.conv = nn.Conv2d(
-        #     input_channels + hidden_channels, 4 * hidden_channels, kernel_size, padding=padding, bias=bias
-        # )
-        self.conv = DoubleConv(
-            input_channels + hidden_channels,
-            4 * hidden_channels,
-            mid_channels=hidden_channels * 2,
-            res=True,
-            kernel_size=kernel_size,
-            batch_norm=False,
+        self.conv = nn.Conv2d(
+            input_channels + hidden_channels, 4 * hidden_channels, kernel_size, padding=padding, bias=bias
         )
+        # self.conv = DoubleConv(
+        #     input_channels + hidden_channels,
+        #     4 * hidden_channels,
+        #     mid_channels=hidden_channels * 2,
+        #     res=True,
+        #     kernel_size=kernel_size,
+        #     batch_norm=False,
+        # )
 
     def forward(self, x, hidden):
         """
@@ -718,7 +718,9 @@ class SimpleConvLSTMCellVer2(nn.Module):
 
 
 class ConvLSTM(nn.Module):
-    def __init__(self, input_channels, hidden_channels, kernel_size, num_layers=1, bias=True, batch_first=False):
+    def __init__(
+        self, input_channels, hidden_channels, kernel_size, num_layers=1, bias=True, batch_first=False, res=False
+    ):
         """
         input_channels  : 入力のチャネル数
         hidden_channels : 各層の隠れ状態のチャネル数
@@ -737,6 +739,7 @@ class ConvLSTM(nn.Module):
             # cell_list.append(SimpleConvLSTMCellVer2(cur_in_channels, hidden_channels, kernel_size, bias))
             cell_list.append(SimpleConvLSTMCell(cur_in_channels, hidden_channels, kernel_size, bias))
         self.cell_list = nn.ModuleList(cell_list)
+        self.res = res
 
     def forward(self, x, hidden=None):
         """
@@ -810,9 +813,11 @@ class ConvLSTM(nn.Module):
                     h_prev, c_prev = hidden_states[layer]
                 else:
                     h_prev, c_prev = h_grid[layer][t - 1], c_grid[layer][t - 1]
-                h_prev, c_prev = h0, c0  # DEBUG
+                # h_prev, c_prev = h0, c0  # DEBUG
                 cell = self.cell_list[layer]
                 h_new, c_new = cell(cell_input, (h_prev, c_prev))
+                if self.res and layer % 2 == 0 and layer > 0:
+                    h_new = h_new + h_grid[layer - 2][t]
                 h_grid[layer][t] = h_new
                 c_grid[layer][t] = c_new
 
@@ -823,8 +828,8 @@ class ConvLSTM(nn.Module):
         # 各層の最終状態も返す
         final_states = []
         for layer in range(num_layers):
-            # final_states.append((h_grid[layer][-1], c_grid[layer][-1]))
-            final_states.append((h0, c0))  # DEBUG
+            final_states.append((h_grid[layer][-1], c_grid[layer][-1]))
+            # final_states.append((h0, c0))  # DEBUG
         return outputs, final_states
 
 
@@ -851,9 +856,9 @@ class LuxLSTMModel(nn.Module):
         action_space_size: int,
         hidden_state_space_size: int,
         n_stack: int,
-        num_layers: int = 8,
-        mid_channels: int = 32,
-        hidden_channels: int = 32,
+        num_layers: int = 14,
+        mid_channels: int = 64,
+        hidden_channels: int = 64,
         kernel_size: int = 5,
         return_hidden: bool = False,
         # bilinear: bool = True,
@@ -881,6 +886,7 @@ class LuxLSTMModel(nn.Module):
             num_layers=num_layers,
             bias=True,
             batch_first=True,
+            res=True,
         )
         self.net_policy = nn.Sequential(nn.Conv2d(hidden_channels, action_space_size, kernel_size=1))
         self.return_hidden = return_hidden
