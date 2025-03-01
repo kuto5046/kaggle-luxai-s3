@@ -38,10 +38,10 @@ class Config:
     limit_train_batches: float = 1.0
     limit_val_batches: float = 1.0
     use_amp: bool = True
-    batch_size: int = 48
+    batch_size: int = 16
     num_workers: int = 20
     ckpt_path: str = None
-    lr: float = 0.003
+    lr: float = 0.001
     weight_decay: float = 0.01
     warmup_step_rate: float = 0.1
     # model

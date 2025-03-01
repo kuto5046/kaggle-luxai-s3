@@ -873,7 +873,7 @@ class LuxLSTMModel(nn.Module):
         n_stack: int,
         num_layers: int = 14,
         hidden_channels: int = 128,
-        kernel_size: int = 5,
+        kernel_size: int = 3,
         return_hidden: bool = False,
         # bilinear: bool = True,
         # res: bool = False,
@@ -917,7 +917,7 @@ class LuxLSTMModel(nn.Module):
         # )
         self.convlstm = ConvLSTM(
             input_channels=64,
-            hidden_channels=64,
+            hidden_channels=64 * 4,
             kernel_size=kernel_size,
             num_layers=1,
             bias=True,
@@ -925,7 +925,7 @@ class LuxLSTMModel(nn.Module):
             res=True,
         )
 
-        self.policy_net = OutConv(128, action_space_size)
+        self.policy_net = OutConv(64 * 4, action_space_size)
 
         # self.net_policy = nn.Sequential(nn.Conv2d(hidden_channels, action_space_size, kernel_size=1))
         # self.return_hidden = return_hidden
@@ -980,7 +980,9 @@ class LuxLSTMModel(nn.Module):
 
         x = x.view(_n, _t, -1, _x, _y)
         x_lstm, hidden = self.convlstm(x, hidden)
-        x = torch.cat([x, x_lstm], dim=2)
+        x = x_lstm
+        # x = x + x_lstm
+        # x = torch.cat([x, x_lstm], dim=2)
         x = x.flatten(0, 1)
 
         # print(f"x: {x.shape}")
