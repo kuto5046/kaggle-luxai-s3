@@ -180,6 +180,8 @@ class ILAgent:
 
         if self.step % 101 == 0:
             self.hidden = None
+        if self.step > 505:
+            raise ValueError("step is over 505")
 
         with torch.no_grad():
             if cfg.tta:
