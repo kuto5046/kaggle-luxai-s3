@@ -107,7 +107,7 @@ class Config:
     gamma: float = 0.99
     lr: float = 1e-5
     # batch size 一応1episodeのサイズにしてるが不要かも。もしくはrollout_fragment_length部分で調整する
-    train_batch_size_per_learner: int = 512 * 10
+    train_batch_size_per_learner: int = 512
     # 1回の学習データ(train_batch_size*queue_size)を何epoch分学習するか
     num_epochs: int = 1
     replay_proportion: float = 0.0  # リプレイバッファの割合
