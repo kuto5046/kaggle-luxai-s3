@@ -10,6 +10,7 @@ import ray
 import flax
 import numpy as np
 import torch
+import wandb
 import gymnasium as gym
 import jax.numpy as jnp
 import flax.serialization
@@ -54,8 +55,6 @@ from ray.rllib.algorithms.impala.torch.vtrace_torch_v2 import (
     vtrace_torch,
     make_time_major,
 )
-
-import wandb
 
 OWN_POLICY_NAME = "p0"
 

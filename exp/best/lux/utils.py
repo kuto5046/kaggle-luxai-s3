@@ -1088,6 +1088,8 @@ def extract_hidden_state(gt_obs: dict[str, Any], target_team_id: int) -> np.ndar
         unit_positions = np.array(gt_obs["units"]["position"][team_id])  # (max_units, 2)
         for unit_id in range(EnvParams.max_units):
             x, y = unit_positions[unit_id]
+            if x == -1 and y == -1:
+                continue
 
             if team_id == target_team_id:
                 pass
@@ -1187,11 +1189,10 @@ def extract_gt_state(obs: dict[str, Any], target_team_id: int) -> np.ndarray:
 
             # 味方同士は重複可能なのでincrementする（敵との重複はないため打ち消し合うことはないはず）
             if team_id == target_team_id:
-                # 重複はそんなに発生しないだろうということで正規化はしない
-                state_map[State.OWN_UNIT_COUNT, y, x] += 1
+                state_map[State.OWN_UNIT_COUNT, y, x] += 1 / EnvParams.max_units
                 state_map[State.OWN_UNIT_ENERGY, y, x] += unit_energy / EnvParams.init_unit_energy
             else:
-                state_map[State.OPP_UNIT_COUNT, y, x] += 1
+                state_map[State.OPP_UNIT_COUNT, y, x] += 1 / EnvParams.max_units
                 state_map[State.OPP_UNIT_ENERGY, y, x] += unit_energy / EnvParams.init_unit_energy
 
     return state_map
@@ -1219,22 +1220,23 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
     state_map[State.VISIT_COUNT] = episode_store.visit_count
 
     # unit state
+    opp_unit_position_set = set()
     for team_id in range(2):
         # 敵チームの情報はvision内にいない限り見れない
         unit_energies = np.array(obs["units"]["energy"][team_id])  # (max_units, 1)
         unit_positions = np.array(obs["units"]["position"][team_id])  # (max_units, 2)
         unit_masks = np.array(obs["units_mask"][team_id])  # (max_units, )
-        if team_id != target_team_id:
-            # sensor_maskが1(見える範囲)の場合は0にする。それ以外は0.5
-            state_map[State.OPP_UNIT_COUNT] = -1
-            state_map[State.OPP_UNIT_COUNT] *= 1 - state_map[State.SENSOR_MASK]
-            # アステロイドのところは存在しないので0
-            state_map[State.OPP_UNIT_COUNT] *= 1 - (state_map[State.TILE_TYPE] == TileType.ASTEROID)
+        # if team_id != target_team_id:
+        #     # sensor_maskが1(見える範囲)の場合は0にする。それ以外は0.5
+        #     state_map[State.OPP_UNIT_COUNT] = -1
+        #     state_map[State.OPP_UNIT_COUNT] *= 1 - state_map[State.SENSOR_MASK]
+        #     # アステロイドのところは存在しないので0
+        #     state_map[State.OPP_UNIT_COUNT] *= 1 - (state_map[State.TILE_TYPE] == TileType.ASTEROID)
 
-            state_map[State.OPP_UNIT_ENERGY] = -1
-            state_map[State.OPP_UNIT_ENERGY] *= 1 - state_map[State.SENSOR_MASK]
-            # アステロイドのところは存在しないので0
-            state_map[State.OPP_UNIT_ENERGY] *= 1 - (state_map[State.TILE_TYPE] == TileType.ASTEROID)
+        #     state_map[State.OPP_UNIT_ENERGY] = -1
+        #     state_map[State.OPP_UNIT_ENERGY] *= 1 - state_map[State.SENSOR_MASK]
+        #     # アステロイドのところは存在しないので0
+        #     state_map[State.OPP_UNIT_ENERGY] *= 1 - (state_map[State.TILE_TYPE] == TileType.ASTEROID)
 
         # available_unit_ids = np.where(unit_masks)[0]
         for unit_id in range(EnvParams.max_units):
@@ -1260,7 +1262,28 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
             else:
                 state_map[State.OPP_UNIT_COUNT, y, x] += 1 / EnvParams.max_units
                 state_map[State.OPP_UNIT_ENERGY, y, x] += unit_energy / EnvParams.init_unit_energy
+                opp_unit_position_set.add((x, y))
                 # state_map[State.OPP_UNIT_MASK, y, x] = unit_mask
+        # 5方向でsensor_maskが1でどこにもOPP_UNITがいない場合はSAP_AVAILABLE_AREAを0にする
+        directions = [(0, 1), (1, 0), (0, -1), (-1, 0), (0, 0)]
+        for y in range(EnvParams.map_height):
+            for x in range(EnvParams.map_width):
+                if state_map[State.SAP_AVAILABLE_AREA, y, x] != 1:
+                    continue
+                condition_ok = True
+                for dx, dy in directions:
+                    nx, ny = x + dx, y + dy
+                    if not in_map((nx, ny)):
+                        continue
+                    if state_map[State.SENSOR_MASK, ny, nx] != 1:
+                        condition_ok = False
+                        break
+                    if (nx, ny) in opp_unit_position_set:
+                        condition_ok = False
+                        break
+                if condition_ok:
+                    state_map[State.SAP_AVAILABLE_AREA, y, x] = 0
+
     return state_map
 
 
@@ -1339,7 +1362,7 @@ def extract_hidden_global_state(env_params: dict[str, Any]) -> np.ndarray:
 
 
 def extract_action(actions: np.ndarray, obs: dict[str, Any], target_team_id: int) -> np.ndarray:
-    action_map = np.zeros((2, EnvParams.map_width, EnvParams.map_height), dtype=np.float32)
+    action_map = np.zeros((3, EnvParams.map_width, EnvParams.map_height), dtype=np.float32)
     # unit state
     unit_masks = np.array(obs["units_mask"][target_team_id])  # (max_units, )
     unit_positions = np.array(obs["units"]["position"][target_team_id])  # (max_units, 2)
@@ -1355,6 +1378,7 @@ def extract_action(actions: np.ndarray, obs: dict[str, Any], target_team_id: int
             ny = y + dy
             if in_map((nx, ny)):
                 action_map[1, ny, nx] = 1
+                action_map[2, ny, nx] += 1
     return action_map
 
 
@@ -1429,7 +1453,7 @@ def can_move(pos: tuple[int, int], energy: int, dir: int, tile_type_map: np.ndar
 
 
 def can_sap(x: int, y: int, energy: int, unit_sap_cost: int, tile_type_map: np.ndarray):
-    return energy >= unit_sap_cost and tile_type_map[y, x] != TileType.ASTEROID
+    return energy >= unit_sap_cost
 
 
 # 相対位置を計算
