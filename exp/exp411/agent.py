@@ -165,7 +165,7 @@ class ILAgent:
             if do_flip:
                 output["sap"] = torch.flip(output["sap"], [-2, -1])
             policy_map = output["policy"].squeeze().numpy()
-            sap = output["sap"].squeeze().numpy()
+            sap = torch.sigmoid(output["sap"]).squeeze().numpy()
             sap_available_area = state[State.SAP_AVAILABLE_AREA]
             sap = sap * sap_available_area
 

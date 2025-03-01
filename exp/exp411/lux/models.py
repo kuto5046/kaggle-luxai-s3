@@ -17,7 +17,7 @@ from torch.utils.data import Dataset, DataLoader
 
 import wandb
 
-from .utils import State, Action, GlobalState, HiddenState, to_np
+from .utils import State, Action, GlobalState, to_np
 from .params import EnvParams
 
 
@@ -229,7 +229,6 @@ class LaxLitModel(LightningModule):
             state_space_size=len(State),
             global_state_space_size=len(GlobalState),
             action_space_size=len(Action),
-            hidden_state_space_size=len(HiddenState),
             n_stack=cfg.n_stack,
             res=cfg.res,
         )
@@ -237,8 +236,9 @@ class LaxLitModel(LightningModule):
         # self.criterion1 = MaskedBCEWithLogitsLoss()
         self.criterion2 = nn.BCEWithLogitsLoss()
         self.criterion3 = nn.MSELoss()
-        self.criterion4 = MaskedFocalTverskyLoss(alpha=0.3, beta=0.7, gamma=1.0, smooth=1e-3)
-        self.step = 0
+        self.criterion4 = MaskedFocalTverskyLoss(
+            alpha=0.3, beta=0.7, gamma=1.0, smooth=1e-3
+        )  # sapを行わない背景が多数で学習が進まない問題を解決するための損失関数
 
         metrics = self.get_metrics()
         self.train_metrics = metrics.clone(postfix="/train")
@@ -259,13 +259,7 @@ class LaxLitModel(LightningModule):
 
         policy_preds = torch.softmax(outputs["policy"], dim=1)
         policy_targets = one_hot_encoder(batch["action"], n_classes=len(Action))
-        # policy_mask = (batch["state"][:, -1, State.OWN_UNIT_COUNT] > 0).unsqueeze(1)  # (batch_size, 1, w, h)
-        # policy_loss = self.criterion1(policy_preds, policy_targets, policy_mask)
         policy_loss = self.criterion1(policy_preds, policy_targets)
-
-        # value_loss = self.criterion2(outputs["value"].flatten(), batch["win"])
-        # state_loss = self.criterion3(outputs["state"].flatten(), batch["hidden_state"].flatten())
-        # global_state_loss = self.criterion3(outputs["global_state"].flatten(), batch["hidden_global_state"].flatten())
 
         sap_available_mask = batch["state"][:, -1, State.SAP_AVAILABLE_AREA] > 0  # (batch_size, w, h)
         sap_output = outputs["sap"].squeeze(1)  # shape: (batch, H, W)
@@ -274,6 +268,7 @@ class LaxLitModel(LightningModule):
 
         if sap_present_mask.sum() > 0:
             # sap_loss は、sap が存在するサンプルのみで計算
+            # 背景の部分が多すぎて学習が進みにくいので、sap_available_mask を使って背景をマスクする
             sap_loss = self.criterion4(
                 sap_output[sap_present_mask], batch["sap"][sap_present_mask], sap_available_mask[sap_present_mask]
             )
@@ -349,18 +344,6 @@ class LaxLitModel(LightningModule):
             self.valid_metrics.update(preds, gts)
             self.valid_outputs["ground_truth"].append(to_np(gts))
             self.valid_outputs["predictions"].append(to_np(preds))
-
-        # loss.backward() の後に以下を実行
-        if self.step % 100 == 0:
-            print(f"{self.step=} {loss=}, {sap_loss=}, {policy_loss=}, {sap_present_mask.sum()=}")
-            for name, param in self.model.named_parameters():
-                if param.grad is not None:
-                    grad_mean = param.grad.mean().item()
-                    grad_std = param.grad.std().item()
-                    print(f"{name}: grad mean={grad_mean:.3e}, grad std={grad_std:.3e}")
-                else:
-                    print(f"{name}: no gradient")
-        self.step += 1
 
         return loss
 
@@ -557,7 +540,6 @@ class LuxUNetModel(nn.Module):
         state_space_size: int,
         global_state_space_size: int,
         action_space_size: int,
-        hidden_state_space_size: int,
         n_stack: int,
         bilinear: bool = True,
         res: bool = False,
@@ -573,7 +555,6 @@ class LuxUNetModel(nn.Module):
         factor = 2 if bilinear else 1
 
         # グローバル状態の情報を統合した後の特徴マップを各タスクに分岐
-        #
         self.up1 = Up(256 * 2 + global_state_space_size, 256 // factor, bilinear)
         self.up2 = Up(256, 128 // factor, bilinear)
         self.up3 = Up(128, 64, bilinear)
@@ -581,7 +562,8 @@ class LuxUNetModel(nn.Module):
             64 * n_stack, 64, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False
         )
         self.sap_net2 = ResidualBlock(64, 64, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False)
-        self.sap_net3 = OutConvWithNorm(64, 1)
+        self.sap_net3 = OutConvWithNorm(64, 1)  # かなり極端な値を出力するので正規化することで学習を安定化させる
+        # sap候補位置をpolicyの特徴マップに統合. sap rangeの最大値が7なのでkernel_size=15にしている
         self.policy_net1_from_sap = ResidualBlock(
             1, 16, EnvParams.map_width, EnvParams.map_width, kernel_size=15, squeeze_excitation=False
         )
@@ -590,7 +572,7 @@ class LuxUNetModel(nn.Module):
             64 * n_stack + 16, 64, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False
         )
         self.policy_net3 = ResidualBlock(64, 64, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False)
-        self.policy_net4 = OutConv(64, action_space_size)
+        self.policy_net4 = OutConv(64, action_space_size)  # ここでWithNormを使うとCenterが全部Sapと予測されてしまった。
 
     def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         state = batch["state"]
@@ -622,13 +604,13 @@ class LuxUNetModel(nn.Module):
         sap_logits2 = self.sap_net2(sap_logits1)
         sap_logits = self.sap_net3(sap_logits2)
 
-        # sap_net の出力は logits のまま扱うd(ここで sigmoid はかけない)
+        # sap_net の出力は logits のまま扱う(ここで sigmoid はかけない)
         policy_logits1 = self.policy_net1_from_sap(sap_logits)
         # x は [N, 64*n_stack, H, W]、policy_logits1 は [N, 16, H, W] なので連結後のチャネル数は 64*n_stack+16
         policy_features = torch.cat([x, policy_logits1], dim=1)
         # 連結後に正規化を適用
         policy_features = self.concat_norm(policy_features)
-        policy_logits = self.policy_net2(torch.cat([x, policy_features], dim=1))
+        policy_logits = self.policy_net2(policy_features)
         policy_logits = self.policy_net3(policy_logits)
         policy_logits = self.policy_net4(policy_logits)
 
@@ -851,52 +833,6 @@ class DiceLoss(nn.Module):
             class_wise_dice.append(1.0 - dice.item())
             loss += dice * self.weights[i]  # Apply the class weight
         return loss / torch.sum(self.weights)
-
-
-class FocalTverskyLoss(nn.Module):
-    def __init__(
-        self, alpha: float = 0.5, beta: float = 0.5, gamma: float = 1.0, smooth: float = 1e-6, reduction: str = "mean"
-    ):
-        """
-        Focal Tversky Loss
-        :param alpha: False Positive に対する重み(通常 0.5)
-        :param beta: False Negative に対する重み(通常 0.5)
-        :param gamma: Focal 項のパラメータ。gamma > 1 で難しい例に注目
-        :param smooth: 数値安定性のためのスムージング項
-        :param reduction: 損失のリダクション方法 ("mean", "sum" など)
-        """
-        super().__init__()
-        self.alpha = alpha
-        self.beta = beta
-        self.gamma = gamma
-        self.smooth = smooth
-        self.reduction = reduction
-
-    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        """
-        :param inputs: モデルの出力(シグモイドを適用する前の生のロジットでなく、0〜1の確率の場合はそのままでもよい)
-                       形状は (batch, …) で想定
-        :param targets: 教師信号、0/1 の二値マスク
-        :return: Focal Tversky Loss
-        """
-        # 入力とターゲットを(batch, -1)にフラット化
-        inputs = inputs.view(inputs.size(0), -1)
-        targets = targets.view(targets.size(0), -1).float()
-
-        # TP, FP, FNの計算
-        TP = (inputs * targets).sum(dim=1)
-        FP = (inputs * (1 - targets)).sum(dim=1)
-        FN = ((1 - inputs) * targets).sum(dim=1)
-
-        Tversky = (TP + self.smooth) / (TP + self.alpha * FP + self.beta * FN + self.smooth)
-        focal_loss = (1 - Tversky) ** self.gamma
-
-        if self.reduction == "mean":
-            return focal_loss.mean()
-        elif self.reduction == "sum":
-            return focal_loss.sum()
-        else:
-            return focal_loss
 
 
 class MaskedFocalLoss(nn.Module):
