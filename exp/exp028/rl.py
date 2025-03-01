@@ -11,6 +11,7 @@ import ray
 import flax
 import numpy as np
 import torch
+import wandb
 import gymnasium as gym
 import jax.numpy as jnp
 import flax.serialization
@@ -58,8 +59,6 @@ from ray.rllib.algorithms.impala.torch.vtrace_torch_v2 import (
     make_time_major,
 )
 
-import wandb
-
 # policy名
 OWN_POLICY = "p0"
 SELF_PLAY_POLICY = (
@@ -85,18 +84,18 @@ class Config:
 
     # 以下の3つのrunnerにcpuとgpuを割り振る。cpuの合計値がcpu数を超えないように注意(現在は24をactor: 21,learner: 1,evaluator:2に割り振る)
     # データ収集用
-    num_env_runners: int = 21  # actorの数
+    num_env_runners: int = 96 - 4 - 6  # actorの数
     num_cpus_per_env_runner: int = 1
     num_gpus_per_env_runner: int = 0
     rollout_fragment_length: int | str | None = "auto"  # 考慮したいstep数を設定してやる autoが推奨されている
 
     # 学習用(GPUの数=learnerと考えて良い)
-    num_learners: int = 0  # IMPALAの場合gpuが1つなら0に設定するとlocal learnerとして扱われる、処理が早くなる
+    num_learners: int = 4  # IMPALAの場合gpuが1つなら0に設定するとlocal learnerとして扱われる、処理が早くなる
     num_cpus_per_learner: int = 1
     num_gpus_per_learner: int = 1
 
     # 評価用
-    evaluation_num_env_runners: int = 2  # 評価用のenv runnerの数
+    evaluation_num_env_runners: int = 6  # 評価用のenv runnerの数
     evaluation_interval: int = 10  # 何回trainをしたら評価を実施するか
     evaluation_duration: int = (
         30  # 1回の評価で何エピソード分評価するか(学習と並列してやるため達成できないこともあるかも)
@@ -105,13 +104,13 @@ class Config:
 
     # learner
     training_minutes: int = 60 * 24  # 1日
-    learner_queue_size: int = 20  # workerからLearnerに送られるバッチのキューの最大サイズ. [batch_size]*queue_sizeがcpuメモリに乗りbatchごとに学習する
+    learner_queue_size: int = 100  # workerからLearnerに送られるバッチのキューの最大サイズ. [batch_size]*queue_sizeがcpuメモリに乗りbatchごとに学習する
     gamma: float = 0.99
     lr: float = 1e-5
     # batch size 一応1episodeのサイズにしてるが不要かも。もしくはrollout_fragment_length部分で調整する
     train_batch_size_per_learner: int = 512
     # 1回の学習データ(train_batch_size*queue_size)を何epoch分学習するか
-    num_epochs: int = 1
+    num_epochs: int = 2
     replay_proportion: float = 0.0  # リプレイバッファの割合
     # loss
     vtrace_clip_rho_threshold: float = 1.0  # 価値関数のlossの係数
