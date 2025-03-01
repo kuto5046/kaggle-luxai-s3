@@ -22,7 +22,7 @@ from lux.utils import (
     extract_global_state,
     get_valid_policy_map,
 )
-from lux.models import LuxUNetModel
+from lux.models import LuxUNetModel, LuxConvLSTMModel
 from lux.params import EnvParams
 from scipy.special import softmax
 
@@ -31,8 +31,13 @@ class Config:
     seed: int = 2025
     # 確率的な行動を取るかどうか
     stochastic: bool = True  # Falseにするとargmaxで行動を選択する
-    res: bool = True
-    n_stack: int = 4
+    # model
+    n_stack: int = 8
+    num_layers: int = 3
+    hidden_dim: int = 64
+    kernel_size: int = 5
+    num_repeats: int = 3
+
     overlap_penalty: float = 2.0
 
     checkpoint_path: Path = Path(__file__).parent / "output/best_model.ckpt"
@@ -116,14 +121,16 @@ class MinimumCostFlow:
 
 
 class ILAgent:
-    def __init__(self, env_cfg: EnvParams, checkpoint_path: Path, n_stack: int, res: bool = True) -> None:
-        self.model = LuxUNetModel(
+    def __init__(self, env_cfg: EnvParams, checkpoint_path: Path, n_stack: int) -> None:
+        self.model = LuxConvLSTMModel(
             state_space_size=len(State),
             global_state_space_size=len(GlobalState),
             action_space_size=len(Action),
             hidden_state_space_size=len(HiddenState),
-            n_stack=n_stack,
-            res=res,
+            num_layers=cfg.num_layers,
+            hidden_dim=cfg.hidden_dim,
+            kernel_size=cfg.kernel_size,
+            num_repeats=cfg.num_repeats,
         )
         ckpt = torch.load(checkpoint_path, weights_only=True, map_location="cpu")
         state_dict = {k.replace("model.", ""): v for k, v in ckpt["state_dict"].items()}
@@ -202,7 +209,7 @@ def get_legal_sap_policy(
 
 cfg = Config()
 seed_everything(cfg.seed, workers=True)
-imitation_model = ILAgent(EnvParams, cfg.checkpoint_path, cfg.n_stack, cfg.res)
+imitation_model = ILAgent(EnvParams, cfg.checkpoint_path, cfg.n_stack)
 
 
 class Agent:
