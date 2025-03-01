@@ -20,7 +20,9 @@ from lux.utils import (
     GlobalState,
     HiddenState,
     EpisodeStore,
+    to_np,
     extract_state,
+    switch_action,
     calc_relative_pos,
     extract_global_state,
     get_valid_policy_map,
@@ -70,7 +72,7 @@ LB_BEST_POLICY = "lb_best"  # TODO: モデルや特徴量が異なるため未�
 @dataclass
 class Config:
     exp_name: str = Path(__file__).parent.name
-    notes: str = "entropy lossが大きすぎるので調整。"
+    notes: str = "自陣固定のバグがあったので修正.負の報酬を導入した"
     model_name: str = "lux_unet"
     env_name: str = "lux-s3-v0"
     n_stack: int = 4
@@ -86,7 +88,7 @@ class Config:
     num_env_runners: int = 21  # actorの数
     num_cpus_per_env_runner: int = 1
     num_gpus_per_env_runner: int = 0
-    rollout_fragment_length: int | str | None = "auto"  # 考慮したいstep数を設定してやる(とりあえずマッチの半分ステップ)
+    rollout_fragment_length: int | str | None = "auto"  # 考慮したいstep数を設定してやる autoが推奨されている
 
     # 学習用(GPUの数=learnerと考えて良い)
     num_learners: int = 0  # IMPALAの場合gpuが1つなら0に設定するとlocal learnerとして扱われる、処理が早くなる
@@ -103,7 +105,7 @@ class Config:
 
     # learner
     training_minutes: int = 60 * 24  # 1日
-    learner_queue_size: int = 10  # workerからLearnerに送られるバッチのキューの最大サイズ. [batch_size]*queue_sizeがcpuメモリに乗りbatchごとに学習する
+    learner_queue_size: int = 20  # workerからLearnerに送られるバッチのキューの最大サイズ. [batch_size]*queue_sizeがcpuメモリに乗りbatchごとに学習する
     gamma: float = 0.99
     lr: float = 1e-5
     # batch size 一応1episodeのサイズにしてるが不要かも。もしくはrollout_fragment_length部分で調整する
@@ -119,10 +121,11 @@ class Config:
 
     def __post_init__(self):
         if self.debug:
-            self.num_env_runners = 3
+            self.num_env_runners = 1
             self.num_cpus_per_env_runner = 1
-            # self.evaluation_num_env_runners = 0
-            # self.evaluation_interval = 0
+            self.evaluation_num_env_runners = 1
+            self.evaluation_interval = 1
+            self.evaluation_duration = 5
             # self.evaluation_parallel_to_training = False
             self.training_minutes = 10
             self.learner_queue_size = 1
@@ -315,7 +318,14 @@ class RLLibLuxEnv(MultiAgentEnv):
         agent1_legal_action_mask = get_valid_policy_map(obs["player_1"], 1, self.episode_store2)
         # 自陣が(0, 0)になるようにmask mapを反転(action, height, width)
         agent1_legal_action_mask = np.flip(agent1_legal_action_mask, [1, 2])
-
+        agent1_legal_action_mask[Action.UP], agent1_legal_action_mask[Action.DOWN] = (
+            agent1_legal_action_mask[Action.DOWN].copy(),
+            agent1_legal_action_mask[Action.UP].copy(),
+        )
+        agent1_legal_action_mask[Action.LEFT], agent1_legal_action_mask[Action.RIGHT] = (
+            agent1_legal_action_mask[Action.RIGHT].copy(),
+            agent1_legal_action_mask[Action.LEFT].copy(),
+        )
         self.agent0_states.append(agent0_state)
         self.agent1_states.append(agent1_state)
         self.agent0_global_states.append(agent0_global_state)
@@ -340,6 +350,11 @@ class RLLibLuxEnv(MultiAgentEnv):
         action_map1 = action_dict["player_0"].reshape(EnvParams.map_height, EnvParams.map_width)
         action_map2 = action_dict["player_1"].reshape(EnvParams.map_height, EnvParams.map_width)
 
+        # 自陣を(0, 0)に固定していたものを元の位置に戻す
+        action_map2 = np.flip(action_map2, [0, 1]).copy()  # x, y軸反転
+        action_map2 = switch_action(action_map2, Action.RIGHT, Action.LEFT)
+        action_map2 = switch_action(action_map2, Action.UP, Action.DOWN)
+
         point_map1 = self.agent0_states[-1][State.POINTS]
         point_map2 = self.agent1_states[-1][State.POINTS]
         actions["player_0"], self.prev_opp_unit_positions["player_0"] = to_action(
@@ -359,23 +374,20 @@ class RLLibLuxEnv(MultiAgentEnv):
         )
         self.obs = to_numpy(flax.serialization.to_state_dict(self.obs))
         state = self._create_state(self.obs)
+        steps = self.obs["player_0"]["steps"].item()
 
         terminated = {agent_id: done.item() for agent_id, done in _terminated.items()}
         truncated = {agent_id: done.item() for agent_id, done in _truncated.items()}
         # "__all__" (required) is used to indicate env termination.
         terminated["__all__"] = np.all(list(truncated.values()))  # luxaiはtruncatedがTrueになる
         info = {agent_id: {} for agent_id in self.agents}
-        steps = self.obs["player_0"]["steps"].item()
         reward = self.reward_fn(_reward, steps=steps)
         return state, reward, terminated, truncated, info
 
     def reward_fn(self, raw_reward: jnp.ndarray, steps: int) -> dict[str, int]:
         """
         raw_rewardは累積値なので、前回との差分を取って現在のステップでの報酬を計算する
-        マッチの勝利数をそのまま報酬とする
-        他の報酬候補
-        - 差分報酬: 3-2の場合1、2-3の場合-1
-        - 勝敗報酬: 勝ち1、負け-1 引き分け0
+        マッチごとに勝利したら1、敗北したら-1、引き分けは0
         """
         _reward = to_numpy(raw_reward)
         current_rewards = {agent_id: int(r.item()) for agent_id, r in _reward.items()}
@@ -384,6 +396,12 @@ class RLLibLuxEnv(MultiAgentEnv):
         step_rewards = {
             agent_id: current_rewards[agent_id] - self.prev_raw_reward[agent_id] for agent_id in current_rewards.keys()
         }
+
+        # 0か+1の報酬しか発生しないので、プラスが発生したら反対のチームに負の報酬を与える
+        for agent_id, reward in step_rewards.items():
+            if reward > 0:
+                opp_agent_id = self.agents[1 - self.agents.index(agent_id)]
+                step_rewards[opp_agent_id] = -reward
 
         # 現在の累積報酬を保存
         self.prev_raw_reward = current_rewards
@@ -457,8 +475,9 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
 @ray.remote
 class EpisodeStatsCollector:
     def __init__(self):
-        self.episode_end_times = deque(maxlen=100)  # 直近100エピソードの終了時間を保存して速度を計測する
-        self.total_episodes = 0
+        self.runner_episode_end_times = deque(maxlen=100)  # 直近100エピソードの終了時間を保存して速度を計測する
+        self.eval_episode_end_times = deque(maxlen=100)  # 直近100エピソードの終了時間を保存して速度を計測する
+        self.runner_total_episodes = 0
         self.eval_total_episodes = 0
         self.last_log_time = time()
         # 評価用の変数
@@ -466,10 +485,13 @@ class EpisodeStatsCollector:
         self.current_evaluation_id = 0
         self.is_evaluation_active = False
 
-    def add_episode(self):
-        self.episode_end_times.append(time())
-        self.total_episodes += 1
-        self.eval_total_episodes += 1
+    def add_episode(self, in_evaluation: bool):
+        if in_evaluation:
+            self.eval_episode_end_times.append(time())
+            self.eval_total_episodes += 1
+        else:
+            self.runner_episode_end_times.append(time())
+            self.runner_total_episodes += 1
 
     def start_evaluation(self):
         """評価開始時に呼び出す"""
@@ -497,27 +519,34 @@ class EpisodeStatsCollector:
             "win_rate": win_rate,
         }
 
-    def get_speed_stats(self):
-        if len(self.episode_end_times) < 2:
+    def get_speed_stats(self, in_evaluation: bool):
+        if in_evaluation:
+            episode_end_times = self.eval_episode_end_times
+            total_episodes = self.eval_total_episodes
+        else:
+            episode_end_times = self.runner_episode_end_times
+            total_episodes = self.runner_total_episodes
+
+        if len(episode_end_times) < 2:
             return {
                 "episode_per_minute": 0.0,
-                "total_episodes": self.total_episodes,
+                "total_episodes": total_episodes,
             }
 
         # queueに溜まっているepisode終了時間の差分を計算
-        window_duration = self.episode_end_times[-1] - self.episode_end_times[0]
+        window_duration = episode_end_times[-1] - episode_end_times[0]
         if window_duration == 0:
             return {
                 "episode_per_minute": 0.0,
-                "total_episodes": self.total_episodes,
+                "total_episodes": total_episodes,
             }
 
         # 1秒間に何エピソード終了したか
-        episode_per_sec = (len(self.episode_end_times) - 1) / window_duration
+        episode_per_sec = (len(episode_end_times) - 1) / window_duration
         episode_per_minute = episode_per_sec * 60
         return {
             "episode_per_minute": episode_per_minute,
-            "total_episodes": self.total_episodes,
+            "total_episodes": total_episodes,
         }
 
 
@@ -695,20 +724,26 @@ class WandbLoggerCallback(RLlibCallback):
         metrics_logger: MetricsLogger | None = None,
         **kwargs,
     ) -> None:
+        # rolloutのepisodeがちゃんと集計されているか怪しい
+        in_evaluation = env_runner.config.in_evaluation
         # エピソード完了を記録
-        ray.get(self._stats_collector.add_episode.remote())
+        ray.get(self._stats_collector.add_episode.remote(in_evaluation))
 
         episode_rewards = episode.get_rewards()
         episode_total_reward = {k: sum(v) for k, v in episode_rewards.items()}
         is_win = (episode_total_reward["player_0"] > episode_total_reward["player_1"]) * 1
 
-        if env_runner.config.in_evaluation:
+        if in_evaluation:
             ray.get(self._stats_collector.record_evaluation_result.remote(is_win))
-
-        stats = ray.get(self._stats_collector.get_speed_stats.remote())
-        self.logger.info(
-            f"Episode {stats['total_episodes']} finished. {is_win=} Collection speed: {stats['episode_per_minute']:.2f} eps/min"
-        )
+            stats = ray.get(self._stats_collector.get_speed_stats.remote(in_evaluation))
+            self.logger.info(
+                f"Evaluation Episode {stats['total_episodes']} finished. {is_win=} {episode_total_reward=} Collection speed: {stats['episode_per_minute']:.2f} eps/min"
+            )
+        else:
+            stats = ray.get(self._stats_collector.get_speed_stats.remote(in_evaluation))
+            self.logger.info(
+                f"Episode {stats['total_episodes']} finished. {is_win=} {episode_total_reward=} Collection speed: {stats['episode_per_minute']:.2f} eps/min"
+            )
 
 
 class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
@@ -946,7 +981,7 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
                 # policy名とモデルの紐づけ
                 rl_module_specs={
                     OWN_POLICY: best_rl_module_spec,
-                    # SELF_PLAY_POLICY: lb_best_rl_module_spec,
+                    # SELF_PLAY_POLICY: best_rl_module_spec,
                     BEST_POLICY: best_rl_module_spec,
                     # LB_BEST_POLICY: lb_best_rl_module_spec,
                 }
@@ -1039,5 +1074,55 @@ def main() -> None:
     save_model(trainer, cfg.output_dir, suffix="latest_model")
 
 
+def debug():
+    cfg = Config()
+    env = env_creator({"n_stack": cfg.n_stack})
+    obs, _ = env.reset()
+    policy_model = LuxUNetModel(
+        state_space_size=len(State),
+        global_state_space_size=len(GlobalState),
+        action_space_size=len(Action),
+        hidden_state_space_size=len(HiddenState),
+        n_stack=cfg.n_stack,
+        res=True,
+    )
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    ckpt = torch.load(cfg.best_pretrained_path, weights_only=False, map_location=device)
+    state_dict = {k.replace("model.", ""): v for k, v in ckpt["state_dict"].items()}
+    policy_model.load_state_dict(state_dict)
+    policy_model.eval()
+    device = "cpu"
+    policy_model.to(device)
+    for i in range(3):
+        state1 = obs["player_0"]
+        state2 = obs["player_1"]
+        # print(f"{state1['state'][:, State.OWN_UNIT_COUNT, 0, 0]=}" f"{state2['state'][:, State.OWN_UNIT_COUNT, 0, 0]=}")
+        # 辞書をtensorに変換しsqueeze(0)してデバイスに載せる
+        torch_state1 = {}
+        torch_state2 = {}
+        for k, v in state1.items():
+            torch_state1[k] = torch.from_numpy(v.copy()).unsqueeze(0).to(device)
+        for k, v in state2.items():
+            torch_state2[k] = torch.from_numpy(v.copy()).unsqueeze(0).to(device)
+        outputs1 = policy_model(torch_state1)
+        outputs2 = policy_model(torch_state2)
+        batch_size = 1
+        num_actions = len(Action)
+        action1 = to_np(
+            outputs1["policy"].reshape(batch_size, num_actions, -1).transpose(2, 1).squeeze(0).argmax(dim=-1)
+        )
+        action2 = to_np(
+            outputs2["policy"].reshape(batch_size, num_actions, -1).transpose(2, 1).squeeze(0).argmax(dim=-1)
+        )
+
+        action_dict = {
+            "player_0": action1,
+            "player_1": action2,
+        }
+        obs, _, _, _, _ = env.step(action_dict)
+
+
 if __name__ == "__main__":
     main()
+    # debug()

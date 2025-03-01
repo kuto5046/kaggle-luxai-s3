@@ -1466,3 +1466,10 @@ def get_nearby_enemy_unit_ids(
     unit_pos: tuple[int, int], opp_unit_positions: list[tuple[int, int]], k: int
 ) -> list[int]:
     return [unit_id for unit_id, pos in enumerate(opp_unit_positions) if is_within_k_tiles(unit_pos, pos, k)]
+
+
+def switch_action(action: np.ndarray, i: int, j: int) -> np.ndarray:
+    action = np.where(action == i, -1, action)
+    action = np.where(action == j, i, action)
+    action = np.where(action == -1, j, action)
+    return action

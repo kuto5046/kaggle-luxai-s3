@@ -41,6 +41,7 @@ class Config:
     tta: bool = False
 
     checkpoint_path: Path = Path(__file__).parent / "output/best_model.ckpt"
+    # checkpoint_path: Path = Path(__file__).parent / "output/policy_latest_model.pth"
 
 
 ###########################################################################
@@ -130,8 +131,13 @@ class ILAgent:
             n_stack=n_stack,
             res=res,
         )
-        ckpt = torch.load(checkpoint_path, weights_only=True, map_location="cpu")
-        state_dict = {k.replace("model.", ""): v for k, v in ckpt["state_dict"].items()}
+        if checkpoint_path.suffix == ".pth":
+            state_dict = torch.load(checkpoint_path, weights_only=False, map_location="cpu").state_dict()
+        elif checkpoint_path.suffix == ".ckpt":
+            ckpt = torch.load(checkpoint_path, weights_only=True, map_location="cpu")
+            state_dict = {k.replace("model.", ""): v for k, v in ckpt["state_dict"].items()}
+        else:
+            raise NotImplementedError(f"checkpoint_path: {checkpoint_path} is not supported")
         self.model.load_state_dict(state_dict)
         self.model.eval()
         if torch.cuda.is_available():
