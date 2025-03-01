@@ -317,15 +317,16 @@ class RLLibLuxEnv(MultiAgentEnv):
         agent0_legal_action_mask = get_valid_policy_map(obs["player_0"], 0, self.episode_store1)
         agent1_legal_action_mask = get_valid_policy_map(obs["player_1"], 1, self.episode_store2)
         # 自陣が(0, 0)になるようにmask mapを反転(action, height, width)
-        agent1_legal_action_mask = np.flip(agent1_legal_action_mask, [1, 2])
-        agent1_legal_action_mask[Action.UP], agent1_legal_action_mask[Action.DOWN] = (
-            agent1_legal_action_mask[Action.DOWN].copy(),
-            agent1_legal_action_mask[Action.UP].copy(),
-        )
-        agent1_legal_action_mask[Action.LEFT], agent1_legal_action_mask[Action.RIGHT] = (
-            agent1_legal_action_mask[Action.RIGHT].copy(),
-            agent1_legal_action_mask[Action.LEFT].copy(),
-        )
+        # TODO: agent.pyにはないがrlではこれがないとダメなのがよくわかっていない。
+        # agent1_legal_action_mask = np.flip(agent1_legal_action_mask, [1, 2])
+        # agent1_legal_action_mask[Action.UP], agent1_legal_action_mask[Action.DOWN] = (
+        #     agent1_legal_action_mask[Action.DOWN].copy(),
+        #     agent1_legal_action_mask[Action.UP].copy(),
+        # )
+        # agent1_legal_action_mask[Action.LEFT], agent1_legal_action_mask[Action.RIGHT] = (
+        #     agent1_legal_action_mask[Action.RIGHT].copy(),
+        #     agent1_legal_action_mask[Action.LEFT].copy(),
+        # )
         self.agent0_states.append(agent0_state)
         self.agent1_states.append(agent1_state)
         self.agent0_global_states.append(agent0_global_state)
@@ -447,12 +448,13 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
         unit_mask = batch[Columns.OBS]["state"][:, -1, State.OWN_UNIT_COUNT] > 0
         action_mask = batch[Columns.OBS]["legal_action_mask"]
         # 無効な行動(action_mask=0)は負の大きな値になるためsoftmax後は0になる。
-        masked_policy_logits = policy_logits - 1e32 * (1 - action_mask)
+        # MEMO: 自陣固定対応のaction_maskの挙動が怪しいのでひとまず適用しないでおく
+        # masked_policy_logits = policy_logits - 1e32 * (1 - action_mask)
         # この時点では(batch, action, height, width)なので(batch, height, width, action)に変換
-        masked_policy_logits = masked_policy_logits.reshape(batch_size, num_actions, -1).transpose(2, 1)
+        policy_logits = policy_logits.reshape(batch_size, num_actions, -1).transpose(2, 1)
         unit_mask = unit_mask.reshape(batch_size, -1)
         return {
-            Columns.ACTION_DIST_INPUTS: masked_policy_logits,
+            Columns.ACTION_DIST_INPUTS: policy_logits,
             # unit位置のみpolicyを学習する
             Columns.LOSS_MASK: unit_mask,
         }
