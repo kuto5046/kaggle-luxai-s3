@@ -43,7 +43,7 @@ class Config:
     ckpt_path: str = None
     lr: float = 0.001
     weight_decay: float = 0.01
-    warmup_step_rate: float = 0.15
+    warmup_step_rate: float = 0.1
     # model
     res: bool = True
     aug: bool = True

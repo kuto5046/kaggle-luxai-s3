@@ -237,7 +237,8 @@ class LaxLitModel(LightningModule):
         # self.criterion1 = MaskedBCEWithLogitsLoss()
         self.criterion2 = nn.BCEWithLogitsLoss()
         self.criterion3 = nn.MSELoss()
-        self.criterion4 = MaskedFocalTverskyLoss()
+        self.criterion4 = MaskedFocalTverskyLoss(alpha=0.3, beta=0.7, gamma=1.0, smooth=1e-3)
+        self.step = 0
 
         metrics = self.get_metrics()
         self.train_metrics = metrics.clone(postfix="/train")
@@ -271,7 +272,7 @@ class LaxLitModel(LightningModule):
         # 各サンプルごとに空間軸 (H, W) の和を計算し、sap が行われているか判定
         sap_present_mask = batch["sap"].view(sap_output.shape[0], -1).sum(dim=1) > 0
 
-        if sap_available_mask[sap_present_mask].sum() > 0:
+        if sap_present_mask.sum() > 0:
             # sap_loss は、sap が存在するサンプルのみで計算
             sap_loss = self.criterion4(
                 sap_output[sap_present_mask], batch["sap"][sap_present_mask], sap_available_mask[sap_present_mask]
@@ -348,6 +349,19 @@ class LaxLitModel(LightningModule):
             self.valid_metrics.update(preds, gts)
             self.valid_outputs["ground_truth"].append(to_np(gts))
             self.valid_outputs["predictions"].append(to_np(preds))
+
+        # loss.backward() の後に以下を実行
+        if self.step % 100 == 0:
+            print(f"{self.step=} {loss=}, {sap_loss=}, {policy_loss=}, {sap_present_mask.sum()=}")
+            for name, param in self.model.named_parameters():
+                if param.grad is not None:
+                    grad_mean = param.grad.mean().item()
+                    grad_std = param.grad.std().item()
+                    print(f"{name}: grad mean={grad_mean:.3e}, grad std={grad_std:.3e}")
+                else:
+                    print(f"{name}: no gradient")
+        self.step += 1
+
         return loss
 
     def on_train_epoch_end(self) -> None:
@@ -433,7 +447,7 @@ def one_hot_encoder(input_tensor: torch.Tensor, n_classes: int) -> torch.Tensor:
 
 
 class DoubleConv(nn.Module):
-    """(convolution => [BN] => ReLU) * 2"""
+    """(convolution => [BN] => LeakyReLU) * 2"""
 
     def __init__(self, in_channels: int, out_channels: int, mid_channels: int | None = None, res: bool = False) -> None:
         super().__init__()
@@ -442,10 +456,10 @@ class DoubleConv(nn.Module):
         self.double_conv = nn.Sequential(
             nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(mid_channels),
-            nn.ReLU(inplace=True),
+            nn.LeakyReLU(inplace=True),
             nn.Conv2d(mid_channels, out_channels, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
+            nn.LeakyReLU(inplace=True),
         )
         self.res = res
         # 入力と出力のチャンネル数が異なる場合のための1x1 convolution
@@ -525,6 +539,18 @@ class OutConv(nn.Module):
         return self.conv(x)
 
 
+class OutConvWithNorm(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int) -> None:
+        super().__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
+        self.bn = nn.BatchNorm2d(out_channels)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.conv(x)
+        x = self.bn(x)
+        return x
+
+
 class LuxUNetModel(nn.Module):
     def __init__(
         self,
@@ -547,44 +573,24 @@ class LuxUNetModel(nn.Module):
         factor = 2 if bilinear else 1
 
         # グローバル状態の情報を統合した後の特徴マップを各タスクに分岐
-
-        # policy用の専用デコーダ
-        # self.policy_up1 = Up(256 * 2 + global_state_space_size, 256 // factor, bilinear)
-        # self.policy_up2 = Up(256, 128 // factor, bilinear)
-        # self.policy_up3 = Up(128, 64, bilinear)
-
-        # sap用の専用デコーダ
-        # self.sap_up1 = Up(256 * 2 + global_state_space_size, 256 // factor, bilinear)
-        self.sap_up2 = Up(256, 128 // factor, bilinear)
-        self.sap_up3 = Up(128, 64, bilinear)
-
-        # # state用の専用デコーダ
-        # self.state_up1 = Up(256 * 2 + global_state_space_size, 256 // factor, bilinear)
-        # self.state_up2 = Up(256, 128 // factor, bilinear)
-        # self.state_up3 = Up(128, 64, bilinear)
-
         #
         self.up1 = Up(256 * 2 + global_state_space_size, 256 // factor, bilinear)
         self.up2 = Up(256, 128 // factor, bilinear)
         self.up3 = Up(128, 64, bilinear)
-        self.policy_net = OutConv(64 * n_stack, action_space_size)
-        self.sap_net = OutConv(64 * n_stack, 1)
-        # self.state_net = OutConv(64 * n_stack, hidden_state_space_size)
-        # self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
-        # self.value_net = nn.Sequential(
-        #     nn.Linear((256 + global_state_space_size) * n_stack, 128),
-        #     nn.ReLU(),
-        #     nn.Linear(128, 64),
-        #     nn.ReLU(),
-        #     nn.Linear(64, 1),
-        # )
-        # self.global_state_net = nn.Sequential(
-        #     nn.Linear((256 + global_state_space_size) * n_stack, 128),
-        #     nn.ReLU(),
-        #     nn.Linear(128, 64),
-        #     nn.ReLU(),
-        #     nn.Linear(64, len(HiddenGlobalState)),
-        # )
+        self.sap_net1 = ResidualBlock(
+            64 * n_stack, 64, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False
+        )
+        self.sap_net2 = ResidualBlock(64, 64, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False)
+        self.sap_net3 = OutConvWithNorm(64, 1)
+        self.policy_net1_from_sap = ResidualBlock(
+            1, 16, EnvParams.map_width, EnvParams.map_width, kernel_size=15, squeeze_excitation=False
+        )
+        self.concat_norm = nn.BatchNorm2d(64 * n_stack + 16)
+        self.policy_net2 = ResidualBlock(
+            64 * n_stack + 16, 64, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False
+        )
+        self.policy_net3 = ResidualBlock(64, 64, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False)
+        self.policy_net4 = OutConv(64, action_space_size)
 
     def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         state = batch["state"]
@@ -607,19 +613,24 @@ class LuxUNetModel(nn.Module):
         # value_logits = self.value_net(x)
         # global_state_logits = self.global_state_net(x)
 
-        sap_x = self.up1(x4, x3)
-        sap_x = self.sap_up2(sap_x, x2)
-        sap_x = self.sap_up3(sap_x, x1)
-        sap_x = sap_x.view(_n, -1, _x, _y)
-        sap_logits = self.sap_net(sap_x)
-        sap_logits = torch.sigmoid(sap_logits)
-
         x = self.up1(x4, x3)
         x = self.up2(x, x2)
         x = self.up3(x, x1)
         x = x.view(_n, -1, _x, _y)
-        policy_logits = self.policy_net(x)
-        # state_logits = self.state_net(x)
+
+        sap_logits1 = self.sap_net1(x)
+        sap_logits2 = self.sap_net2(sap_logits1)
+        sap_logits = self.sap_net3(sap_logits2)
+
+        # sap_net の出力は logits のまま扱うd(ここで sigmoid はかけない)
+        policy_logits1 = self.policy_net1_from_sap(sap_logits)
+        # x は [N, 64*n_stack, H, W]、policy_logits1 は [N, 16, H, W] なので連結後のチャネル数は 64*n_stack+16
+        policy_features = torch.cat([x, policy_logits1], dim=1)
+        # 連結後に正規化を適用
+        policy_features = self.concat_norm(policy_features)
+        policy_logits = self.policy_net2(torch.cat([x, policy_features], dim=1))
+        policy_logits = self.policy_net3(policy_logits)
+        policy_logits = self.policy_net4(policy_logits)
 
         return {
             "policy": policy_logits,
@@ -628,6 +639,161 @@ class LuxUNetModel(nn.Module):
             # "global_state": global_state_logits,
             # "value": value_logits,
         }
+
+
+class MaskedFocalTverskyLoss(nn.Module):
+    def __init__(
+        self, alpha: float = 0.5, beta: float = 0.5, gamma: float = 1.0, smooth: float = 1e-6, reduction: str = "mean"
+    ):
+        """
+        Focal Tversky Loss with mask support.
+        :param alpha: False Positive に対する重み (通常 0.5)
+        :param beta: False Negative に対する重み (通常 0.5)
+        :param gamma: Focal項のパラメータ。gamma > 1 で難しい例に注目
+        :param smooth: 数値安定性のためのスムージング項
+        :param reduction: 'mean' もしくは 'sum'
+        ※この損失関数は、モデルの出力として logitsd(シグモイド未適用値)を入力として受け取ります。
+        """
+        super().__init__()
+        self.alpha = alpha
+        self.beta = beta
+        self.gamma = gamma
+        self.smooth = smooth
+        self.reduction = reduction
+
+    def forward(self, inputs: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """
+        :param inputs: 予測値。logitsd(シグモイド未適用値)を想定。
+                       形状は (batch, ...) であることを前提とする。
+        :param targets: 教師ラベル。0/1のバイナリマスク。
+        :param mask: 損失計算対象となる領域を示すバイナリマスク。inputs と同じ形状。
+        :return: Focal Tversky Loss
+        """
+        # logits から確率値に変換
+        inputs = torch.sigmoid(inputs)
+        # 入力、ターゲット、mask を (batch, -1) にフラット化
+        inputs = inputs.view(inputs.size(0), -1)
+        targets = targets.view(targets.size(0), -1).float()
+        mask = mask.view(mask.size(0), -1).float()
+
+        # マスクを考慮してTP, FP, FNを計算
+        TP = (inputs * targets * mask).sum(dim=1)
+        FP = (inputs * (1 - targets) * mask).sum(dim=1)
+        FN = ((1 - inputs) * targets * mask).sum(dim=1)
+
+        Tversky = (TP + self.smooth) / (TP + self.alpha * FP + self.beta * FN + self.smooth)
+        focal_loss = (1 - Tversky) ** self.gamma
+
+        if self.reduction == "mean":
+            return focal_loss.mean()
+        elif self.reduction == "sum":
+            return focal_loss.sum()
+        else:
+            return focal_loss
+
+
+class SELayer(nn.Module):
+    def __init__(self, n_channels: int, reduction: int = 16):
+        """
+        Squeeze-and-Excitation (SE) Layer.
+        Args:
+            n_channels (int): 入力のチャネル数
+            reduction (int): 圧縮率 (デフォルト: 16)
+        """
+        super().__init__()
+        self.fc = nn.Sequential(
+            nn.Linear(n_channels, n_channels // reduction, bias=False),
+            nn.LeakyReLU(inplace=True),
+            nn.Linear(n_channels // reduction, n_channels, bias=False),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x (torch.Tensor): 入力テンソル (B, C, H, W)
+
+        Returns:
+            torch.Tensor: チャネルごとのスケーリングを適用した出力テンソル
+        """
+        b, c, _, _ = x.shape
+
+        # グローバル平均プーリング (B, C, 1, 1)
+        y = x.mean(dim=[2, 3], keepdim=True)
+
+        # FC層を適用してチャネルごとの重みを学習 (B, C, 1, 1)
+        y = self.fc(y.view(b, c)).view(b, c, 1, 1)
+
+        # スケール適用
+        return x * y.expand_as(x)
+
+
+class ResidualBlock(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        height: int,
+        width: int,
+        kernel_size: int = 3,
+        normalize: bool = False,
+        activation=nn.LeakyReLU,
+        squeeze_excitation: bool = True,
+        rescale_se_input: bool = True,
+        **conv2d_kwargs,
+    ):
+        super().__init__()
+
+        # Calculate "same" padding
+        # https://pytorch.org/docs/stable/generated/torch.nn.Conv2d.html
+        # https://www.wolframalpha.com/input/?i=i%3D%28i%2B2x-k-%28k-1%29%28d-1%29%2Fs%29+%2B+1&assumption=%22i%22+-%3E+%22Variable%22
+        assert "padding" not in conv2d_kwargs.keys()
+        k = kernel_size
+        d = conv2d_kwargs.get("dilation", 1)
+        s = conv2d_kwargs.get("stride", 1)
+        padding = (k - 1) * (d + s - 1) / (2 * s)
+        assert padding == int(padding), f"padding should be an integer, was {padding:.2f}"
+        padding = int(padding)
+
+        self.conv1 = nn.Conv2d(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=(kernel_size, kernel_size),
+            padding=(padding, padding),
+            **conv2d_kwargs,
+        )
+        # We use LayerNorm here since the size of the input "images" may vary based on the board size
+        self.norm1 = nn.LayerNorm([out_channels, height, width]) if normalize else nn.Identity()
+        self.act1 = activation()
+
+        self.conv2 = nn.Conv2d(
+            in_channels=out_channels,
+            out_channels=out_channels,
+            kernel_size=(kernel_size, kernel_size),
+            padding=(padding, padding),
+            **conv2d_kwargs,
+        )
+        self.norm2 = nn.LayerNorm([out_channels, height, width]) if normalize else nn.Identity()
+        self.final_act = activation()
+
+        if in_channels != out_channels:
+            self.change_n_channels = nn.Conv2d(in_channels, out_channels, (1, 1))
+        else:
+            self.change_n_channels = nn.Identity()
+
+        if squeeze_excitation:
+            self.squeeze_excitation = SELayer(out_channels, rescale_se_input)
+        else:
+            self.squeeze_excitation = nn.Identity()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        identity = x
+        x = self.conv1(x)
+        x = self.act1(self.norm1(x))
+        x = self.conv2(x)
+        x = self.squeeze_excitation(self.norm2(x))
+        x = x + self.change_n_channels(identity)
+        return self.final_act(x)
 
 
 def save_model(model, output_dir: Path, latest: bool = False):
@@ -746,51 +912,3 @@ class MaskedFocalLoss(nn.Module):
         focal_loss = self.alpha * (1 - pt) ** self.gamma * bce_loss
         masked_focal_loss = focal_loss * mask
         return masked_focal_loss.sum() / mask.sum()
-
-
-class MaskedFocalTverskyLoss(nn.Module):
-    def __init__(
-        self, alpha: float = 0.5, beta: float = 0.5, gamma: float = 1.0, smooth: float = 1e-6, reduction: str = "mean"
-    ):
-        """
-        Focal Tversky Loss with mask support.
-        :param alpha: False Positive に対する重み(通常 0.5)
-        :param beta: False Negative に対する重み(通常 0.5)
-        :param gamma: Focal項のパラメータ。gamma > 1 で難しい例に注目
-        :param smooth: 数値安定性のためのスムージング項
-        :param reduction: 'mean' もしくは 'sum'
-        """
-        super().__init__()
-        self.alpha = alpha
-        self.beta = beta
-        self.gamma = gamma
-        self.smooth = smooth
-        self.reduction = reduction
-
-    def forward(self, inputs: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        """
-        :param inputs: 予測値。既に0〜1の確率値になっているか、シグモイド適用済みの値であることを想定。
-                       形状は (batch, ...) であることを前提とする。
-        :param targets: 教師ラベル。0/1のバイナリマスク。
-        :param mask: 損失計算対象となる領域を示すバイナリマスク。inputs と同じ形状。
-        :return: Focal Tversky Loss
-        """
-        # 入力とターゲット、maskを (batch, -1) にフラット化
-        inputs = inputs.view(inputs.size(0), -1)
-        targets = targets.view(targets.size(0), -1).float()
-        mask = mask.view(mask.size(0), -1).float()
-
-        # マスクを考慮してTP, FP, FNを計算
-        TP = (inputs * targets * mask).sum(dim=1)
-        FP = (inputs * (1 - targets) * mask).sum(dim=1)
-        FN = ((1 - inputs) * targets * mask).sum(dim=1)
-
-        Tversky = (TP + self.smooth) / (TP + self.alpha * FP + self.beta * FN + self.smooth)
-        focal_loss = (1 - Tversky) ** self.gamma
-
-        if self.reduction == "mean":
-            return focal_loss.mean()
-        elif self.reduction == "sum":
-            return focal_loss.sum()
-        else:
-            return focal_loss
