@@ -118,7 +118,7 @@ class LaxDataset(Dataset):
         self.mode = mode
         self.ids = []
         # self.n_match = 101
-        self.n_match = 8
+        self.n_match = 16
         for episode_id, max_step in df[["EpisodeId", "MaxStep"]].to_numpy():
             if max_step != 505:
                 raise NotImplementedError("max_step must be 505 when training LSTM!")
