@@ -117,7 +117,8 @@ class LaxDataset(Dataset):
         self.cfg = cfg
         self.mode = mode
         self.ids = []
-        self.n_match = 101
+        # self.n_match = 101
+        self.n_match = 4
         for episode_id, max_step in df[["EpisodeId", "MaxStep"]].to_numpy():
             if max_step != 505:
                 raise NotImplementedError("max_step must be 505 when training LSTM!")
@@ -681,6 +682,8 @@ class SimpleConvLSTMCell(nn.Module):
         #     kernel_size=kernel_size,
         #     batch_norm=False,
         # )
+        self.h_init = nn.Parameter(torch.randn(1, hidden_channels, 24, 24))
+        self.c_init = nn.Parameter(torch.randn(1, hidden_channels, 24, 24))
 
     def forward(self, x, hidden):
         """
@@ -688,6 +691,8 @@ class SimpleConvLSTMCell(nn.Module):
         hidden: タプル (h, c) 各テンソルの shape は (batch, hidden_channels, H, W)
         """
         h, c = hidden
+        if h is None:
+            h, c = self.h_init.repeat(x.size(0), 1, 1, 1), self.c_init.repeat(x.size(0), 1, 1, 1)
         combined = torch.cat([x, h], dim=1)
         conv_out = self.conv(combined)
         # 4 つのゲートに分割
@@ -804,8 +809,9 @@ class ConvLSTM(nn.Module):
         hidden_states = []
         for i in range(num_layers):
             if hidden is None:
-                h0 = torch.zeros(batch_size, self.cell_list[i].hidden_channels, H, W, device=x.device)
-                c0 = torch.zeros(batch_size, self.cell_list[i].hidden_channels, H, W, device=x.device)
+                # h0 = torch.zeros(batch_size, self.cell_list[i].hidden_channels, H, W, device=x.device)
+                # c0 = torch.zeros(batch_size, self.cell_list[i].hidden_channels, H, W, device=x.device)
+                h0, c0 = None, None
             else:
                 h0, c0 = hidden[i]
             hidden_states.append((h0, c0))
@@ -902,7 +908,7 @@ class LuxLSTMModel(nn.Module):
         factor = 2 if bilinear else 1
         self.up1 = Up(256 * 2 + global_state_space_size, 256 // factor, bilinear)
         self.up2 = Up(256, 128 // factor, bilinear)
-        self.up3 = Up(128, 64, bilinear)
+        self.up3 = Up(128, 128, bilinear)
         # self.policy_net = OutConv(64 * n_stack, action_space_size)
 
         # self.hidden_channels = hidden_channels
@@ -915,17 +921,24 @@ class LuxLSTMModel(nn.Module):
         #         for _ in range(8)
         #     ],
         # )
+
         self.convlstm = ConvLSTM(
-            input_channels=64,
-            hidden_channels=64 * 4,
+            input_channels=128,
+            hidden_channels=256,
             kernel_size=kernel_size,
             num_layers=1,
             bias=True,
             batch_first=True,
             res=True,
         )
+        self.policy_net = OutConv(128 * 3, action_space_size)
 
-        self.policy_net = OutConv(64 * 4, action_space_size)
+        # self.policy_net = OutConv(128, action_space_size)
+
+        # self.policy_net = nn.Sequential(
+        #     DoubleConv(128 * 3, hidden_channels, res=res),
+        #     OutConv(hidden_channels, action_space_size),
+        # )
 
         # self.net_policy = nn.Sequential(nn.Conv2d(hidden_channels, action_space_size, kernel_size=1))
         # self.return_hidden = return_hidden
@@ -980,9 +993,9 @@ class LuxLSTMModel(nn.Module):
 
         x = x.view(_n, _t, -1, _x, _y)
         x_lstm, hidden = self.convlstm(x, hidden)
-        x = x_lstm
+        # x = x_lstm
         # x = x + x_lstm
-        # x = torch.cat([x, x_lstm], dim=2)
+        x = torch.cat([x, x_lstm], dim=2)
         x = x.flatten(0, 1)
 
         # print(f"x: {x.shape}")
