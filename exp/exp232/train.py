@@ -47,7 +47,7 @@ class Config:
     # model
     res: bool = True
     aug: bool = True
-    n_stack: int = 4
+    n_stack: int = 1
     # loss
     loss_weight_policy: float = 1.0
     loss_weight_state: float = 1.0
