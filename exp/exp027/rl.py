@@ -78,7 +78,7 @@ class Config:
     best_pretrained_path: Path | None = Path("/home/user/work/exp/best/output/best_model.ckpt")
     lb_best_pretrained_path: Path | None = Path("/home/user/work/exp/best/output/best_model.ckpt")
     # lb_best_pretrained_path: Path | None = Path(f"/home/user/work/exp/lb_best/output/best_model.ckpt")
-    debug: bool = True
+    debug: bool = False
     output_dir: Path = root_dir / "output"
 
     # 以下の3つのrunnerにcpuとgpuを割り振る。cpuの合計値がcpu数を超えないように注意(現在は24をactor: 21,learner: 1,evaluator:2に割り振る)
@@ -86,10 +86,10 @@ class Config:
     num_env_runners: int = 21  # actorの数
     num_cpus_per_env_runner: int = 1
     num_gpus_per_env_runner: int = 0
-    rollout_fragment_length: int = 50  # 考慮したいstep数を設定してやる(とりあえずマッチの半分ステップ)
+    rollout_fragment_length: int | str | None = "auto"  # 考慮したいstep数を設定してやる(とりあえずマッチの半分ステップ)
 
     # 学習用(GPUの数=learnerと考えて良い)
-    num_learners: int = 0  # 0の場合local learnerを使用することを意味する gpu数が1の場合は0にする
+    num_learners: int = 0  # IMPALAの場合gpuが1つなら0に設定するとlocal learnerとして扱われる、処理が早くなる
     num_cpus_per_learner: int = 1
     num_gpus_per_learner: int = 1
 
@@ -99,6 +99,7 @@ class Config:
     evaluation_duration: int = (
         30  # 1回の評価で何エピソード分評価するか(学習と並列してやるため達成できないこともあるかも)
     )
+    evaluation_parallel_to_training: bool = True  # 評価と学習を並列に実行
 
     # learner
     training_minutes: int = 60 * 24  # 1日
@@ -106,7 +107,7 @@ class Config:
     gamma: float = 0.99
     lr: float = 1e-5
     # batch size 一応1episodeのサイズにしてるが不要かも。もしくはrollout_fragment_length部分で調整する
-    train_batch_size_per_learner: int = 512 * 5
+    train_batch_size_per_learner: int = 512 * 10
     # 1回の学習データ(train_batch_size*queue_size)を何epoch分学習するか
     num_epochs: int = 1
     replay_proportion: float = 0.0  # リプレイバッファの割合
@@ -118,12 +119,12 @@ class Config:
 
     def __post_init__(self):
         if self.debug:
-            self.num_env_runners = 1
+            self.num_env_runners = 3
             self.num_cpus_per_env_runner = 1
-            self.evaluation_num_env_runners = 1
-            self.evaluation_interval = 1
-            self.evaluation_duration = 2
-            self.training_minutes = 2
+            # self.evaluation_num_env_runners = 0
+            # self.evaluation_interval = 0
+            # self.evaluation_parallel_to_training = False
+            self.training_minutes = 10
             self.learner_queue_size = 1
             self.num_epochs = 1
 
@@ -736,17 +737,17 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
         recurrent_seq_len = batch.get("seq_lens")
 
         loss_mask = fwd_out[Columns.LOSS_MASK].float()
-        loss_mask_time_major = make_time_major(
-            loss_mask,
-            trajectory_len=rollout_frag_or_episode_len,
-            recurrent_seq_len=recurrent_seq_len,
-        )
         size_loss_mask = torch.sum(loss_mask)
 
         # Behavior actions logp and target actions logp.
         behaviour_actions_logp = batch[Columns.ACTION_LOGP]
         target_policy_dist = module.get_train_action_dist_cls().from_logits(fwd_out[Columns.ACTION_DIST_INPUTS])
         target_actions_logp = target_policy_dist.logp(batch[Columns.ACTIONS])
+
+        # loss_maskを適用した上でマップの次元を潰す
+        # (batch_size, 24*24)のマップ状態をもつデータをunit位置のmaskを適用した上で(batch_size, 1)に潰す
+        behaviour_actions_logp = (behaviour_actions_logp * loss_mask).sum(dim=1)
+        target_actions_logp = (target_actions_logp * loss_mask).sum(dim=1)
 
         # Values and bootstrap values.
         values = module.compute_values(batch, embeddings=fwd_out.get(Columns.EMBEDDINGS))
@@ -798,25 +799,6 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
                 recurrent_seq_len=recurrent_seq_len,
             ).type(dtype=torch.float32)
         ) * config.gamma
-
-        # (time_dim, batch_size*24*24) マップ形式のデータ
-        # これをユニットがいる位置のみ抽出して1ステップに1つのデータ(time_dim, batch_size)となるようにsumをとる(対数確率)
-        target_actions_logp_time_major = (target_actions_logp_time_major * loss_mask_time_major).sum(dim=2)
-        behaviour_actions_logp_time_major = (behaviour_actions_logp_time_major * loss_mask_time_major).sum(dim=2)
-
-        print(f"{target_actions_logp_time_major.shape=}")
-        print(f"{behaviour_actions_logp_time_major.shape=}")
-        print(f"{discounts_time_major.shape=}")
-        print(f"{rewards_time_major.shape=}")
-        print(f"{values_time_major.shape=}")
-        print(f"{bootstrap_values.shape=}")
-        # device check
-        print(f"{target_actions_logp_time_major.device=}")
-        print(f"{behaviour_actions_logp_time_major.device=}")
-        print(f"{discounts_time_major.device=}")
-        print(f"{rewards_time_major.device=}")
-        print(f"{values_time_major.device=}")
-        print(f"{bootstrap_values.device=}")
 
         # Note that vtrace will compute the main loop on the CPU for better performance.
         vtrace_adjusted_target_values, pg_advantages = vtrace_torch(
@@ -982,7 +964,7 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
             evaluation_duration_unit="episodes",
             evaluation_sample_timeout_s=60 * 20,
             evaluation_force_reset_envs_before_iteration=True,  # 各評価の前に環境をリセット
-            evaluation_parallel_to_training=True,  # 評価と学習を並列に実行
+            evaluation_parallel_to_training=cfg.evaluation_parallel_to_training,  # 評価と学習を並列に実行
             # 評価用の上書き設定.これにより評価時はlb_bestポリシーと自身の対戦になる
             # evaluation_config={
             #     "multi_agent": {
@@ -1030,19 +1012,20 @@ def main() -> None:
     logger = setup_logger(cfg.output_dir)
 
     setup_wandb(cfg)
-    # debug mode
-    ray.init(ignore_reinit_error=True)
+    ray.init()
 
     # 環境の登録
     register_env(name=cfg.env_name, env_creator=env_creator)
 
     config = create_rl_config(cfg)
+    logger.info(f"{config.get_rollout_fragment_length()=}")
     trainer = config.build_algo(env=cfg.env_name)
 
     train_count = 0
     total_train_start_time = time()
     while True:
         train_start_time = time()
+        # データが溜まっていない場合処理は完了するが学習は未実施となる
         result = trainer.train()
         train_count += 1
         spend_minutes = (time() - train_start_time) / 60
