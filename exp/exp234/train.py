@@ -37,13 +37,13 @@ class Config:
     epoch: int = 100
     limit_train_batches: float = 1.0
     limit_val_batches: float = 1.0
-    use_amp: bool = False
-    batch_size: int = 128
+    use_amp: bool = True
+    batch_size: int = 48
     num_workers: int = 20
     ckpt_path: str = None
     lr: float = 0.003
     weight_decay: float = 0.01
-    warmup_step_rate: float = 0.0
+    warmup_step_rate: float = 0.1
     # model
     res: bool = True
     aug: bool = True

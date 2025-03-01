@@ -117,7 +117,7 @@ class LaxDataset(Dataset):
         self.cfg = cfg
         self.mode = mode
         self.ids = []
-        self.n_match = 32
+        self.n_match = 101
         for episode_id, max_step in df[["EpisodeId", "MaxStep"]].to_numpy():
             if max_step != 505:
                 raise NotImplementedError("max_step must be 505 when training LSTM!")
@@ -904,7 +904,6 @@ class LuxLSTMModel(nn.Module):
         self.up2 = Up(256, 128 // factor, bilinear)
         self.up3 = Up(128, 64, bilinear)
         # self.policy_net = OutConv(64 * n_stack, action_space_size)
-        self.policy_net = OutConv(64, action_space_size)
 
         # self.hidden_channels = hidden_channels
         # self.conv1 = nn.Sequential(
@@ -925,6 +924,9 @@ class LuxLSTMModel(nn.Module):
             batch_first=True,
             res=True,
         )
+
+        self.policy_net = OutConv(128, action_space_size)
+
         # self.net_policy = nn.Sequential(nn.Conv2d(hidden_channels, action_space_size, kernel_size=1))
         # self.return_hidden = return_hidden
 
@@ -977,7 +979,8 @@ class LuxLSTMModel(nn.Module):
         x = self.up3(x, x1)
 
         x = x.view(_n, _t, -1, _x, _y)
-        x, _ = self.convlstm(x, hidden)
+        x_lstm, hidden = self.convlstm(x, hidden)
+        x = torch.cat([x, x_lstm], dim=2)
         x = x.flatten(0, 1)
 
         # print(f"x: {x.shape}")
