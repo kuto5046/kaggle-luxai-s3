@@ -72,7 +72,8 @@ LB_BEST_POLICY = "lb_best"  # TODO: モデルや特徴量が異なるため未�
 @dataclass
 class Config:
     exp_name: str = Path(__file__).parent.name
-    notes: str = "自陣固定のバグがあったので修正.負の報酬を導入した"
+    is_gcp: bool = False
+    notes: str = "entropy、rollout_length, 評価パラメータを変更。ログ周り修正"
     model_name: str = "lux_unet"
     env_name: str = "lux-s3-v0"
     n_stack: int = 4
@@ -85,23 +86,29 @@ class Config:
 
     # 以下の3つのrunnerにcpuとgpuを割り振る。cpuの合計値がcpu数を超えないように注意(現在は24をactor: 21,learner: 1,evaluator:2に割り振る)
     # データ収集用
-    num_env_runners: int = 96 - 4 - 6  # actorの数
+    num_env_runners: int = 18  # actorの数
     num_cpus_per_env_runner: int = 1
     num_gpus_per_env_runner: int = 0
-    rollout_fragment_length: int | str | None = "auto"  # 考慮したいstep数を設定してやる autoが推奨されている
+    rollout_fragment_length: int | str | None = (
+        101  # 考慮したいstep数を設定してやる。報酬が含まれるように1マッチ分の長さにする
+    )
 
     # 学習用(GPUの数=learnerと考えて良い)
-    num_learners: int = 4  # IMPALAの場合gpuが1つなら0に設定するとlocal learnerとして扱われる、処理が早くなる
+    num_learners: int = 0  # IMPALAの場合gpuが1つなら0に設定するとlocal learnerとして扱われる、処理が早くなる
     num_cpus_per_learner: int = 1
     num_gpus_per_learner: int = 1
 
     # 評価用
-    evaluation_num_env_runners: int = 6  # 評価用のenv runnerの数
-    evaluation_interval: int = 10  # 何回trainをしたら評価を実施するか
+    evaluation_num_env_runners: int = 5  # 評価用のenv runnerの数
+    evaluation_interval: int = 50  # 何回trainをしたら評価を実施するか　１回が30secくらいなので50回で1500sec=25分くらい
     evaluation_duration: int = (
         30  # 1回の評価で何エピソード分評価するか(学習と並列してやるため達成できないこともあるかも)
     )
-    evaluation_parallel_to_training: bool = True  # 評価と学習を並列に実行
+
+    # 評価と学習を並列に実行するかどうか
+    # 並列に実行すると待機処理が短縮されるようだが、今回の設定だとtrainが30secくらいで終わってしまうため結果として評価がボトルネックになってしまう
+    # 1回の学習を長くするか、評価にworkerを多く割り当てて評価時間を短縮するのが良さそう
+    evaluation_parallel_to_training: bool = True
 
     # learner
     training_minutes: int = 60 * 24  # 1日
@@ -111,15 +118,20 @@ class Config:
     # batch size 一応1episodeのサイズにしてるが不要かも。もしくはrollout_fragment_length部分で調整する
     train_batch_size_per_learner: int = 512
     # 1回の学習データ(train_batch_size*queue_size)を何epoch分学習するか
-    num_epochs: int = 2
+    num_epochs: int = 1
     replay_proportion: float = 0.0  # リプレイバッファの割合
     # loss
     vtrace_clip_rho_threshold: float = 1.0  # 価値関数のlossの係数
     vtrace_clip_pg_rho_threshold: float = 1.0  # ポリシー勾配のlossの係数
     vf_loss_coeff: float = 1.0  # 価値関数のlossの係数
-    entropy_coeff: float = 0.01  # エントロピーのlossの係数(大きくすると探索が活発になる)
+    entropy_coeff: float = 0.001  # エントロピーのlossの係数(大きくすると探索が活発になる)
 
     def __post_init__(self):
+        if self.is_gcp:
+            self.num_env_runners: int = 96 - 4 - 10  # actorの数
+            self.num_learners: int = 4
+            self.evaluation_num_env_runners: int = 10
+
         if self.debug:
             self.num_env_runners = 1
             self.num_cpus_per_env_runner = 1
@@ -486,6 +498,7 @@ class EpisodeStatsCollector:
         self.evaluation_wins = []
         self.current_evaluation_id = 0
         self.is_evaluation_active = False
+        self.best_win_rate = 0
 
     def add_episode(self, in_evaluation: bool):
         if in_evaluation:
@@ -502,10 +515,6 @@ class EpisodeStatsCollector:
         self.eval_total_episodes = 0
         return self.current_evaluation_id
 
-    def end_evaluation(self):
-        """評価終了時に呼び出す"""
-        return self.evaluation_wins
-
     def record_evaluation_result(self, is_win):
         """評価エピソードの結果を記録"""
         self.evaluation_wins.append(is_win)
@@ -520,6 +529,12 @@ class EpisodeStatsCollector:
             "total": total,
             "win_rate": win_rate,
         }
+
+    def get_best_win_rate(self):
+        return self.best_win_rate
+
+    def update_best_win_rate(self, win_rate: float):
+        self.best_win_rate = win_rate
 
     def get_speed_stats(self, in_evaluation: bool):
         if in_evaluation:
@@ -623,10 +638,9 @@ class WandbLoggerCallback(RLlibCallback):
 
         # 1回の学習で学習したデータ数
         time_this_iter_s = result["time_this_iter_s"]
-        num_training_step_calls_per_iteration = result["num_training_step_calls_per_iteration"]
-        sample_size = result["num_env_steps_sampled_lifetime"]
-        total_steps = num_training_step_calls_per_iteration * sample_size
-        total_steps_per_minute = (total_steps / time_this_iter_s) * 60
+        time_total_s = result["time_total_s"]
+        num_training_step_calls_per_iteration = result["num_training_step_calls_per_iteration"]  # 累積値
+        # sample_size = result["num_env_steps_sampled_lifetime"]
 
         # 学習状況をwandbに流す用
         wandb.log(
@@ -634,8 +648,8 @@ class WandbLoggerCallback(RLlibCallback):
                 "train/training_iteration": result["timers"]["training_iteration"],  # 何回めの学習か
                 "train/env_runner_time_between_sampling": result["env_runners"]["time_between_sampling"],
                 "train/time_this_iter_s": time_this_iter_s,  # 1回の学習時間
-                "train/num_training_step_calls_per_iteration": num_training_step_calls_per_iteration,  # 1回の学習で何回training_stepが呼ばれたか これにbatch_sizeをかけたものが1回の学習で学習したデータ数になる
-                "train/total_steps_per_minute": total_steps_per_minute,  # 1分あたりの学習step数。学習速度(データ収集速度)的なものを見たい
+                "train/time_total_s": time_total_s,  # 学習総時間
+                "train/num_training_step_calls_per_iteration": num_training_step_calls_per_iteration,  # 1回の学習で何回training_stepが呼ばれたか
             }
         )
         # learner_metrics = result["learners"][OWN_POLICY].keys()
@@ -645,7 +659,7 @@ class WandbLoggerCallback(RLlibCallback):
             "diff_num_grad_updates_vs_sampler_policy",
             # "module_train_batch_size_mean",  # 一定
             # "pi_loss",  # mean_pi_lossと同じ
-            "num_module_steps_trained_lifetime",
+            "num_module_steps_trained_lifetime",  # これが学習したstep数
             # "weights_seq_no",  # 一定
             "total_loss",
             # "default_optimizer_learning_rate",  # 一定
@@ -663,6 +677,18 @@ class WandbLoggerCallback(RLlibCallback):
                     f"train/{key}": result["learners"][OWN_POLICY][key],
                 }
             )
+
+        # 学習した総エピソード数
+        trained_episodes_lifetime = result["learners"][OWN_POLICY]["num_module_steps_trained_lifetime"] // 505
+        # 1分あたりの学習エピソード数
+        trained_episodes_per_minute = (trained_episodes_lifetime / time_total_s) * 60
+
+        wandb.log(
+            {
+                "train/trained_episode_lifetime": trained_episodes_lifetime,
+                "train/trained_episodes_per_minute": trained_episodes_per_minute,
+            }
+        )
 
     # 学習したモデルの性能評価をwandbに流す用
     def on_evaluate_start(
@@ -699,12 +725,13 @@ class WandbLoggerCallback(RLlibCallback):
 
         # 中央の評価トラッカーから評価結果を取得
         eval_stats = ray.get(self._stats_collector.get_evaluation_stats.remote())
+        current_win_rate = eval_stats["win_rate"]
         # wandbに記録
         wandb.log(
             {
                 "evaluate/mean_rewards": mean_rewards,
                 "evaluate/evaluation_minutes": evaluation_minutes,
-                "evaluate/win_rate": eval_stats["win_rate"],
+                "evaluate/win_rate": current_win_rate,
                 "evaluate/num_episodes": eval_stats["total"],
             }
         )
@@ -712,10 +739,12 @@ class WandbLoggerCallback(RLlibCallback):
         self.logger.info(f"Evaluation {self._current_evaluation_id} completed episodes={eval_stats['total']}")
 
         # 評価結果をリセット
-        ray.get(self._stats_collector.end_evaluation.remote())
-
-        # TODO: 勝率が更新された場合に保存するようにする(評価の試合数がそれなりにないと微妙そう)
-        save_model(algorithm, self.output_dir, suffix=f"model_eval_{self._current_evaluation_id}")
+        best_win_rate = ray.get(self._stats_collector.get_best_win_rate.remote())
+        if best_win_rate < current_win_rate:
+            save_model(algorithm, self.output_dir, suffix=f"model_eval_{self._current_evaluation_id}")
+            self.logger.info(f"Best win rate updated. {best_win_rate=:.4f} -> {current_win_rate=:.4f}")
+            # ベスト勝率を更新
+            ray.get(self._stats_collector.update_best_win_rate.remote(current_win_rate))
 
     @override(RLlibCallback)
     def on_episode_end(
