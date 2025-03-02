@@ -1,3 +1,4 @@
+import sys
 import random
 from typing import Any
 from pathlib import Path
@@ -6,7 +7,6 @@ from dataclasses import dataclass
 import h5py
 import numpy as np
 import torch
-import wandb
 import polars as pl
 import torch.nn.functional as F
 from torch import nn, optim
@@ -16,8 +16,11 @@ from torchmetrics import Accuracy, MetricCollection
 from transformers import get_cosine_schedule_with_warmup
 from torch.utils.data import Dataset, DataLoader
 
+import wandb
+
 from .utils import State, Action, GlobalState, HiddenState, HiddenGlobalState, to_np
 from .params import EnvParams
+from .convlstm import ConvLSTM
 
 
 class LuxAugmentBase:
@@ -122,8 +125,9 @@ class LaxDataset(Dataset):
         self.cfg = cfg
         self.mode = mode
         self.ids = []
-        self.n_match = 101
-        # self.n_match = 16
+        # self.n_match = 101
+        self.n_match = 16
+        # self.n_match = 1
         for episode_id, max_step in df[["EpisodeId", "MaxStep"]].to_numpy():
             if max_step != 505:
                 raise NotImplementedError("max_step must be 505 when training LSTM!")
@@ -145,7 +149,7 @@ class LaxDataset(Dataset):
         self.aug = cfg.aug
 
     def __len__(self) -> int:
-        # return 10
+        # return 100
         return len(self.ids)
 
     def __getitem__(self, idx: int) -> dict[str, np.ndarray]:
@@ -571,308 +575,6 @@ def _to_tuple(x):
     return x
 
 
-# Written by ChatGPT
-class CustomConvLSTMCell(nn.Module):
-    def __init__(
-        self, input_channels, hidden_channels, kernel_size, proj_channels=0, bias=True, device=None, dtype=None
-    ):
-        """
-        input_channels : 入力テンソルのチャネル数
-        hidden_channels: セル内部の隠れ状態・セル状態のチャネル数
-        kernel_size    : 畳み込みカーネルサイズ（int または tuple）
-        proj_channels  : 0 の場合は通常の ConvLSTM、0 より大きい場合は出力に 1x1 畳み込みによる射影を適用
-        bias           : バイアスの有無
-        device, dtype  : パラメータ作成時のデバイス、型
-        """
-        super().__init__()
-        self.input_channels = input_channels
-        self.hidden_channels = hidden_channels
-        self.proj_channels = proj_channels
-        self.use_proj = proj_channels > 0
-
-        kernel_size = _to_tuple(kernel_size)
-        self.kernel_size = kernel_size
-        # 空間サイズを変えずに出力するためのパディング（各辺半径）
-        self.padding = (kernel_size[0] // 2, kernel_size[1] // 2)
-
-        # 畳み込みによるゲートの重み
-        # 入力からゲートへの変換: 出力チャネルは 4 * hidden_channels
-        self.weight_x = nn.Parameter(
-            torch.empty(4 * hidden_channels, input_channels, kernel_size[0], kernel_size[1], device=device, dtype=dtype)
-        )
-        # 隠れ状態からゲートへの変換
-        # ※projection を使う場合、前時刻の h のチャネル数は proj_channels となる
-        hidden_dim = proj_channels if self.use_proj else hidden_channels
-        self.weight_h = nn.Parameter(
-            torch.empty(4 * hidden_channels, hidden_dim, kernel_size[0], kernel_size[1], device=device, dtype=dtype)
-        )
-        if bias:
-            self.bias = nn.Parameter(torch.empty(4 * hidden_channels, device=device, dtype=dtype))
-        else:
-            self.register_parameter("bias", None)
-
-        # projection 用のパラメータ（1x1 畳み込み）： hidden_channels → proj_channels
-        if self.use_proj:
-            self.weight_proj = nn.Parameter(
-                torch.empty(proj_channels, hidden_channels, 1, 1, device=device, dtype=dtype)
-            )
-        else:
-            self.register_parameter("weight_proj", None)
-
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        stdv = 1.0 / (self.hidden_channels**0.5)
-        for param in self.parameters():
-            if param is not None:
-                nn.init.uniform_(param, -stdv, stdv)
-
-    def forward(self, x, hx):
-        """
-        x  : 入力テンソル (batch, input_channels, H, W)
-        hx : タプル (h_prev, c_prev)
-             h_prev: (batch, proj_channels if use_proj else hidden_channels, H, W)
-             c_prev: (batch, hidden_channels, H, W)
-        """
-        h_prev, c_prev = hx
-
-        # 入力と隠れ状態からの畳み込み
-        conv_x = F.conv2d(x, self.weight_x, bias=None, padding=self.padding)
-        conv_h = F.conv2d(h_prev, self.weight_h, bias=None, padding=self.padding)
-        gates = conv_x + conv_h
-        if self.bias is not None:
-            # バイアスは (1, 4*hidden_channels, 1, 1) の形状にして加算
-            gates = gates + self.bias.view(1, -1, 1, 1)
-
-        # ゲートを 4 つに分割
-        i_gate, f_gate, g_gate, o_gate = torch.chunk(gates, 4, dim=1)
-        i_gate = torch.sigmoid(i_gate)
-        f_gate = torch.sigmoid(f_gate)
-        g_gate = torch.tanh(g_gate)
-        o_gate = torch.sigmoid(o_gate)
-
-        c_new = f_gate * c_prev + i_gate * g_gate
-        h_new = o_gate * torch.tanh(c_new)
-
-        if self.use_proj:
-            # 1x1 畳み込みによる projection
-            h_new = F.conv2d(h_new, self.weight_proj, bias=None, padding=0)
-
-        return h_new, c_new
-
-
-# Written by ChatGPT
-class SimpleConvLSTMCell(nn.Module):
-    def __init__(self, input_channels, hidden_channels, kernel_size, bias=True):
-        """
-        input_channels  : 入力のチャネル数
-        hidden_channels : 隠れ状態のチャネル数
-        kernel_size     : 畳み込みカーネルサイズ（int または tuple）
-        bias            : バイアスの有無
-        """
-        super().__init__()
-        # 畳み込みによるパディングは、カーネルサイズの半径
-        padding = kernel_size // 2 if isinstance(kernel_size, int) else (kernel_size[0] // 2, kernel_size[1] // 2)
-        self.hidden_channels = hidden_channels
-        # 入力 x と隠れ状態 h をチャネル方向に連結して 4 倍のチャネル数で一括畳み込み
-        self.conv = nn.Conv2d(
-            input_channels + hidden_channels, 4 * hidden_channels, kernel_size, padding=padding, bias=bias
-        )
-        # self.conv = DoubleConv(
-        #     input_channels + hidden_channels,
-        #     4 * hidden_channels,
-        #     mid_channels=hidden_channels * 2,
-        #     res=True,
-        #     kernel_size=kernel_size,
-        #     batch_norm=False,
-        # )
-        self.h_init = nn.Parameter(torch.randn(1, hidden_channels, 24, 24))
-        self.c_init = nn.Parameter(torch.randn(1, hidden_channels, 24, 24))
-
-    def forward(self, x, hidden):
-        """
-        x     : 入力テンソル (batch, input_channels, H, W)
-        hidden: タプル (h, c) 各テンソルの shape は (batch, hidden_channels, H, W)
-        """
-        h, c = hidden
-        if h is None:
-            h, c = self.h_init.repeat(x.size(0), 1, 1, 1), self.c_init.repeat(x.size(0), 1, 1, 1)
-        combined = torch.cat([x, h], dim=1)
-        conv_out = self.conv(combined)
-        # 4 つのゲートに分割
-        i, f, g, o = torch.chunk(conv_out, 4, dim=1)
-        i = torch.sigmoid(i)
-        f = torch.sigmoid(f)
-        g = torch.tanh(g)
-        o = torch.sigmoid(o)
-        c_new = f * c + i * g
-        h_new = o * torch.tanh(c_new)
-        return h_new, c_new
-
-
-class SimpleConvLSTMCellVer2(nn.Module):
-    def __init__(self, input_channels, hidden_channels, kernel_size, bias=True):
-        """
-        input_channels  : 入力のチャネル数
-        hidden_channels : 隠れ状態のチャネル数
-        kernel_size     : 畳み込みカーネルサイズ（int または tuple）
-        bias            : バイアスの有無
-        """
-        super().__init__()
-        # 畳み込みによるパディングは、カーネルサイズの半径
-        padding = kernel_size // 2 if isinstance(kernel_size, int) else (kernel_size[0] // 2, kernel_size[1] // 2)
-        self.hidden_channels = hidden_channels
-        # self.conv = nn.Conv2d(
-        #     input_channels + hidden_channels, hidden_channels * 2, kernel_size, padding=padding, bias=bias
-        # )
-        self.conv = DoubleConv(
-            input_channels + hidden_channels, hidden_channels * 2, res=True, kernel_size=kernel_size, batch_norm=False
-        )
-
-    def forward(self, x, hidden):
-        """
-        x     : 入力テンソル (batch, input_channels, H, W)
-        hidden: タプル (h, c) 各テンソルの shape は (batch, hidden_channels, H, W)
-        """
-        h, c = hidden
-        combined = torch.cat([x, h], dim=1)
-        conv_out = self.conv(combined)
-        i, f = torch.chunk(conv_out, 2, dim=1)
-        return i, f
-
-
-class ConvLSTM(nn.Module):
-    def __init__(
-        self, input_channels, hidden_channels, kernel_size, num_layers=1, bias=True, batch_first=False, res=False
-    ):
-        """
-        input_channels  : 入力のチャネル数
-        hidden_channels : 各層の隠れ状態のチャネル数
-        kernel_size     : 畳み込みカーネルサイズ
-        num_layers      : LSTM の層数
-        bias            : バイアスの有無
-        batch_first     : 入出力テンソルが (batch, seq, C, H, W) なら True
-        """
-        super().__init__()
-        self.num_layers = num_layers
-        self.batch_first = batch_first
-
-        cell_list = []
-        for i in range(num_layers):
-            cur_in_channels = input_channels if i == 0 else hidden_channels
-            # cell_list.append(SimpleConvLSTMCellVer2(cur_in_channels, hidden_channels, kernel_size, bias))
-            cell_list.append(SimpleConvLSTMCell(cur_in_channels, hidden_channels, kernel_size, bias))
-        self.cell_list = nn.ModuleList(cell_list)
-        self.res = res
-
-    def forward(self, x, hidden=None):
-        """
-        x : 入力テンソル
-            batch_first=False の場合 (seq_len, batch, C, H, W)
-            batch_first=True の場合 (batch, seq_len, C, H, W)
-        hidden: オプションで各層の初期状態 [(h0, c0), ...]
-                各状態の shape は (batch, hidden_channels, H, W)
-                省略時はゼロで初期化
-        """
-        # if self.batch_first:
-        #     # (batch, seq, C, H, W) -> (seq, batch, C, H, W)
-        #     x = x.transpose(0, 1)
-        # seq_len, batch_size, _, H, W = x.size()
-
-        # # 各層の初期状態を用意
-        # if hidden is None:
-        #     hidden = []
-        #     for i in range(self.num_layers):
-        #         h = torch.zeros(batch_size, self.cell_list[i].hidden_channels, H, W, device=x.device)
-        #         c = torch.zeros(batch_size, self.cell_list[i].hidden_channels, H, W, device=x.device)
-        #         hidden.append((h, c))
-
-        # layer_input = x
-        # last_state_list = []
-        # # 各層ごとに時系列を処理
-        # for i in range(self.num_layers):
-        #     h, c = hidden[i]
-        #     outputs = []
-        #     for t in range(seq_len):
-        #         h, c = self.cell_list[i](layer_input[t], (h, c))
-        #         outputs.append(h)
-        #     layer_output = torch.stack(outputs, dim=0)
-        #     layer_input = layer_output  # 次層への入力
-        #     last_state_list.append((h, c))
-
-        # if self.batch_first:
-        #     layer_output = layer_output.transpose(0, 1)
-        # return layer_output, last_state_list
-
-        if self.batch_first:
-            x = x.transpose(0, 1)  # (seq_len, batch, C, H, W)
-        seq_len, batch_size, _, H, W = x.size()
-        num_layers = self.num_layers
-
-        # 各層の初期状態を用意（セルごとの初期値）
-        hidden_states = []
-        for i in range(num_layers):
-            if hidden is None:
-                # h0 = torch.zeros(batch_size, self.cell_list[i].hidden_channels, H, W, device=x.device)
-                # c0 = torch.zeros(batch_size, self.cell_list[i].hidden_channels, H, W, device=x.device)
-                h0, c0 = None, None
-            else:
-                h0, c0 = hidden[i]
-            hidden_states.append((h0, c0))
-
-        # 各セル (layer, t) の出力を格納するグリッド（2次元リスト）
-        h_grid = [[None for _ in range(seq_len)] for _ in range(num_layers)]
-        c_grid = [[None for _ in range(seq_len)] for _ in range(num_layers)]
-
-        # wavefront parallelism:
-        # 対角線 d = layer + time について、同じ d のセルは互いに依存しないため並列計算可能
-        for d in range(num_layers + seq_len - 1):
-            for layer in range(num_layers):
-                t = d - layer
-                if t < 0 or t >= seq_len:
-                    continue
-                # 入力は、layer == 0 の場合は x[t]、それ以外は下層の同時刻の出力
-                cell_input = x[t] if layer == 0 else h_grid[layer - 1][t]
-                # 同一層の前時刻の出力がなければ初期状態を用いる
-                if t == 0:
-                    h_prev, c_prev = hidden_states[layer]
-                else:
-                    h_prev, c_prev = h_grid[layer][t - 1], c_grid[layer][t - 1]
-                # h_prev, c_prev = h0, c0  # DEBUG
-                cell = self.cell_list[layer]
-                h_new, c_new = cell(cell_input, (h_prev, c_prev))
-                # if self.res and layer % 2 == 0 and layer > 0:
-                #     h_new = h_new + h_grid[layer - 2][t]
-                h_grid[layer][t] = h_new
-                c_grid[layer][t] = c_new
-
-        # 最終層の出力を結果としてまとめる
-        outputs = torch.stack(h_grid[-1], dim=0)  # (seq_len, batch, hidden_channels, H, W)
-        if self.batch_first:
-            outputs = outputs.transpose(0, 1)  # (batch, seq_len, hidden_channels, H, W)
-        # 各層の最終状態も返す
-        final_states = []
-        for layer in range(num_layers):
-            final_states.append((h_grid[layer][-1], c_grid[layer][-1]))
-            # final_states.append((h0, c0))  # DEBUG
-        return outputs, final_states
-
-
-# 使用例
-if __name__ == "__main__":
-    batch_size = 2
-    seq_len = 5
-    input_channels = 3
-    hidden_channels = 8
-    kernel_size = 3
-    # batch_first=True の場合の入力形状: (batch, seq, C, H, W)
-    x = torch.randn(batch_size, seq_len, input_channels, 16, 16)
-
-    convlstm = ConvLSTM(input_channels, hidden_channels, kernel_size, num_layers=2, batch_first=True)
-    output, states = convlstm(x)
-    print("出力 shape:", output.shape)  # (batch, seq, hidden_channels, H, W)
-
-
 class OutConvWithNorm(nn.Module):
     def __init__(self, in_channels: int, out_channels: int) -> None:
         super().__init__()
@@ -893,7 +595,7 @@ class LuxLSTMModel(nn.Module):
         action_space_size: int,
         n_stack: int,
         num_layers: int = 14,
-        hidden_channels: int = 128,
+        hidden_channels: int = 64,
         kernel_size: int = 3,
         return_hidden: bool = False,
         bilinear: bool = True,
@@ -903,38 +605,51 @@ class LuxLSTMModel(nn.Module):
         self.bilinear = bilinear
 
         self.return_hidden = return_hidden
-        self.inc = DoubleConv(state_space_size + global_state_space_size, 64, res=res)
-        self.down1 = Down(64, 128, res=res)
-        self.down2 = Down(128, 256, res=res)
-        self.down3 = Down(256, 256, res=res)
-        factor = 2 if bilinear else 1
-        self.up1 = Up(256 * 2 + global_state_space_size, 256 // factor, bilinear)
-        self.up2 = Up(256, 128 // factor, bilinear)
-        self.up3 = Up(128, 128, bilinear)
-        # self.policy_net = OutConv(64 * n_stack, action_space_size)
 
-        # self.hidden_channels = hidden_channels
-        # self.conv1 = nn.Sequential(
-        #     DoubleConv(state_space_size + global_state_space_size, hidden_channels),
-        #     *[
-        #         DoubleConv(
-        #             in_channels=hidden_channels, out_channels=hidden_channels, res=True, kernel_size=5, batch_norm=False
-        #         )
-        #         for _ in range(8)
-        #     ],
-        # )
+        self.hidden_channels = hidden_channels
+
+        # TODO 引数で設定できるようにする
+        # embed 部分の設定
+        self.embed_configs = [
+            {
+                "in_channels": state_space_size + global_state_space_size,
+                "out_channels": self.hidden_channels,
+                "kernel_size": 3,
+                "stride": 1,
+                "padding": 1,
+                "use_relu": True,
+            },
+            {
+                "in_channels": self.hidden_channels,
+                "out_channels": self.hidden_channels,
+                "kernel_size": 3,
+                "stride": 1,
+                "padding": 1,
+                "use_relu": True,
+            },
+        ]
+        # recurrent_config の設定に repeats_per_step を追加
+        self.recurrent_config = {
+            "input_channels": self.hidden_channels,  # embed 層出力のチャネル数
+            "hidden_channels": self.hidden_channels,
+            "kernel_size": 5,
+            "n_recurrent": 8,  # lstmのブロック数 論文中のD
+            "repeats_per_step": 3,  # 1時刻あたりの内部更新回数 論文中のN
+            "pool_and_inject": "horizontal",
+            "pool_projection": "per-channel",
+            "output_activation": "tanh",
+            "forget_bias": 0.0,
+            "fence_pad": "no",
+            "residual": False,
+            "skip_final": True,
+        }
 
         self.convlstm = ConvLSTM(
-            input_channels=128,
-            hidden_channels=256,
-            kernel_size=kernel_size,
-            num_layers=1,
-            bias=True,
-            batch_first=True,
-            res=True,
+            self.embed_configs,
+            self.recurrent_config,
         )
 
-        self.base_output_channels = 128 + 256
+        self.base_output_channels = self.hidden_channels
 
         self.sap_net1 = ResidualBlock(
             self.base_output_channels, 64, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False
@@ -964,34 +679,25 @@ class LuxLSTMModel(nn.Module):
         gx = global_state.view(_ng, _tg, _cg, 1, 1).expand(_ng, _tg, _cg, _x, _y)
         # print(f"global_state: {gx.shape}")
         x = torch.cat([state, gx], dim=2)
-        # print(f"x: {x.shape}")
 
-        x = x.view(-1, _c + _cg, _x, _y)
-        x1 = self.inc(x)
-        x2 = self.down1(x1)
-        x3 = self.down2(x2)
-        x4 = self.down3(x3)
+        # print(f"_n: {_n}, _t: {_t}, _c: {_c}, _x: {_x}, _y: {_y}", file=sys.stderr)
 
-        # sx, syのマップにグローバルステートをブロードキャスト
-        sx, sy = x4.shape[2:]
-        _n, _t, _c = global_state.shape
-        gx = global_state.view(-1, _c, 1, 1)
-        gx = gx.repeat(1, 1, sx, sy)
+        # print(f"x: {x.shape}", file=sys.stderr)
+        x = x.transpose(1, 0).contiguous()
 
-        x4 = torch.cat([x4, gx], dim=1)
-        # x = self.global_avg_pool(x4).view(_n, -1)
-        # value_logits = self.value_net(x)
-        # global_state_logits = self.global_state_net(x)
+        # print(f"x: {x.shape}", file=sys.stderr)
+        x, hidden = self.convlstm(x, hidden)
+        # print(f"x: {x.shape}", file=sys.stderr)
+        # print(f"hidden: {len(hidden)}, {len(hidden[0])}, {hidden[0][0].shape}, {hidden[0][1].shape}", file=sys.stderr)
+        if _t > 1:
+            x = x.transpose(0, 1)
+            # print(f"x: {x.shape}", file=sys.stderr)
 
-        x = self.up1(x4, x3)
-        x = self.up2(x, x2)
-        x = self.up3(x, x1)
-        x = x.view(_n, _t, -1, _x, _y)
-        x_lstm, hidden = self.convlstm(x, hidden)
-        # x = x_lstm
-        # x = x + x_lstm
-        x = torch.cat([x, x_lstm], dim=2)
-        x = x.flatten(0, 1)
+            x = x.flatten(0, 1)
+        # else:
+        #     x = x.unsqueeze(0)
+
+        # print(f"x: {x.shape}", file=sys.stderr)
 
         sap_logits1 = self.sap_net1(x)
         sap_logits2 = self.sap_net2(sap_logits1)

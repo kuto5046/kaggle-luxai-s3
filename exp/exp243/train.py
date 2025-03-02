@@ -34,11 +34,11 @@ class Config:
     output_dir = root_dir / f"exp/{exp_name}/output"
 
     # trainer
-    epoch: int = 30
+    epoch: int = 50
     limit_train_batches: float = 1.0
     limit_val_batches: float = 1.0
     use_amp: bool = True
-    batch_size: int = 16
+    batch_size: int = 32
     num_workers: int = 20
     ckpt_path: str = None
     lr: float = 0.001
