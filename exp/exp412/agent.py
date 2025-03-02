@@ -1,3 +1,4 @@
+import sys
 import time
 from heapq import heappop, heappush  # for dijkstra in MinimumCostFlow
 from typing import Any
@@ -58,7 +59,7 @@ class MinimumCostFlow:
         self.edges[f].append([t, capacity, cost, len(self.edges[t]), action])
         self.edges[t].append([f, 0, -cost, len(self.edges[f]) - 1, -1])  # reverse edge
 
-    def flow(self, s, t, flow, timeout=0.1):
+    def flow(self, s, t, flow, timeout=0.2):
         n = self.n
         g = self.edges
         inf = MinimumCostFlow.inf
@@ -191,8 +192,10 @@ class ILAgent:
                 output["policy"] = (output["policy"][:1] + self.transpose_policy(output["policy"][1:])) / 2
             if do_flip:
                 output["sap"] = torch.flip(output["sap"], [-2, -1])
+                output["sap_count"] = torch.flip(output["sap_count"], [-2, -1])
             policy_map = output["policy"].squeeze().numpy()
             sap = torch.sigmoid(output["sap"]).squeeze().numpy()
+            sap_count_prob = torch.sigmoid(output["sap_count"]).squeeze().numpy()
             sap_available_area = state[State.SAP_AVAILABLE_AREA]
             sap = sap * sap_available_area
 
@@ -210,7 +213,7 @@ class ILAgent:
         policy_map = get_legal_policy(obs, policy_map, team_id, episode_store)
         point_map = state[State.POINTS]
 
-        return policy_map, point_map, sap
+        return policy_map, point_map, sap, sap_count_prob
 
 
 def get_legal_policy(
@@ -237,14 +240,14 @@ class SingleSapInfo:
     def __init__(
         self,
         sap_pos: list[tuple[int, int]],
-        sap_policy: list[float],
+        sap_policy: list[tuple[float, float, float]],
         next_policy: float,
         next_action,
         unit_id: int,
         unit_pos: tuple[int, int],
     ) -> None:
         self.sap_pos = sap_pos  # sapの位置
-        self.sap_policy = sap_policy  # sapの各位置のpolicy
+        self.sap_policy = sap_policy  # sapの各位置のpolicy, tupleは[1回のsap, 2回のsap, 3回のsap]の確率
         self.next_policy = next_policy  # sap以外の行動のpolicyのうちの最大値
         self.next_action = next_action  # sap以外の行動のうちの最大値の行動
         self.unit_id = unit_id
@@ -276,7 +279,9 @@ class Agent:
             self.episode_store.reset()
         else:
             self.episode_store.update(obs, self.prev_actions)
-        policy_map, _point_map, sap_map = imitation_model.predict(obs, self.team_id, self.episode_store, self.cfg)
+        policy_map, _point_map, sap_map, sap_count_prob = imitation_model.predict(
+            obs, self.team_id, self.episode_store, self.cfg
+        )
 
         unit_mask = np.array(obs["units_mask"][self.team_id])  # shape (max_units, )
         unit_positions = np.array(obs["units"]["position"][self.team_id])  # shape (max_units, 2)
@@ -286,7 +291,9 @@ class Agent:
 
         # sapの位置を決定 -> 残りの行動をフローで決定
         actions = np.zeros((self.env_cfg["max_units"], 3), dtype=int)
-        self._assign_greedy_actions_sap(actions, available_unit_ids, unit_positions, policy_map, sap_map)
+        self._assign_greedy_actions_sap(
+            actions, available_unit_ids, unit_positions, policy_map, sap_map, sap_count_prob
+        )
         sapped_unit_next_pos_set = set()
         for unit_id in available_unit_ids:
             action = actions[unit_id]
@@ -389,17 +396,19 @@ class Agent:
                 flow.add_edge(unit_node, pos_node_additional, capacity=1, cost=base_cost, action=action)
         # try:
         flow_result = flow.flow(nodes["source"], nodes["sink"], len(available_unit_ids))
-        assert flow_result != -1, "Flow calculation failed"
+        # assert flow_result != -1, "Flow calculation failed"
         # except Exception as e:
         #     print(f"フロー計算エラー: {e}")
         #     self._assign_greedy_actions(actions, available_unit_ids, unit_positions, policy_map, point_map, obs, opp_unit_positions)
         #     return
-        # if flow_result == -1:
-        #     print("flow=-1", file=sys.stderr)
-        #     self._assign_greedy_actions(
-        #         actions, available_unit_ids, unit_positions, policy_map, point_map, obs, opp_unit_positions
-        #     )
-        #     return
+        if flow_result == -1:
+            print("flow=-1", file=sys.stderr)
+            if len(available_unit_ids) > 0:
+                available_unit_ids.pop()
+            self._assign_actions_with_flow(
+                actions, available_unit_ids, unit_positions, policy_map, sapped_unit_next_pos_set
+            )
+            return
 
         # フローから行動を抽出
         for i, unit_id in enumerate(available_unit_ids):
@@ -466,7 +475,9 @@ class Agent:
                     actions[unit_id] = [action, 0, 0]
                     break
 
-    def _assign_greedy_actions_sap(self, actions, available_unit_ids, unit_positions, policy_map, sap_map):
+    def _assign_greedy_actions_sap(
+        self, actions, available_unit_ids, unit_positions, policy_map, sap_map, sap_count_prob
+    ):
         sap_infos: list[SingleSapInfo] = []
 
         for unit_id in available_unit_ids:
@@ -494,7 +505,16 @@ class Agent:
                         sap_pos = (x + dx, y + dy)
                         if in_map(sap_pos):
                             sap_poses.append(sap_pos)
-                            sap_policies.append(sap_map[sap_pos[1], sap_pos[0]] * policy[Action.SAP])
+                            sap_count_probs = (
+                                sap_map[sap_pos[1], sap_pos[0]] * policy[Action.SAP],
+                                sap_map[sap_pos[1], sap_pos[0]]
+                                * policy[Action.SAP]
+                                * sap_count_prob[0][sap_pos[1], sap_pos[0]],
+                                0,
+                            )
+                            #    sap_map[sap_pos[1], sap_pos[0]] * policy[Action.SAP] * sap_count_prob[1][sap_pos[1], sap_pos[0]])
+                            sap_policies.append(sap_count_probs)
+                next_policy = 1 - policy[Action.SAP]
                 policy[Action.SAP] = 0
                 next_action = policy.argmax()
                 next_action_info = {
@@ -503,7 +523,6 @@ class Agent:
                     "score": 1.0 - policy[next_action],
                     "sap_pos": None,
                 }
-                next_policy = policy[next_action]
                 sap_infos.append(
                     SingleSapInfo(sap_poses, sap_policies, next_policy, next_action_info, unit_id, unit_pos)
                 )
@@ -519,32 +538,25 @@ class Agent:
             for sap_pos in sap_info.sap_pos:
                 all_sap_positions.add(sap_pos)
         n_cells = len(all_sap_positions)
-        flow = MinimumCostFlow(2 + n_units + n_cells + 1)
+        flow = MinimumCostFlow(2 + n_units + n_cells * 3 + 1)
         nodes = {}
         nodes["source"] = 0
         nodes["sink"] = 1
-        nodes["unit_move"] = 2 + n_units + n_cells  # sap以外の行動のためのノード
+        nodes["unit_move"] = 2 + n_units + n_cells * 3  # sap以外の行動のためのノード
         for i in range(n_units):
             nodes[f"unit_{i}"] = 2 + i
         for i, (x, y) in enumerate(all_sap_positions):
-            nodes[f"pos_{x}_{y}"] = 2 + n_units + i
+            for j in range(3):
+                nodes[f"pos_{x}_{y}_{j}"] = 2 + n_units + i * 3 + j
             # nodes[f"pos_{x}_{y}_additional"] = 2 + n_units + n_cells + i
 
         flow.add_edge(nodes["unit_move"], nodes["sink"], capacity=n_units, cost=0, action=-1)
         for i, unit_id in enumerate(sap_unit_ids):
             flow.add_edge(nodes["source"], nodes[f"unit_{i}"], capacity=1, cost=0, action=-1)
         for pos in all_sap_positions:
-            pos_node = nodes[f"pos_{pos[0]}_{pos[1]}"]
-            # pos_node_additional = nodes[f"pos_{pos[0]}_{pos[1]}_additional"]
-            flow.add_edge(pos_node, nodes["sink"], capacity=1, cost=0, action=-1)
-            # additional_capacity = max(len(available_unit_ids) - 1, 1)  # 最低でも1の容量を確保
-            # flow.add_edge(
-            #     pos_node_additional,
-            #     nodes["sink"],
-            #     capacity=additional_capacity,
-            #     cost=self.cfg.overlap_penalty,
-            #     action=-1,
-            # )
+            for j in range(3):
+                pos_node = nodes[f"pos_{pos[0]}_{pos[1]}_{j}"]
+                flow.add_edge(pos_node, nodes["sink"], capacity=1, cost=0, action=-1)
 
         for i, sap_info in enumerate(sap_infos):
             unit_node = nodes[f"unit_{i}"]
@@ -555,18 +567,18 @@ class Agent:
                 cost=sap_info.next_action["score"],
                 action=sap_info.next_action,
             )
-            for sap_pos, sap_policy in zip(sap_info.sap_pos, sap_info.sap_policy):
-                sap_pos_relative = calc_relative_pos(sap_info.unit_pos, sap_pos)
-                assert sap_policy >= 0 and sap_policy <= 1
-                action = {
-                    "action_id": Action.SAP,
-                    "next_pos": sap_info.unit_pos,
-                    "score": 1.0 - sap_policy,
-                    "sap_pos": sap_pos_relative,
-                }
-                flow.add_edge(
-                    unit_node, nodes[f"pos_{sap_pos[0]}_{sap_pos[1]}"], capacity=1, cost=action["score"], action=action
-                )
+            for sap_pos, sap_policies in zip(sap_info.sap_pos, sap_info.sap_policy):
+                for j, sap_policy in enumerate(sap_policies):
+                    pos_node = nodes[f"pos_{sap_pos[0]}_{sap_pos[1]}_{j}"]
+                    sap_pos_relative = calc_relative_pos(sap_info.unit_pos, sap_pos)
+                    assert sap_policy >= 0 and sap_policy <= 1
+                    action = {
+                        "action_id": Action.SAP,
+                        "next_pos": sap_info.unit_pos,
+                        "score": 1.0 - sap_policy,
+                        "sap_pos": sap_pos_relative,
+                    }
+                    flow.add_edge(unit_node, pos_node, capacity=1, cost=action["score"], action=action)
 
         # try:
         flow_result = flow.flow(nodes["source"], nodes["sink"], len(sap_unit_ids))

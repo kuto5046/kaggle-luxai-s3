@@ -28,7 +28,7 @@ class Config:
     debug: bool = False
     n_splits: int = 5
     use_fold: int = 0
-    root_dir: Path = Path("/home/user/work")
+    root_dir: Path = Path("/home/kawattataido/デスクトップ/programing/kaggle/kaggle-luxai-s3")
     feature_version: str = exp_name
     feature_dir: Path = root_dir / f"output/feature_store/{feature_version}"
     output_dir = root_dir / f"exp/{exp_name}/output"
@@ -38,7 +38,7 @@ class Config:
     limit_train_batches: float = 1.0
     limit_val_batches: float = 1.0
     use_amp: bool = False
-    batch_size: int = 1024
+    batch_size: int = 256
     num_workers: int = 20
     ckpt_path: str = None
     lr: float = 0.001
@@ -54,6 +54,7 @@ class Config:
     loss_weight_global_state: float = 0.0
     # loss_weight_value: float = 0.0
     loss_weight_sap: float = 0.1
+    loss_weight_sap_count: float = 0.1
 
     @classmethod
     def from_args(cls) -> "Config":

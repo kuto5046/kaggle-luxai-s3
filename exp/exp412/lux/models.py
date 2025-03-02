@@ -232,13 +232,14 @@ class LaxLitModel(LightningModule):
             n_stack=cfg.n_stack,
             res=cfg.res,
         )
-        self.criterion1 = DiceLoss(n_classes=len(Action))
+        self.criterion1 = MaskedDiceLoss(n_classes=len(Action))
         # self.criterion1 = MaskedBCEWithLogitsLoss()
         self.criterion2 = nn.BCEWithLogitsLoss()
         self.criterion3 = nn.MSELoss()
         self.criterion4 = MaskedFocalTverskyLoss(
             alpha=0.3, beta=0.7, gamma=1.0, smooth=1e-3
         )  # sapを行わない背景が多数で学習が進まない問題を解決するための損失関数
+        self.criterion_sap_count = OrdinalCrossEntropyLoss(reduction="mean")
 
         metrics = self.get_metrics()
         self.train_metrics = metrics.clone(postfix="/train")
@@ -259,7 +260,9 @@ class LaxLitModel(LightningModule):
 
         policy_preds = torch.softmax(outputs["policy"], dim=1)
         policy_targets = one_hot_encoder(batch["action"], n_classes=len(Action))
-        policy_loss = self.criterion1(policy_preds, policy_targets)
+        # unit_mask: shape (batch, H, W)
+        unit_mask = batch["state"][:, -1, State.OWN_UNIT_COUNT] > 0
+        policy_loss = self.criterion1(policy_preds, policy_targets, unit_mask)
 
         sap_available_mask = batch["state"][:, -1, State.SAP_AVAILABLE_AREA] > 0  # (batch_size, w, h)
         sap_output = outputs["sap"].squeeze(1)  # shape: (batch, H, W)
@@ -274,12 +277,25 @@ class LaxLitModel(LightningModule):
             )
         else:
             sap_loss = 0
+
+        sap_count_preds = outputs["sap_count"]
+        sap_position_mask = batch["sap"] > 0
+        if sap_position_mask.sum() > 0:
+            sap_count_loss = self.criterion_sap_count(
+                sap_count_preds[sap_present_mask],
+                batch["sap_count"][sap_present_mask],
+                sap_position_mask[sap_present_mask],
+            )
+        else:
+            sap_count_loss = 0
+
         loss = (
             policy_loss * self.cfg.loss_weight_policy
             # + state_loss * self.cfg.loss_weight_state
             # + value_loss * self.cfg.loss_weight_value
             # + global_state_loss * self.cfg.loss_weight_global_state
             + sap_loss * self.cfg.loss_weight_sap
+            + sap_count_loss * self.cfg.loss_weight_sap_count
         )
 
         self.log(
@@ -293,6 +309,14 @@ class LaxLitModel(LightningModule):
         self.log(
             f"SapLoss/{mode}",
             sap_loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+        )
+        self.log(
+            f"SapCountLoss/{mode}",
+            sap_count_loss,
             on_step=False,
             on_epoch=True,
             prog_bar=False,
@@ -561,11 +585,12 @@ class LuxUNetModel(nn.Module):
         self.sap_net1 = ResidualBlock(
             64 * n_stack, 64, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False
         )
-        self.sap_net2 = ResidualBlock(64, 64, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False)
-        self.sap_net3 = OutConvWithNorm(64, 1)  # かなり極端な値を出力するので正規化することで学習を安定化させる
+        self.sap_net2 = ResidualBlock(64, 128, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False)
+        self.sap_net3 = OutConvWithNorm(128, 1)  # かなり極端な値を出力するので正規化することで学習を安定化させる
+        self.sap_count_net3 = OutConv(128, 2)
         # sap候補位置をpolicyの特徴マップに統合. sap rangeの最大値が7なのでkernel_size=15にしている
         self.policy_net1_from_sap = ResidualBlock(
-            1, 16, EnvParams.map_width, EnvParams.map_width, kernel_size=15, squeeze_excitation=False
+            3, 16, EnvParams.map_width, EnvParams.map_width, kernel_size=15, squeeze_excitation=False
         )
         self.concat_norm = nn.BatchNorm2d(64 * n_stack + 16)
         self.policy_net2 = ResidualBlock(
@@ -603,9 +628,10 @@ class LuxUNetModel(nn.Module):
         sap_logits1 = self.sap_net1(x)
         sap_logits2 = self.sap_net2(sap_logits1)
         sap_logits = self.sap_net3(sap_logits2)
+        sap_count_logits = self.sap_count_net3(sap_logits2)
 
         # sap_net の出力は logits のまま扱う(ここで sigmoid はかけない)
-        policy_logits1 = self.policy_net1_from_sap(sap_logits)
+        policy_logits1 = self.policy_net1_from_sap(torch.cat([sap_logits, sap_count_logits], dim=1))
         # x は [N, 64*n_stack, H, W]、policy_logits1 は [N, 16, H, W] なので連結後のチャネル数は 64*n_stack+16
         policy_features = torch.cat([x, policy_logits1], dim=1)
         # 連結後に正規化を適用
@@ -617,6 +643,7 @@ class LuxUNetModel(nn.Module):
         return {
             "policy": policy_logits,
             "sap": sap_logits,
+            "sap_count": sap_count_logits,
             # "state": state_logits,
             # "global_state": global_state_logits,
             # "value": value_logits,
@@ -846,6 +873,47 @@ class MaskedBCEWithLogitsLoss(nn.Module):
         return masked_loss.sum() / mask.sum()
 
 
+class MaskedDiceLoss(nn.Module):
+    def __init__(self, n_classes: int, weights: None | list[float] = None) -> None:
+        super().__init__()
+        self.n_classes = n_classes
+        if weights is None:
+            self.weights = torch.ones(n_classes)
+        else:
+            self.weights = torch.tensor(weights)
+
+    def _dice_loss(self, score: torch.Tensor, target: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
+        # targetをfloat型に変換
+        target = target.float()
+        smooth = 1e-5
+
+        # maskが与えられていれば、各要素に乗算してマスク領域のみで評価
+        if mask is not None:
+            # maskの形状が (N,H,W) なら、score, target も (N,H,W) であることを仮定
+            score = score * mask
+            target = target * mask
+
+        intersect = torch.sum(score * target)
+        y_sum = torch.sum(target * target)
+        z_sum = torch.sum(score * score)
+        loss = (2 * intersect + smooth) / (z_sum + y_sum + smooth)
+        loss = 1 - loss
+        return loss
+
+    def forward(self, inputs: torch.Tensor, target: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
+        # もし binary classification なら、チャネル次元を利用せずに直接計算
+        if self.n_classes == 1 or (inputs.ndim > 1 and inputs.size(1) == 1):
+            dice = self._dice_loss(inputs, target, mask=mask)
+            return dice * self.weights[0] / torch.sum(self.weights)
+
+        loss = 0.0
+        # 各クラスごとに (N, H, W) のテンソルとして損失計算
+        for i in range(self.n_classes):
+            dice = self._dice_loss(inputs[:, i], target[:, i], mask=mask)
+            loss += dice * self.weights[i]
+        return loss / torch.sum(self.weights)
+
+
 class DiceLoss(nn.Module):
     def __init__(self, n_classes: int, weights: None | list[float] = None) -> None:
         super().__init__()
@@ -899,3 +967,50 @@ class MaskedFocalLoss(nn.Module):
         focal_loss = self.alpha * (1 - pt) ** self.gamma * bce_loss
         masked_focal_loss = focal_loss * mask
         return masked_focal_loss.sum() / mask.sum()
+
+
+class OrdinalCrossEntropyLoss(nn.Module):
+    def __init__(self, reduction: str = "mean", weight: torch.Tensor = None):
+        """
+        :param reduction: 'mean' や 'sum'
+        :param weight: 各閾値に対する重み (optional)
+        """
+        super().__init__()
+        self.reduction = reduction
+        self.weight = weight
+
+    def forward(self, logits: torch.Tensor, target: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
+        """
+        :param logits: (N, K-1, H, W) のテンソル。ここでは K=3 なので (N,2,H,W)。
+                       各チャネルは「その閾値を超えている確率」に対応するロジット。
+        :param target: (N, H, W) のテンソル。背景は 0、SAP対象は 1,2,3 の値を持つ。
+        :param mask: (N, H, W) の Bool テンソル。True の箇所のみ損失計算対象とする。
+                     省略時は target > 0 の箇所を対象とする。
+        :return: ordinal loss の値
+        """
+        # valid mask: SAP対象（target > 0）をデフォルトの対象とする
+        if mask is None:
+            valid = target > 0
+        else:
+            valid = mask
+
+        if valid.sum() == 0:
+            return torch.tensor(0.0, device=logits.device)
+
+        # valid な画素について、target の値を 0-indexed (0,1,2) に変換
+        target_valid = target[valid] - 1  # 例: 教師が 1 -> 0, 2 -> 1, 3 -> 2
+
+        # 各 valid な画素に対し、2個のバイナリターゲットを作成
+        # 1つ目: (target > 1) つまり (target_valid > 0)
+        # 2つ目: (target > 2) つまり (target_valid > 1)
+        thresholds = torch.arange(2, device=target.device).unsqueeze(0)  # shape: (1,2)
+        ordinal_target = (target_valid.unsqueeze(1) > thresholds).float()  # shape: (N_valid, 2)
+
+        # logits は (N,2,H,W) なので、valid な画素だけ取り出す
+        logits_valid = logits.permute(0, 2, 3, 1)[valid]  # shape: (N_valid, 2)
+
+        # 各閾値ごとにバイナリクロスエントロピー損失を計算
+        loss = F.binary_cross_entropy_with_logits(
+            logits_valid, ordinal_target, weight=self.weight, reduction=self.reduction
+        )
+        return loss
