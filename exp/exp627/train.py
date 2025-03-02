@@ -52,14 +52,14 @@ class Config:
     n_stack: int = 8
     kernel_size: int = 5
     aug: bool = True
-    freeze: bool = True
+    freeze: bool = False
     
     # loss
-    loss_weight_policy: float = 0
+    loss_weight_policy: float = 1
     loss_weight_state: float = 1.0
     loss_weight_global_state: float = 0.0
     # loss_weight_value: float = 0.0
-    loss_weight_sap: float = 1
+    loss_weight_sap: float = 0.1
 
     @classmethod
     def from_args(cls) -> "Config":
