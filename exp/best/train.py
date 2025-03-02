@@ -34,7 +34,7 @@ class Config:
     output_dir = root_dir / f"exp/{exp_name}/output"
 
     # trainer
-    epoch: int = 20
+    epoch: int = 30
     limit_train_batches: float = 1.0
     limit_val_batches: float = 1.0
     use_amp: bool = False
@@ -53,7 +53,7 @@ class Config:
     loss_weight_state: float = 1.0
     loss_weight_global_state: float = 0.0
     # loss_weight_value: float = 0.0
-    # loss_weight_sap: float = 1.0
+    loss_weight_sap: float = 0.1
 
     @classmethod
     def from_args(cls) -> "Config":
