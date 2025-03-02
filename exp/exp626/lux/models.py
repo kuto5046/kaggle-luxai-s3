@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import h5py
 import numpy as np
 import torch
+import wandb
 import polars as pl
 import torch.nn.functional as F
 from torch import nn, optim
@@ -15,9 +16,7 @@ from torchmetrics import Accuracy, MetricCollection
 from transformers import get_cosine_schedule_with_warmup
 from torch.utils.data import Dataset, DataLoader
 
-import wandb
-
-from .utils import State, Action, GlobalState, HiddenState, HiddenGlobalState, to_np
+from .utils import State, Action, GlobalState, HiddenState, to_np
 from .params import EnvParams
 
 
@@ -48,6 +47,7 @@ class LuxAugmentBase:
         action = np.where(action == -1, 2 + offset, action)
         return action
 
+
 # 自陣を(0,0)にする
 class LuxAugmentStandardize(LuxAugmentBase):
     def __init__(self) -> None:
@@ -59,6 +59,7 @@ class LuxAugmentStandardize(LuxAugmentBase):
         hidden_state = inputs["hidden_state"].copy()
         action = inputs["action"].copy()
         sap = inputs["sap"].copy()
+        sap_count = inputs["sap_count"].copy()
 
         # 原点を自陣とする
         # TODO agent_id を用いて自陣を判定する
@@ -74,11 +75,13 @@ class LuxAugmentStandardize(LuxAugmentBase):
             action = self.switch_action(action, Action.UP, Action.DOWN)
             action = self.switch_action(action, Action.LEFT, Action.RIGHT)
             sap = np.flip(sap, axis=(0, 1)).copy()
+            sap_count = np.flip(sap_count, axis=(0, 1)).copy()
 
         inputs["state"] = state
         inputs["hidden_state"] = hidden_state
         inputs["action"] = action
         inputs["sap"] = sap
+        inputs["sap_count"] = sap_count
         return inputs
 
 
@@ -92,6 +95,7 @@ class LuxAugmentTranspose(LuxAugmentBase):
         hidden_state = inputs["hidden_state"].copy()
         action = inputs["action"].copy()
         sap = inputs["sap"].copy()
+        sap_count = inputs["sap_count"].copy()
 
         if random.random() < self.p:
             state = np.transpose(state, (0, 1, 3, 2)).copy()
@@ -100,11 +104,13 @@ class LuxAugmentTranspose(LuxAugmentBase):
             action = self.switch_action(action, Action.UP, Action.LEFT)
             action = self.switch_action(action, Action.DOWN, Action.RIGHT)
             sap = np.transpose(sap, (1, 0)).copy()
+            sap_count = np.transpose(sap_count, (1, 0)).copy()
 
         inputs["state"] = state
         inputs["hidden_state"] = hidden_state
         inputs["action"] = action
         inputs["sap"] = sap
+        inputs["sap_count"] = sap_count
         return inputs
 
 
@@ -144,19 +150,21 @@ class LaxDataset(Dataset):
         global_state = np.stack(global_states, axis=0)  # (n_stack, channel)
 
         hidden_state = np.array(self.h5_file[str(episode_id)]["hidden_states"][str(step_idx)]).astype(np.float32)
-        hidden_global_state = np.array(self.h5_file[str(episode_id)]["hidden_global_states"][str(step_idx)]).astype(
-            np.float32
-        )
+        # hidden_global_state = np.array(self.h5_file[str(episode_id)]["hidden_global_states"][str(step_idx)]).astype(
+        #     np.float32
+        # )
         actions = np.array(self.h5_file[str(episode_id)]["actions"][str(step_idx)]).astype(np.float32)
         action = actions[0]
         sap = actions[1]
+        sap_count = actions[2]
         win = np.array(self.h5_file[str(episode_id)]["win"][str(step_idx)]).astype(np.float32)
         inputs = {
             "state": state,
             "global_state": global_state,
             "hidden_state": hidden_state,
-            "hidden_global_state": hidden_global_state,
+            # "hidden_global_state": hidden_global_state,
             "action": action,
+            "sap_count": sap_count,
             "sap": sap,
             "win": win,
         }
@@ -230,7 +238,9 @@ class LaxLitModel(LightningModule):
         # self.criterion1 = MaskedBCEWithLogitsLoss()
         self.criterion2 = nn.BCEWithLogitsLoss()
         self.criterion3 = nn.MSELoss()
-        self.criterion4 = MaskedFocalLoss()
+        self.criterion4 = MaskedFocalTverskyLoss(
+            alpha=0.3, beta=0.7, gamma=1.0, smooth=1e-3
+        )  # sapを行わない背景が多数で学習が進まない問題を解決するための損失関数
 
         metrics = self.get_metrics()
         self.train_metrics = metrics.clone(postfix="/train")
@@ -251,22 +261,27 @@ class LaxLitModel(LightningModule):
 
         policy_preds = torch.softmax(outputs["policy"], dim=1)
         policy_targets = one_hot_encoder(batch["action"], n_classes=len(Action))
-        # policy_mask = (batch["state"][:, -1, State.OWN_UNIT_COUNT] > 0).unsqueeze(1)  # (batch_size, 1, w, h)
-        # policy_loss = self.criterion1(policy_preds, policy_targets, policy_mask)
         policy_loss = self.criterion1(policy_preds, policy_targets)
 
-        # value_loss = self.criterion2(outputs["value"].flatten(), batch["win"])
-        state_loss = self.criterion3(outputs["state"].flatten(), batch["hidden_state"].flatten())
-        global_state_loss = self.criterion3(outputs["global_state"].flatten(), batch["hidden_global_state"].flatten())
+        sap_available_mask = batch["state"][:, -1, State.SAP_AVAILABLE_AREA] > 0  # (batch_size, w, h)
+        sap_output = outputs["sap"].squeeze(1)  # shape: (batch, H, W)
+        # 各サンプルごとに空間軸 (H, W) の和を計算し、sap が行われているか判定
+        sap_present_mask = batch["sap"].view(sap_output.shape[0], -1).sum(dim=1) > 0
 
-        # sap_available_mask = (batch["state"][:, -1, State.SAP_AVAILABLE_AREA] > 0)  # (batch_size, w, h)
-        # sap_loss = self.criterion4(outputs["sap"].squeeze(1), batch["sap"], sap_available_mask)
+        if sap_present_mask.sum() > 0:
+            # sap_loss は、sap が存在するサンプルのみで計算
+            # 背景の部分が多すぎて学習が進みにくいので、sap_available_mask を使って背景をマスクする
+            sap_loss = self.criterion4(
+                sap_output[sap_present_mask], batch["sap"][sap_present_mask], sap_available_mask[sap_present_mask]
+            )
+        else:
+            sap_loss = 0
         loss = (
             policy_loss * self.cfg.loss_weight_policy
-            + state_loss * self.cfg.loss_weight_state
+            # + state_loss * self.cfg.loss_weight_state
             # + value_loss * self.cfg.loss_weight_value
-            + global_state_loss * self.cfg.loss_weight_global_state
-            # + sap_loss * self.cfg.loss_weight_sap
+            # + global_state_loss * self.cfg.loss_weight_global_state
+            + sap_loss * self.cfg.loss_weight_sap
         )
 
         self.log(
@@ -277,14 +292,14 @@ class LaxLitModel(LightningModule):
             prog_bar=False,
             logger=True,
         )
-        # self.log(
-        #     f"SapLoss/{mode}",
-        #     sap_loss,
-        #     on_step=False,
-        #     on_epoch=True,
-        #     prog_bar=False,
-        #     logger=True,
-        # )
+        self.log(
+            f"SapLoss/{mode}",
+            sap_loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+        )
         # self.log(
         #     f"ValueLoss/{mode}",
         #     value_loss,
@@ -293,23 +308,23 @@ class LaxLitModel(LightningModule):
         #     prog_bar=False,
         #     logger=True,
         # )
-        self.log(
-            f"StateLoss/{mode}",
-            state_loss,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=False,
-            logger=True,
-        )
+        # self.log(
+        #     f"StateLoss/{mode}",
+        #     state_loss,
+        #     on_step=False,
+        #     on_epoch=True,
+        #     prog_bar=False,
+        #     logger=True,
+        # )
 
-        self.log(
-            f"GlobalStateLoss/{mode}",
-            global_state_loss,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=False,
-            logger=True,
-        )
+        # self.log(
+        #     f"GlobalStateLoss/{mode}",
+        #     global_state_loss,
+        #     on_step=False,
+        #     on_epoch=True,
+        #     prog_bar=False,
+        #     logger=True,
+        # )
         self.log(
             f"Loss/{mode}",
             loss,
@@ -331,6 +346,7 @@ class LaxLitModel(LightningModule):
             self.valid_metrics.update(preds, gts)
             self.valid_outputs["ground_truth"].append(to_np(gts))
             self.valid_outputs["predictions"].append(to_np(preds))
+
         return loss
 
     def on_train_epoch_end(self) -> None:
@@ -416,7 +432,7 @@ def one_hot_encoder(input_tensor: torch.Tensor, n_classes: int) -> torch.Tensor:
 
 
 class DoubleConv(nn.Module):
-    """(convolution => [BN] => ReLU) * 2"""
+    """(convolution => [BN] => LeakyReLU) * 2"""
 
     def __init__(self, in_channels: int, out_channels: int, mid_channels: int | None = None, res: bool = False) -> None:
         super().__init__()
@@ -425,10 +441,10 @@ class DoubleConv(nn.Module):
         self.double_conv = nn.Sequential(
             nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(mid_channels),
-            nn.ReLU(inplace=True),
+            nn.LeakyReLU(inplace=True),
             nn.Conv2d(mid_channels, out_channels, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
+            nn.LeakyReLU(inplace=True),
         )
         self.res = res
         # 入力と出力のチャンネル数が異なる場合のための1x1 convolution
@@ -508,13 +524,24 @@ class OutConv(nn.Module):
         return self.conv(x)
 
 
+class OutConvWithNorm(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int) -> None:
+        super().__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
+        self.bn = nn.BatchNorm2d(out_channels)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.conv(x)
+        x = self.bn(x)
+        return x
+
+
 class LuxUNetModel(nn.Module):
     def __init__(
         self,
         state_space_size: int,
         global_state_space_size: int,
         action_space_size: int,
-        hidden_state_space_size: int,
         n_stack: int,
         bilinear: bool = True,
         res: bool = False,
@@ -522,35 +549,32 @@ class LuxUNetModel(nn.Module):
         super().__init__()
         self.bilinear = bilinear
 
-        self.inc = self.inc = DoubleConv(state_space_size, 64, res=res)
-        
+        self.inc = DoubleConv(state_space_size, 64, res=res)
         self.down1 = Down(64, 128, res=res)
         self.down2 = Down(128, 256, res=res)
         self.down3 = Down(256, 256, res=res)
 
-        #
         factor = 2 if bilinear else 1
+
+        # グローバル状態の情報を統合した後の特徴マップを各タスクに分岐
         self.up1 = Up(256 * 2 + global_state_space_size, 256 // factor, bilinear)
         self.up2 = Up(256, 128 // factor, bilinear)
         self.up3 = Up(128, 64, bilinear)
-        self.policy_net = OutConv(64 * n_stack, action_space_size)
-        # self.sap_net = OutConv(64 * n_stack, 1)
-        self.state_net = OutConv(64 * n_stack, hidden_state_space_size)
-        self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
-        # self.value_net = nn.Sequential(
-        #     nn.Linear((256 + global_state_space_size) * n_stack, 128),
-        #     nn.ReLU(),
-        #     nn.Linear(128, 64),
-        #     nn.ReLU(),
-        #     nn.Linear(64, 1),
-        # )
-        self.global_state_net = nn.Sequential(
-            nn.Linear((256 + global_state_space_size) * n_stack, 128),
-            nn.ReLU(),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, len(HiddenGlobalState)),
+        self.sap_net1 = ResidualBlock(
+            64 * n_stack, 64, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False
         )
+        self.sap_net2 = ResidualBlock(64, 64, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False)
+        self.sap_net3 = OutConvWithNorm(64, 1)  # かなり極端な値を出力するので正規化することで学習を安定化させる
+        # sap候補位置をpolicyの特徴マップに統合. sap rangeの最大値が7なのでkernel_size=15にしている
+        self.policy_net1_from_sap = ResidualBlock(
+            1, 16, EnvParams.map_width, EnvParams.map_width, kernel_size=15, squeeze_excitation=False
+        )
+        self.concat_norm = nn.BatchNorm2d(64 * n_stack + 16)
+        self.policy_net2 = ResidualBlock(
+            64 * n_stack + 16, 64, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False
+        )
+        self.policy_net3 = ResidualBlock(64, 64, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False)
+        self.policy_net4 = OutConv(64, action_space_size)  # ここでWithNormを使うとCenterが全部Sapと予測されてしまった。
 
     def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         state = batch["state"]
@@ -569,24 +593,34 @@ class LuxUNetModel(nn.Module):
         gx = gx.repeat(1, 1, sx, sy)
 
         x4 = torch.cat([x4, gx], dim=1)
-        x = self.global_avg_pool(x4).view(_n, -1)
+        # x = self.global_avg_pool(x4).view(_n, -1)
         # value_logits = self.value_net(x)
-        global_state_logits = self.global_state_net(x)
+        # global_state_logits = self.global_state_net(x)
 
         x = self.up1(x4, x3)
         x = self.up2(x, x2)
         x = self.up3(x, x1)
-
         x = x.view(_n, -1, _x, _y)
-        policy_logits = self.policy_net(x)
-        # sap_logits = self.sap_net(x)
-        state_logits = self.state_net(x)
+
+        sap_logits1 = self.sap_net1(x)
+        sap_logits2 = self.sap_net2(sap_logits1)
+        sap_logits = self.sap_net3(sap_logits2)
+
+        # sap_net の出力は logits のまま扱う(ここで sigmoid はかけない)
+        policy_logits1 = self.policy_net1_from_sap(sap_logits)
+        # x は [N, 64*n_stack, H, W]、policy_logits1 は [N, 16, H, W] なので連結後のチャネル数は 64*n_stack+16
+        policy_features = torch.cat([x, policy_logits1], dim=1)
+        # 連結後に正規化を適用
+        policy_features = self.concat_norm(policy_features)
+        policy_logits = self.policy_net2(policy_features)
+        policy_logits = self.policy_net3(policy_logits)
+        policy_logits = self.policy_net4(policy_logits)
 
         return {
             "policy": policy_logits,
-            # "sap": sap_logits,
-            "state": state_logits,
-            "global_state": global_state_logits,
+            "sap": sap_logits,
+            # "state": state_logits,
+            # "global_state": global_state_logits,
             # "value": value_logits,
         }
 
