@@ -72,7 +72,7 @@ LB_BEST_POLICY = "lb_best"  # TODO: モデルや特徴量が異なるため未�
 class Config:
     exp_name: str = Path(__file__).parent.name
     is_gcp: bool = False
-    notes: str = "maskをする"
+    notes: str = "自陣のバグ修正。lux1stのパラメータで学習"
     model_name: str = "lux_unet"
     env_name: str = "lux-s3-v0"
     n_stack: int = 4
@@ -127,9 +127,9 @@ class Config:
 
     def __post_init__(self):
         if self.is_gcp:
-            self.num_env_runners: int = 96 - 4 - 10  # actorの数
-            self.num_learners: int = 4
-            self.evaluation_num_env_runners: int = 10
+            self.num_env_runners: int = 96 - 1 - 15  # actorの数
+            self.num_learners: int = 0
+            self.evaluation_num_env_runners: int = 15
             self.learner_queue_size: int = 100
 
         if self.debug:
@@ -137,7 +137,7 @@ class Config:
             self.num_cpus_per_env_runner = 1
             self.evaluation_num_env_runners = 1
             self.evaluation_interval = 1
-            self.evaluation_duration = 5
+            self.evaluation_duration = 2
             # self.evaluation_parallel_to_training = False
             self.training_minutes = 10
             self.learner_queue_size = 1
