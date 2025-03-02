@@ -34,16 +34,16 @@ class Config:
     output_dir = root_dir / f"exp/{exp_name}/output"
 
     # trainer
-    epoch: int = 30
+    epoch: int = 10
     limit_train_batches: float = 1.0
     limit_val_batches: float = 1.0
     use_amp: bool = True
     batch_size: int = 512
     num_workers: int = 24
-    ckpt_path: str = None
+    ckpt_path: str = "agents/exp622_epoch21/output/best_model.ckpt"
     lr: float = 0.001
     weight_decay: float = 0.01
-    warmup_step_rate: float = 0.0  # no warmup
+    warmup_step_rate: float = 0.1
     
     # model
     num_repeats: int = 3
@@ -52,13 +52,14 @@ class Config:
     n_stack: int = 8
     kernel_size: int = 5
     aug: bool = True
+    freeze: bool = True
     
     # loss
-    loss_weight_policy: float = 1.0
+    loss_weight_policy: float = 0
     loss_weight_state: float = 1.0
     loss_weight_global_state: float = 0.0
     # loss_weight_value: float = 0.0
-    loss_weight_sap: float = 0.1
+    loss_weight_sap: float = 1
 
     @classmethod
     def from_args(cls) -> "Config":
@@ -132,7 +133,7 @@ class TrainPipeline:
 
     def setup_model(self) -> None:
         if self.cfg.ckpt_path:
-            self.model = LaxLitModel.load_from_checkpoint(self.cfg.ckpt_path, cfg=self.cfg)
+            self.model = LaxLitModel.load_from_checkpoint(self.cfg.ckpt_path, cfg=self.cfg, strict=False)
         else:
             self.model = LaxLitModel(self.cfg)
         

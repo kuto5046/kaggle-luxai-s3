@@ -16,7 +16,7 @@ from torchmetrics import Accuracy, MetricCollection
 from transformers import get_cosine_schedule_with_warmup
 from torch.utils.data import Dataset, DataLoader
 
-from .utils import State, Action, GlobalState, HiddenState, HiddenGlobalState, to_np
+from .utils import State, Action, GlobalState, to_np
 from .params import EnvParams
 
 
@@ -228,12 +228,14 @@ class LaxLitModel(LightningModule):
             state_space_size=len(State),
             global_state_space_size=len(GlobalState),
             action_space_size=len(Action),
-            hidden_state_space_size=len(HiddenState),
             num_repeats=cfg.num_repeats,
             num_layers=cfg.num_layers,
             hidden_dim=cfg.hidden_dim, 
             kernel_size=cfg.kernel_size,
         )
+        if self.cfg.freeze:
+            self.freeze()
+        
         self.criterion1 = DiceLoss(n_classes=len(Action))
         # self.criterion1 = MaskedBCEWithLogitsLoss()
         self.criterion2 = nn.BCEWithLogitsLoss()
@@ -247,6 +249,14 @@ class LaxLitModel(LightningModule):
         self.valid_metrics = metrics.clone(postfix="/valid")
         self.valid_outputs = {"ground_truth": [], "predictions": []}
 
+    def freeze(self):
+        for param in self.model.inc.parameters():
+            param.requires_grad = False
+        for param in self.model.drc.parameters():
+            param.requires_grad = False
+        for param in self.model.policy_net.parameters():
+            param.requires_grad = False
+            
     def forward(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
         return self.model(batch)
 
@@ -710,7 +720,6 @@ class LuxConvLSTMModel(nn.Module):
         state_space_size: int,
         global_state_space_size: int,
         action_space_size: int,
-        hidden_state_space_size: int,
         num_layers: int,
         hidden_dim: int, 
         kernel_size: int = 3,
@@ -733,14 +742,10 @@ class LuxConvLSTMModel(nn.Module):
         )
 
         self.policy_net = OutConv(self.hidden_dim, action_space_size)
-        self.state_net = OutConv(self.hidden_dim, hidden_state_space_size)
-        self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
-        self.global_state_net = nn.Sequential(
-            nn.Linear(self.hidden_dim, self.hidden_dim),
-            nn.ReLU(),
-            nn.Linear(self.hidden_dim, self.hidden_dim // 2),
-            nn.ReLU(),
-            nn.Linear(self.hidden_dim // 2, len(HiddenGlobalState)),
+        self.sap_net = nn.Sequential(
+            ResidualBlock(self.hidden_dim, self.hidden_dim, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False),
+            ResidualBlock(self.hidden_dim, self.hidden_dim, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False),
+            OutConvWithNorm(self.hidden_dim, 1)
         )
 
 
@@ -758,16 +763,12 @@ class LuxConvLSTMModel(nn.Module):
             xt = self.inc(xt)
             xt, hidden = self.drc(xt, hidden, num_repeats=self.num_repeats)    
        
-        x_global = self.global_avg_pool(xt).view(_n, -1)
-        global_state_logits = self.global_state_net(x_global)
-
         policy_logits = self.policy_net(xt)
-        state_logits = self.state_net(xt)
-
+        sap_logits = self.sap_net(xt)
+        
         return {
             "policy": policy_logits,
-            "state": state_logits,
-            "global_state": global_state_logits,
+            "sap": sap_logits
         }
 
 
