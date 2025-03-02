@@ -66,10 +66,14 @@ def get_kfold(train: pl.DataFrame, n_splits: int, seed: int = 0) -> pl.DataFrame
 
 def valid_episode(json_load: dict[str, Any], target_team_name: str) -> bool:
     """対象のチームが勝利してるepisodeのみ有効"""
-    for r in json_load["rewards"]:
-        if r is None:
-            print(f"rewards include None -> {json_load['rewards']}")
-            return False
+    try:
+        for r in json_load["rewards"]:
+            if r is None:
+                print(f"rewards include None -> {json_load['rewards']}")
+                return False
+    except KeyError:
+        print("no rewards in json")
+        return False
     win_idx = np.argmax([r or 0 for r in json_load["rewards"]])  # win or tie
     win_team = json_load["info"]["TeamNames"][win_idx]
     return win_team == target_team_name
