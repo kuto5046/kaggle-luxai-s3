@@ -112,8 +112,8 @@ class Config:
     # learner
     training_minutes: int = 60 * 24  # 1日
     learner_queue_size: int = 20  # workerからLearnerに送られるバッチのキューの最大サイズ. [batch_size]*queue_sizeがcpuメモリに乗りbatchごとに学習する
-    gamma: float = 0.99
-    lr: float = 1e-5
+    gamma: float = 0.9995
+    lr: float = 5e-5
     # batch size 一応1episodeのサイズにしてるが不要かも。もしくはrollout_fragment_length部分で調整する
     train_batch_size_per_learner: int = 512
     # 1回の学習データ(train_batch_size*queue_size)を何epoch分学習するか
@@ -123,7 +123,7 @@ class Config:
     vtrace_clip_rho_threshold: float = 1.0  # 価値関数のlossの係数
     vtrace_clip_pg_rho_threshold: float = 1.0  # ポリシー勾配のlossの係数
     vf_loss_coeff: float = 1.0  # 価値関数のlossの係数
-    entropy_coeff: float = 0.001  # エントロピーのlossの係数(大きくすると探索が活発になる)
+    entropy_coeff: float = 1e-5  # エントロピーのlossの係数(大きくすると探索が活発になる)
 
     def __post_init__(self):
         if self.is_gcp:
