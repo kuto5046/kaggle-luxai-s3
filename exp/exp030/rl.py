@@ -22,7 +22,6 @@ from lux.utils import (
     EpisodeStore,
     to_np,
     extract_state,
-    switch_action,
     calc_relative_pos,
     extract_global_state,
     get_valid_policy_map,
@@ -258,6 +257,7 @@ class RLLibLuxEnv(MultiAgentEnv):
                     shape=(len(Action), EnvParams.map_height, EnvParams.map_width),
                     dtype=np.float32,
                 ),
+                "player_id": gym.spaces.Discrete(2),
             }
         )
         return {"player_0": observation_space, "player_1": observation_space}
@@ -339,13 +339,13 @@ class RLLibLuxEnv(MultiAgentEnv):
                 "state": np.stack(list(self.agent0_states), axis=0),
                 "global_state": np.stack(list(self.agent0_global_states), axis=0),
                 "legal_action_mask": agent0_legal_action_mask,
-                "player_id": "player_0",
+                "player_id": 0,
             },
             "player_1": {
                 "state": np.stack(list(self.agent1_states), axis=0),
                 "global_state": np.stack(list(self.agent1_global_states), axis=0),
                 "legal_action_mask": agent1_legal_action_mask,
-                "player_id": "player_1",
+                "player_id": 1,
             },
         }
 
@@ -355,11 +355,6 @@ class RLLibLuxEnv(MultiAgentEnv):
         # 1次元マップの行動空間で渡ってくるので2次元マップに変換
         action_map1 = action_dict["player_0"].reshape(EnvParams.map_height, EnvParams.map_width)
         action_map2 = action_dict["player_1"].reshape(EnvParams.map_height, EnvParams.map_width)
-
-        # 自陣を(0, 0)に固定していたものを元の位置に戻す
-        action_map2 = np.flip(action_map2, [0, 1]).copy()  # x, y軸反転
-        action_map2 = switch_action(action_map2, Action.RIGHT, Action.LEFT)
-        action_map2 = switch_action(action_map2, Action.UP, Action.DOWN)
 
         point_map1 = self.agent0_states[-1][State.POINTS]
         point_map2 = self.agent1_states[-1][State.POINTS]
@@ -450,17 +445,18 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
         policy_logits = outputs["policy"]
         player_id = batch[Columns.OBS]["player_id"]
 
-        # 自陣を復元する
-        if player_id == "player_1":
-            policy_logits = torch.flip(policy_logits, [1, 2])
-            policy_logits[:, Action.UP, :, :], policy_logits[:, Action.DOWN, :, :] = (
-                policy_logits[:, Action.DOWN, :, :].clone(),
-                policy_logits[:, Action.UP, :, :].clone(),
-            )
-            policy_logits[:, Action.LEFT, :, :], policy_logits[:, Action.RIGHT, :, :] = (
-                policy_logits[:, Action.RIGHT, :, :].clone(),
-                policy_logits[:, Action.LEFT, :, :].clone(),
-            )
+        # player_id1のポリシーを反転して自陣を復元する(自陣固定の後処理)
+        player_1_mask = (player_id == 1).view(-1, 1, 1, 1)  # バッチ次元に合わせてブロードキャスト可能な形に変換
+        flipped_policy_logits = torch.flip(policy_logits, [2, 3]).clone()
+        flipped_policy_logits[:, Action.DOWN, :, :], flipped_policy_logits[:, Action.UP, :, :] = (
+            flipped_policy_logits[:, Action.UP, :, :].clone(),
+            flipped_policy_logits[:, Action.DOWN, :, :].clone(),
+        )
+        flipped_policy_logits[:, Action.RIGHT, :, :], flipped_policy_logits[:, Action.LEFT, :, :] = (
+            flipped_policy_logits[:, Action.LEFT, :, :].clone(),
+            flipped_policy_logits[:, Action.RIGHT, :, :].clone(),
+        )
+        policy_logits = torch.where(player_1_mask, flipped_policy_logits, policy_logits)
 
         num_actions = policy_logits.shape[1]
         # stateは(batch, stack, ch, height, width)なので最新のunit位置を以下のように取得(batch, height, width)
