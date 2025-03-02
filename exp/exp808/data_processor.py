@@ -116,6 +116,9 @@ class DataProcessor:
         except json.JSONDecodeError as e:
             print(f"EpisodeId {episode_id}: {e}")
             return None
+        except gzip.BadGzipFile as e:
+            print(f"EpisodeId {episode_id}: {e}")
+            return None
 
         # 無効なepisodeはスキップ(valueも学習したいのでskip)
         if not valid_episode(json_load, self.cfg.target_team_name):

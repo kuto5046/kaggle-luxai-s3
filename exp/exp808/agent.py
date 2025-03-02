@@ -11,6 +11,7 @@ from lux.utils import (
     State,
     Action,
     GlobalState,
+    HiddenState,
     EpisodeStore,
     in_map,
     calc_next_pos,
@@ -22,7 +23,7 @@ from lux.utils import (
     get_nearby_enemy_unit_ids,
     get_nearby_point_positions,
 )
-from lux.models import LuxUNetModel
+from lux.models import LuxConvLSTMModel
 from lux.params import EnvParams
 from scipy.special import softmax
 
@@ -32,9 +33,16 @@ class Config:
     # 確率的な行動を取るかどうか
     stochastic: bool = True  # Falseにするとargmaxで行動を選択する
     res: bool = True
-    n_stack: int = 4
     # 同じマスに複数のユニットが移動する場合のペナルティ、0=重複を許可(greedy)、1=重複を禁止
     overlap_penalty: float = 2.0
+
+    # model
+    n_stack: int = 8
+    n_stack_model: int = 1
+    num_layers: int = 3
+    hidden_dim: int = 64
+    kernel_size: int = 5
+    num_repeats: int = 3
 
     tta: bool = False
 
@@ -119,13 +127,17 @@ class MinimumCostFlow:
 
 
 class ILAgent:
-    def __init__(self, env_cfg: EnvParams, checkpoint_path: Path, n_stack: int, res: bool = True) -> None:
-        self.model = LuxUNetModel(
+    def __init__(self, env_cfg: EnvParams, checkpoint_path: Path, n_stack: int) -> None:
+        self.model = LuxConvLSTMModel(
             state_space_size=len(State),
             global_state_space_size=len(GlobalState),
             action_space_size=len(Action),
-            n_stack=n_stack,
-            res=res,
+            n_stack=cfg.n_stack_model,
+            hidden_state_space_size=len(HiddenState),
+            num_layers=cfg.num_layers,
+            hidden_dim=cfg.hidden_dim,
+            kernel_size=cfg.kernel_size,
+            num_repeats=cfg.num_repeats,
         )
         ckpt = torch.load(checkpoint_path, weights_only=True, map_location="cpu")
         state_dict = {k.replace("model.", ""): v for k, v in ckpt["state_dict"].items()}
@@ -253,7 +265,7 @@ class SingleSapInfo:
 
 cfg = Config()
 seed_everything(cfg.seed, workers=True)
-imitation_model = ILAgent(EnvParams, cfg.checkpoint_path, cfg.n_stack, cfg.res)
+imitation_model = ILAgent(EnvParams, cfg.checkpoint_path, cfg.n_stack)
 
 
 class Agent:
@@ -413,7 +425,12 @@ class Agent:
             if selected_action is None:
                 actions[unit_id] = [Action.CENTER, 0, 0]
             else:
-                actions[unit_id] = [selected_action["action_id"], 0, 0]
+                try:
+                    actions[unit_id] = [selected_action["action_id"], 0, 0]
+                except (TypeError, KeyError):
+                    # selected_actionが辞書でない、またはaction_idキーがない場合
+                    print(f"Warning: Invalid selected_action: {selected_action}")
+                    actions[unit_id] = [Action.CENTER, 0, 0]
 
         # for unit_id in available_unit_ids:
         #     print(actions[unit_id], file=sys.stderr)
