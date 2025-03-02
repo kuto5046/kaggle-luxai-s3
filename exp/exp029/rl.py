@@ -636,10 +636,6 @@ class WandbLoggerCallback(RLlibCallback):
         if "learners" not in result:
             return
 
-        # 学習データが溜まっていない状態？
-        if "env_runners" not in result:
-            return
-
         # 1回の学習で学習したデータ数
         time_this_iter_s = result["time_this_iter_s"]
         time_total_s = result["time_total_s"]
@@ -650,12 +646,21 @@ class WandbLoggerCallback(RLlibCallback):
         wandb.log(
             {
                 "train/training_iteration": result["timers"]["training_iteration"],  # 何回めの学習か
-                "train/env_runner_time_between_sampling": result["env_runners"]["time_between_sampling"],
                 "train/time_this_iter_s": time_this_iter_s,  # 1回の学習時間
                 "train/time_total_s": time_total_s,  # 学習総時間
                 "train/num_training_step_calls_per_iteration": num_training_step_calls_per_iteration,  # 1回の学習で何回training_stepが呼ばれたか
             }
         )
+
+        # 学習データのサンプリング時間
+        if result.get("env_runners"):
+            if result["env_runners"].get("time_between_sampling"):
+                wandb.log(
+                    {
+                        "train/env_runner_time_between_sampling": result["env_runners"]["time_between_sampling"],
+                    }
+                )
+
         # learner_metrics = result["learners"][OWN_POLICY].keys()
         learner_metrics = [
             # "num_non_trainable_parameters",  # 一定
