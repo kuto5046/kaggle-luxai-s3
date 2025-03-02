@@ -1,3 +1,4 @@
+import gzip
 import json
 import shutil
 import logging
@@ -103,10 +104,10 @@ class DataProcessor:
     def _process_episode(self, row) -> tuple[str, int, int]:
         sub_id = row["SubmissionId"]
         episode_id = row["EpisodeId"]
-        episode_path = self.episode_dir / f"{sub_id}/{episode_id}.json"
+        episode_path = self.episode_dir / f"{sub_id}/{episode_id}.json.gz"
 
         try:
-            with open(episode_path) as f:
+            with gzip.open(episode_path, "rt") as f:
                 json_load = json.load(f)
         except json.JSONDecodeError as e:
             print(f"EpisodeId {episode_id}: {e}")
