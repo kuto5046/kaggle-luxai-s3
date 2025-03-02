@@ -11,7 +11,6 @@ import ray
 import flax
 import numpy as np
 import torch
-import wandb
 import gymnasium as gym
 import jax.numpy as jnp
 import flax.serialization
@@ -59,6 +58,8 @@ from ray.rllib.algorithms.impala.torch.vtrace_torch_v2 import (
     make_time_major,
 )
 
+import wandb
+
 # policy名
 OWN_POLICY = "p0"
 SELF_PLAY_POLICY = (
@@ -90,13 +91,13 @@ class Config:
     rollout_fragment_length: int | str | None = "auto"  # 考慮したいstep数を設定してやる autoが推奨されている
 
     # 学習用(GPUの数=learnerと考えて良い)
-    num_learners: int = 4  # IMPALAの場合gpuが1つなら0に設定するとlocal learnerとして扱われる、処理が早くなる
+    num_learners: int = 0  # IMPALAの場合gpuが1つなら0に設定するとlocal learnerとして扱われる、処理が早くなる
     num_cpus_per_learner: int = 1
     num_gpus_per_learner: int = 1
 
     # 評価用
     evaluation_num_env_runners: int = 6  # 評価用のenv runnerの数
-    evaluation_interval: int = 10  # 何回trainをしたら評価を実施するか
+    evaluation_interval: int = 20  # 何回trainをしたら評価を実施するか
     evaluation_duration: int = (
         30  # 1回の評価で何エピソード分評価するか(学習と並列してやるため達成できないこともあるかも)
     )
@@ -445,7 +446,7 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
         num_actions = policy_logits.shape[1]
         # stateは(batch, stack, ch, height, width)なので最新のunit位置を以下のように取得(batch, height, width)
         unit_mask = batch[Columns.OBS]["state"][:, -1, State.OWN_UNIT_COUNT] > 0
-        action_mask = batch[Columns.OBS]["legal_action_mask"]
+        # action_mask = batch[Columns.OBS]["legal_action_mask"]
         # 無効な行動(action_mask=0)は負の大きな値になるためsoftmax後は0になる。
         # MEMO: 自陣固定対応のaction_maskの挙動が怪しいのでひとまず適用しないでおく
         # masked_policy_logits = policy_logits - 1e32 * (1 - action_mask)

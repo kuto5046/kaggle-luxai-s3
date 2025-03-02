@@ -73,7 +73,7 @@ LB_BEST_POLICY = "lb_best"  # TODO: モデルや特徴量が異なるため未�
 class Config:
     exp_name: str = Path(__file__).parent.name
     is_gcp: bool = False
-    notes: str = "entropy、rollout_length, 評価パラメータを変更。ログ周り修正"
+    notes: str = "パラメータをlux s2のRL解法に寄せてみる"
     model_name: str = "lux_unet"
     env_name: str = "lux-s3-v0"
     n_stack: int = 4
@@ -113,7 +113,7 @@ class Config:
     # learner
     training_minutes: int = 60 * 24  # 1日
     learner_queue_size: int = 20  # workerからLearnerに送られるバッチのキューの最大サイズ. [batch_size]*queue_sizeがcpuメモリに乗りbatchごとに学習する
-    gamma: float = 0.99
+    gamma: float = 0.9995
     lr: float = 1e-5
     # batch size 一応1episodeのサイズにしてるが不要かも。もしくはrollout_fragment_length部分で調整する
     train_batch_size_per_learner: int = 512
@@ -124,14 +124,15 @@ class Config:
     vtrace_clip_rho_threshold: float = 1.0  # 価値関数のlossの係数
     vtrace_clip_pg_rho_threshold: float = 1.0  # ポリシー勾配のlossの係数
     vf_loss_coeff: float = 1.0  # 価値関数のlossの係数
-    entropy_coeff: float = 0.001  # エントロピーのlossの係数(大きくすると探索が活発になる)
+    entropy_coeff: float = 1e-5  # エントロピーのlossの係数(大きくすると探索が活発になる)
 
     def __post_init__(self):
         if self.is_gcp:
-            self.num_env_runners: int = 96 - 4 - 10  # actorの数
-            self.num_learners: int = 4
-            self.evaluation_num_env_runners: int = 10
+            self.num_env_runners: int = 96 - 4 - 15  # actorの数
+            self.num_learners: int = 0
+            self.evaluation_num_env_runners: int = 15
             self.learner_queue_size: int = 100
+            self.rollout_fragment_length = 505
 
         if self.debug:
             self.num_env_runners = 1

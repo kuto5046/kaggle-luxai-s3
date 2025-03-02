@@ -13,7 +13,7 @@ wandb
 lightning
 # exp/bestはignoreしない
 !exp/best/output/*.ckpt
-
+*.pth
 *tar.gz
 *.json
 *.ipynb
