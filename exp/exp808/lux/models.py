@@ -234,7 +234,7 @@ class LaxLitModel(LightningModule):
             num_layers=cfg.num_layers,
             hidden_dim=cfg.hidden_dim,
             kernel_size=cfg.kernel_size,
-            n_stack=cfg.n_stack,
+            n_stack=cfg.n_stack_model,
         )
 
         self.criterion1 = DiceLoss(n_classes=len(Action))
@@ -650,20 +650,36 @@ class LuxConvLSTMModel(nn.Module):
         )
 
         self.sap_net1 = ResidualBlock(
-            64 * n_stack, 64, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False
+            self.hidden_dim * n_stack,
+            self.hidden_dim,
+            EnvParams.map_width,
+            EnvParams.map_width,
+            squeeze_excitation=False,
         )
-        self.sap_net2 = ResidualBlock(64, 64, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False)
-        self.sap_net3 = OutConvWithNorm(64, 1)  # かなり極端な値を出力するので正規化することで学習を安定化させる
+        self.sap_net2 = ResidualBlock(
+            self.hidden_dim, self.hidden_dim, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False
+        )
+        self.sap_net3 = OutConvWithNorm(
+            self.hidden_dim, 1
+        )  # かなり極端な値を出力するので正規化することで学習を安定化させる
         # sap候補位置をpolicyの特徴マップに統合. sap rangeの最大値が7なのでkernel_size=15にしている
         self.policy_net1_from_sap = ResidualBlock(
             1, 16, EnvParams.map_width, EnvParams.map_width, kernel_size=15, squeeze_excitation=False
         )
-        self.concat_norm = nn.BatchNorm2d(64 * n_stack + 16)
+        self.concat_norm = nn.BatchNorm2d(self.hidden_dim * n_stack + 16)
         self.policy_net2 = ResidualBlock(
-            64 * n_stack + 16, 64, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False
+            self.hidden_dim * n_stack + 16,
+            self.hidden_dim,
+            EnvParams.map_width,
+            EnvParams.map_width,
+            squeeze_excitation=False,
         )
-        self.policy_net3 = ResidualBlock(64, 64, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False)
-        self.policy_net4 = OutConv(64, action_space_size)  # ここでWithNormを使うとCenterが全部Sapと予測されてしまった。
+        self.policy_net3 = ResidualBlock(
+            self.hidden_dim, self.hidden_dim, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False
+        )
+        self.policy_net4 = OutConv(
+            self.hidden_dim, action_space_size
+        )  # ここでWithNormを使うとCenterが全部Sapと予測されてしまった。
 
         self.state_net = OutConv(self.hidden_dim, hidden_state_space_size)
         self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
