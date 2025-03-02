@@ -16,7 +16,7 @@ from torchmetrics import Accuracy, MetricCollection
 from transformers import get_cosine_schedule_with_warmup
 from torch.utils.data import Dataset, DataLoader
 
-from .utils import State, Action, GlobalState, HiddenState, to_np
+from .utils import State, Action, GlobalState, HiddenState, HiddenGlobalState, to_np
 from .params import EnvParams
 
 
@@ -770,6 +770,161 @@ class LuxConvLSTMModel(nn.Module):
             "global_state": global_state_logits,
         }
 
+
+class MaskedFocalTverskyLoss(nn.Module):
+    def __init__(
+        self, alpha: float = 0.5, beta: float = 0.5, gamma: float = 1.0, smooth: float = 1e-6, reduction: str = "mean"
+    ):
+        """
+        Focal Tversky Loss with mask support.
+        :param alpha: False Positive に対する重み (通常 0.5)
+        :param beta: False Negative に対する重み (通常 0.5)
+        :param gamma: Focal項のパラメータ。gamma > 1 で難しい例に注目
+        :param smooth: 数値安定性のためのスムージング項
+        :param reduction: 'mean' もしくは 'sum'
+        ※この損失関数は、モデルの出力として logitsd(シグモイド未適用値)を入力として受け取ります。
+        """
+        super().__init__()
+        self.alpha = alpha
+        self.beta = beta
+        self.gamma = gamma
+        self.smooth = smooth
+        self.reduction = reduction
+
+    def forward(self, inputs: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """
+        :param inputs: 予測値。logitsd(シグモイド未適用値)を想定。
+                       形状は (batch, ...) であることを前提とする。
+        :param targets: 教師ラベル。0/1のバイナリマスク。
+        :param mask: 損失計算対象となる領域を示すバイナリマスク。inputs と同じ形状。
+        :return: Focal Tversky Loss
+        """
+        # logits から確率値に変換
+        inputs = torch.sigmoid(inputs)
+        # 入力、ターゲット、mask を (batch, -1) にフラット化
+        inputs = inputs.view(inputs.size(0), -1)
+        targets = targets.view(targets.size(0), -1).float()
+        mask = mask.view(mask.size(0), -1).float()
+
+        # マスクを考慮してTP, FP, FNを計算
+        TP = (inputs * targets * mask).sum(dim=1)
+        FP = (inputs * (1 - targets) * mask).sum(dim=1)
+        FN = ((1 - inputs) * targets * mask).sum(dim=1)
+
+        Tversky = (TP + self.smooth) / (TP + self.alpha * FP + self.beta * FN + self.smooth)
+        focal_loss = (1 - Tversky) ** self.gamma
+
+        if self.reduction == "mean":
+            return focal_loss.mean()
+        elif self.reduction == "sum":
+            return focal_loss.sum()
+        else:
+            return focal_loss
+
+
+class SELayer(nn.Module):
+    def __init__(self, n_channels: int, reduction: int = 16):
+        """
+        Squeeze-and-Excitation (SE) Layer.
+        Args:
+            n_channels (int): 入力のチャネル数
+            reduction (int): 圧縮率 (デフォルト: 16)
+        """
+        super().__init__()
+        self.fc = nn.Sequential(
+            nn.Linear(n_channels, n_channels // reduction, bias=False),
+            nn.LeakyReLU(inplace=True),
+            nn.Linear(n_channels // reduction, n_channels, bias=False),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x (torch.Tensor): 入力テンソル (B, C, H, W)
+
+        Returns:
+            torch.Tensor: チャネルごとのスケーリングを適用した出力テンソル
+        """
+        b, c, _, _ = x.shape
+
+        # グローバル平均プーリング (B, C, 1, 1)
+        y = x.mean(dim=[2, 3], keepdim=True)
+
+        # FC層を適用してチャネルごとの重みを学習 (B, C, 1, 1)
+        y = self.fc(y.view(b, c)).view(b, c, 1, 1)
+
+        # スケール適用
+        return x * y.expand_as(x)
+
+
+class ResidualBlock(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        height: int,
+        width: int,
+        kernel_size: int = 3,
+        normalize: bool = False,
+        activation=nn.LeakyReLU,
+        squeeze_excitation: bool = True,
+        rescale_se_input: bool = True,
+        **conv2d_kwargs,
+    ):
+        super().__init__()
+
+        # Calculate "same" padding
+        # https://pytorch.org/docs/stable/generated/torch.nn.Conv2d.html
+        # https://www.wolframalpha.com/input/?i=i%3D%28i%2B2x-k-%28k-1%29%28d-1%29%2Fs%29+%2B+1&assumption=%22i%22+-%3E+%22Variable%22
+        assert "padding" not in conv2d_kwargs.keys()
+        k = kernel_size
+        d = conv2d_kwargs.get("dilation", 1)
+        s = conv2d_kwargs.get("stride", 1)
+        padding = (k - 1) * (d + s - 1) / (2 * s)
+        assert padding == int(padding), f"padding should be an integer, was {padding:.2f}"
+        padding = int(padding)
+
+        self.conv1 = nn.Conv2d(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=(kernel_size, kernel_size),
+            padding=(padding, padding),
+            **conv2d_kwargs,
+        )
+        # We use LayerNorm here since the size of the input "images" may vary based on the board size
+        self.norm1 = nn.LayerNorm([out_channels, height, width]) if normalize else nn.Identity()
+        self.act1 = activation()
+
+        self.conv2 = nn.Conv2d(
+            in_channels=out_channels,
+            out_channels=out_channels,
+            kernel_size=(kernel_size, kernel_size),
+            padding=(padding, padding),
+            **conv2d_kwargs,
+        )
+        self.norm2 = nn.LayerNorm([out_channels, height, width]) if normalize else nn.Identity()
+        self.final_act = activation()
+
+        if in_channels != out_channels:
+            self.change_n_channels = nn.Conv2d(in_channels, out_channels, (1, 1))
+        else:
+            self.change_n_channels = nn.Identity()
+
+        if squeeze_excitation:
+            self.squeeze_excitation = SELayer(out_channels, rescale_se_input)
+        else:
+            self.squeeze_excitation = nn.Identity()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        identity = x
+        x = self.conv1(x)
+        x = self.act1(self.norm1(x))
+        x = self.conv2(x)
+        x = self.squeeze_excitation(self.norm2(x))
+        x = x + self.change_n_channels(identity)
+        return self.final_act(x)
+    
 
 def save_model(model, output_dir: Path, latest: bool = False):
     if latest:
