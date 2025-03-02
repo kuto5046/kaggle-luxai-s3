@@ -28,7 +28,7 @@ class Config:
     debug: bool = False
     n_splits: int = 5
     use_fold: int = 0
-    root_dir: Path = Path("/home/user/work")
+    root_dir: Path = Path("/workspace/kaggle-luxai-s3")
     feature_version: str = exp_name
     feature_dir: Path = root_dir / f"output/feature_store/{feature_version}"
     output_dir = root_dir / f"exp/{exp_name}/output"
@@ -47,7 +47,11 @@ class Config:
     # model
     res: bool = True
     aug: bool = True
-    n_stack: int = 4
+    n_stack: int = 8
+    num_repeats: int = 3
+    num_layers: int = 3
+    hidden_dim: int = 64
+    kernel_size: int = 5
     # loss
     loss_weight_policy: float = 1.0
     loss_weight_state: float = 1.0
@@ -115,7 +119,7 @@ class TrainPipeline:
     def setup_logger(self) -> None:
         self.pl_logger = WandbLogger(
             project="kaggle-luxai-s3",
-            entity="kawattataido",
+            entity="kibuna",
             # name=f"{self.cfg.exp_name}",
             group=self.cfg.exp_name,
             mode="disabled" if self.cfg.debug else "online",
