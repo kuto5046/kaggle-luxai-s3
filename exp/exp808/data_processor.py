@@ -159,20 +159,22 @@ class DataProcessor:
                     state = extract_gt_state(gt_obs, target_team_id)
                 else:
                     state = extract_state(obs, target_team_id, episode_store)
-                episode_state_group.create_dataset(f"{step_idx}", data=state)
+                episode_state_group.create_dataset(f"{step_idx}", data=state, compression="gzip")
 
                 global_state = extract_global_state(obs, target_team_id, env_params, episode_store)
-                episode_global_state_group.create_dataset(f"{step_idx}", data=global_state)
+                episode_global_state_group.create_dataset(f"{step_idx}", data=global_state, compression="gzip")
 
                 hidden_state = extract_hidden_state(gt_obs, target_team_id)
-                episode_hidden_state_group.create_dataset(f"{step_idx}", data=hidden_state)
+                episode_hidden_state_group.create_dataset(f"{step_idx}", data=hidden_state, compression="gzip")
 
                 hidden_global_state = extract_hidden_global_state(gt_env_params)
-                episode_hidden_global_state_group.create_dataset(f"{step_idx}", data=hidden_global_state)
+                episode_hidden_global_state_group.create_dataset(
+                    f"{step_idx}", data=hidden_global_state, compression="gzip"
+                )
 
                 next_actions = next_step_info[target_team_id]["action"]
                 action = extract_action(next_actions, obs, target_team_id)
-                episode_action_group.create_dataset(f"{step_idx}", data=action)
+                episode_action_group.create_dataset(f"{step_idx}", data=action, compression="gzip")
 
                 match_idx = obs["steps"] // (EnvParams.max_steps_in_match + 1)
                 is_win = match_results[match_idx]
