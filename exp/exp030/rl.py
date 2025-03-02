@@ -73,7 +73,7 @@ LB_BEST_POLICY = "lb_best"  # TODO: モデルや特徴量が異なるため未�
 class Config:
     exp_name: str = Path(__file__).parent.name
     is_gcp: bool = False
-    notes: str = "entropy、rollout_length, 評価パラメータを変更。ログ周り修正"
+    notes: str = "maskをする"
     model_name: str = "lux_unet"
     env_name: str = "lux-s3-v0"
     n_stack: int = 4
@@ -329,17 +329,7 @@ class RLLibLuxEnv(MultiAgentEnv):
         agent1_global_state = extract_global_state(obs["player_1"], 1, self.env_params, self.episode_store2)
         agent0_legal_action_mask = get_valid_policy_map(obs["player_0"], 0, self.episode_store1)
         agent1_legal_action_mask = get_valid_policy_map(obs["player_1"], 1, self.episode_store2)
-        # 自陣が(0, 0)になるようにmask mapを反転(action, height, width)
-        # TODO: agent.pyにはないがrlではこれがないとダメなのがよくわかっていない。
-        # agent1_legal_action_mask = np.flip(agent1_legal_action_mask, [1, 2])
-        # agent1_legal_action_mask[Action.UP], agent1_legal_action_mask[Action.DOWN] = (
-        #     agent1_legal_action_mask[Action.DOWN].copy(),
-        #     agent1_legal_action_mask[Action.UP].copy(),
-        # )
-        # agent1_legal_action_mask[Action.LEFT], agent1_legal_action_mask[Action.RIGHT] = (
-        #     agent1_legal_action_mask[Action.RIGHT].copy(),
-        #     agent1_legal_action_mask[Action.LEFT].copy(),
-        # )
+
         self.agent0_states.append(agent0_state)
         self.agent1_states.append(agent1_state)
         self.agent0_global_states.append(agent0_global_state)
@@ -349,11 +339,13 @@ class RLLibLuxEnv(MultiAgentEnv):
                 "state": np.stack(list(self.agent0_states), axis=0),
                 "global_state": np.stack(list(self.agent0_global_states), axis=0),
                 "legal_action_mask": agent0_legal_action_mask,
+                "player_id": "player_0",
             },
             "player_1": {
                 "state": np.stack(list(self.agent1_states), axis=0),
                 "global_state": np.stack(list(self.agent1_global_states), axis=0),
                 "legal_action_mask": agent1_legal_action_mask,
+                "player_id": "player_1",
             },
         }
 
@@ -456,18 +448,31 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
         batch_size = batch[Columns.OBS]["state"].shape[0]
         outputs = self.policy_model(batch[Columns.OBS])
         policy_logits = outputs["policy"]
+        player_id = batch[Columns.OBS]["player_id"]
+
+        # 自陣を復元する
+        if player_id == "player_1":
+            policy_logits = torch.flip(policy_logits, [1, 2])
+            policy_logits[:, Action.UP, :, :], policy_logits[:, Action.DOWN, :, :] = (
+                policy_logits[:, Action.DOWN, :, :].clone(),
+                policy_logits[:, Action.UP, :, :].clone(),
+            )
+            policy_logits[:, Action.LEFT, :, :], policy_logits[:, Action.RIGHT, :, :] = (
+                policy_logits[:, Action.RIGHT, :, :].clone(),
+                policy_logits[:, Action.LEFT, :, :].clone(),
+            )
+
         num_actions = policy_logits.shape[1]
         # stateは(batch, stack, ch, height, width)なので最新のunit位置を以下のように取得(batch, height, width)
         unit_mask = batch[Columns.OBS]["state"][:, -1, State.OWN_UNIT_COUNT] > 0
         action_mask = batch[Columns.OBS]["legal_action_mask"]
         # 無効な行動(action_mask=0)は負の大きな値になるためsoftmax後は0になる。
-        # MEMO: 自陣固定対応のaction_maskの挙動が怪しいのでひとまず適用しないでおく
-        # masked_policy_logits = policy_logits - 1e32 * (1 - action_mask)
+        masked_policy_logits = policy_logits - 1e32 * (1 - action_mask)
         # この時点では(batch, action, height, width)なので(batch, height, width, action)に変換
-        policy_logits = policy_logits.reshape(batch_size, num_actions, -1).transpose(2, 1)
+        masked_policy_logits = masked_policy_logits.reshape(batch_size, num_actions, -1).transpose(2, 1)
         unit_mask = unit_mask.reshape(batch_size, -1)
         return {
-            Columns.ACTION_DIST_INPUTS: policy_logits,
+            Columns.ACTION_DIST_INPUTS: masked_policy_logits,
             # unit位置のみpolicyを学習する
             Columns.LOSS_MASK: unit_mask,
         }
