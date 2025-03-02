@@ -636,6 +636,10 @@ class WandbLoggerCallback(RLlibCallback):
         if "learners" not in result:
             return
 
+        # 学習データが溜まっていない状態？
+        if "env_runners" not in result:
+            return
+
         # 1回の学習で学習したデータ数
         time_this_iter_s = result["time_this_iter_s"]
         time_total_s = result["time_total_s"]
