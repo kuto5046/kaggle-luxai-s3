@@ -33,13 +33,13 @@ class Config:
     debug: bool = False
     use_gt: bool = False
     n_splits: int = 5
-    root_dir: Path = Path("/home/user/work")
+    root_dir: Path = Path("/workspace/kaggle-luxai-s3")
     input_dir: Path = root_dir / "input"
     episode_dir: Path = root_dir / "output/feature_store/episodes"
-    episode_path: Path = episode_dir / "episodes0210.csv"
+    episode_path: Path = episode_dir / "episodes0302.csv"
     feature_dir: Path = root_dir / f"output/feature_store/{exp_name}"
-    target_team_name: str = "aDg4b"
-    target_sub_ids: list[int] = field(default_factory=lambda: [42683570])
+    target_team_name: str = "Frog Parade"
+    target_sub_ids: list[int] = field(default_factory=lambda: [42704976, 42705163, 43152191, 43155694])
     validation: bool = False
 
 
