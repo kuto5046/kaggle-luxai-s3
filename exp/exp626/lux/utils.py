@@ -149,7 +149,8 @@ class EnergyNodeGuesser:
         return energy_tile_patterns
 
     def _will_drift(self, obs: dict[str, Any]) -> bool:
-        return obs["steps"] in self._drift_steps
+        steps = obs["steps"] if isinstance(obs["steps"], int) else obs["steps"].item()
+        return steps in self._drift_steps
 
     def _drift_energy_node(self, obs: dict[str, Any]) -> None:
         # driftさせる
@@ -261,8 +262,9 @@ class EnergyNodeGuesser:
         likelihoods = np.zeros(len(self._drift_speed_prob))
         max_magnitude = max(env_params_ranges["energy_node_drift_magnitude"])
         non_move_prob = 1 / (2 * max_magnitude + 1) ** 2
+        steps = obs["steps"] if isinstance(obs["steps"], int) else obs["steps"].item()
         for i in range(len(self._drift_speed_prob)):
-            if obs["steps"] in self.ok_drift_steps[i]:
+            if steps in self.ok_drift_steps[i]:
                 if drifted:
                     # 動くはずで動いている場合
                     likelihoods[i] = 1 - non_move_prob
@@ -1086,6 +1088,8 @@ def extract_hidden_state(gt_obs: dict[str, Any], target_team_id: int) -> np.ndar
         unit_positions = np.array(gt_obs["units"]["position"][team_id])  # (max_units, 2)
         for unit_id in range(EnvParams.max_units):
             x, y = unit_positions[unit_id]
+            if x == -1 and y == -1:
+                continue
 
             if team_id == target_team_id:
                 pass
@@ -1185,11 +1189,10 @@ def extract_gt_state(obs: dict[str, Any], target_team_id: int) -> np.ndarray:
 
             # 味方同士は重複可能なのでincrementする（敵との重複はないため打ち消し合うことはないはず）
             if team_id == target_team_id:
-                # 重複はそんなに発生しないだろうということで正規化はしない
-                state_map[State.OWN_UNIT_COUNT, y, x] += 1
+                state_map[State.OWN_UNIT_COUNT, y, x] += 1 / EnvParams.max_units
                 state_map[State.OWN_UNIT_ENERGY, y, x] += unit_energy / EnvParams.init_unit_energy
             else:
-                state_map[State.OPP_UNIT_COUNT, y, x] += 1
+                state_map[State.OPP_UNIT_COUNT, y, x] += 1 / EnvParams.max_units
                 state_map[State.OPP_UNIT_ENERGY, y, x] += unit_energy / EnvParams.init_unit_energy
 
     return state_map
@@ -1217,22 +1220,23 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
     state_map[State.VISIT_COUNT] = episode_store.visit_count
 
     # unit state
+    opp_unit_position_set = set()
     for team_id in range(2):
         # 敵チームの情報はvision内にいない限り見れない
         unit_energies = np.array(obs["units"]["energy"][team_id])  # (max_units, 1)
         unit_positions = np.array(obs["units"]["position"][team_id])  # (max_units, 2)
         unit_masks = np.array(obs["units_mask"][team_id])  # (max_units, )
-        if team_id != target_team_id:
-            # sensor_maskが1(見える範囲)の場合は0にする。それ以外は0.5
-            state_map[State.OPP_UNIT_COUNT] = -1
-            state_map[State.OPP_UNIT_COUNT] *= 1 - state_map[State.SENSOR_MASK]
-            # アステロイドのところは存在しないので0
-            state_map[State.OPP_UNIT_COUNT] *= 1 - (state_map[State.TILE_TYPE] == TileType.ASTEROID)
+        # if team_id != target_team_id:
+        #     # sensor_maskが1(見える範囲)の場合は0にする。それ以外は0.5
+        #     state_map[State.OPP_UNIT_COUNT] = -1
+        #     state_map[State.OPP_UNIT_COUNT] *= 1 - state_map[State.SENSOR_MASK]
+        #     # アステロイドのところは存在しないので0
+        #     state_map[State.OPP_UNIT_COUNT] *= 1 - (state_map[State.TILE_TYPE] == TileType.ASTEROID)
 
-            state_map[State.OPP_UNIT_ENERGY] = -1
-            state_map[State.OPP_UNIT_ENERGY] *= 1 - state_map[State.SENSOR_MASK]
-            # アステロイドのところは存在しないので0
-            state_map[State.OPP_UNIT_ENERGY] *= 1 - (state_map[State.TILE_TYPE] == TileType.ASTEROID)
+        #     state_map[State.OPP_UNIT_ENERGY] = -1
+        #     state_map[State.OPP_UNIT_ENERGY] *= 1 - state_map[State.SENSOR_MASK]
+        #     # アステロイドのところは存在しないので0
+        #     state_map[State.OPP_UNIT_ENERGY] *= 1 - (state_map[State.TILE_TYPE] == TileType.ASTEROID)
 
         # available_unit_ids = np.where(unit_masks)[0]
         for unit_id in range(EnvParams.max_units):
@@ -1258,7 +1262,28 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
             else:
                 state_map[State.OPP_UNIT_COUNT, y, x] += 1 / EnvParams.max_units
                 state_map[State.OPP_UNIT_ENERGY, y, x] += unit_energy / EnvParams.init_unit_energy
+                opp_unit_position_set.add((x, y))
                 # state_map[State.OPP_UNIT_MASK, y, x] = unit_mask
+        # 5方向でsensor_maskが1でどこにもOPP_UNITがいない場合はSAP_AVAILABLE_AREAを0にする
+        directions = [(0, 1), (1, 0), (0, -1), (-1, 0), (0, 0)]
+        for y in range(EnvParams.map_height):
+            for x in range(EnvParams.map_width):
+                if state_map[State.SAP_AVAILABLE_AREA, y, x] != 1:
+                    continue
+                condition_ok = True
+                for dx, dy in directions:
+                    nx, ny = x + dx, y + dy
+                    if not in_map((nx, ny)):
+                        continue
+                    if state_map[State.SENSOR_MASK, ny, nx] != 1:
+                        condition_ok = False
+                        break
+                    if (nx, ny) in opp_unit_position_set:
+                        condition_ok = False
+                        break
+                if condition_ok:
+                    state_map[State.SAP_AVAILABLE_AREA, y, x] = 0
+
     return state_map
 
 
@@ -1337,7 +1362,7 @@ def extract_hidden_global_state(env_params: dict[str, Any]) -> np.ndarray:
 
 
 def extract_action(actions: np.ndarray, obs: dict[str, Any], target_team_id: int) -> np.ndarray:
-    action_map = np.zeros((2, EnvParams.map_width, EnvParams.map_height), dtype=np.float32)
+    action_map = np.zeros((3, EnvParams.map_width, EnvParams.map_height), dtype=np.float32)
     # unit state
     unit_masks = np.array(obs["units_mask"][target_team_id])  # (max_units, )
     unit_positions = np.array(obs["units"]["position"][target_team_id])  # (max_units, 2)
@@ -1353,6 +1378,7 @@ def extract_action(actions: np.ndarray, obs: dict[str, Any], target_team_id: int
             ny = y + dy
             if in_map((nx, ny)):
                 action_map[1, ny, nx] = 1
+                action_map[2, ny, nx] += 1
     return action_map
 
 
@@ -1427,4 +1453,40 @@ def can_move(pos: tuple[int, int], energy: int, dir: int, tile_type_map: np.ndar
 
 
 def can_sap(x: int, y: int, energy: int, unit_sap_cost: int, tile_type_map: np.ndarray):
-    return energy >= unit_sap_cost and tile_type_map[y, x] != TileType.ASTEROID
+    return energy >= unit_sap_cost
+
+
+# 相対位置を計算
+def calc_relative_pos(base_pos: np.ndarray, target_pos: np.ndarray) -> np.ndarray:
+    return target_pos - base_pos
+
+
+# マスの半径kマス以内に該当するかどうか
+def is_within_k_tiles(base_pos: np.ndarray, target_pos: np.ndarray, k: int) -> bool:
+    return np.abs(base_pos[0] - target_pos[0]) <= k and np.abs(base_pos[1] - target_pos[1]) <= k
+
+
+# 隣接するマスにあるポイントマスを取得
+def get_nearby_point_positions(pos: np.ndarray, point_map: np.ndarray, k: int = 1) -> list[np.ndarray]:
+    # posを中心にkマス以内のマスを取得
+    nearby_positions = []
+    up_pos = (pos[0], pos[1] - k)
+    if in_map(up_pos) and point_map[up_pos[1], up_pos[0]] == 1:
+        nearby_positions.append(up_pos)
+    down_pos = (pos[0], pos[1] + k)
+    if in_map(down_pos) and point_map[down_pos[1], down_pos[0]] == 1:
+        nearby_positions.append(down_pos)
+    left_pos = (pos[0] - k, pos[1])
+    if in_map(left_pos) and point_map[left_pos[1], left_pos[0]] == 1:
+        nearby_positions.append(left_pos)
+    right_pos = (pos[0] + k, pos[1])
+    if in_map(right_pos) and point_map[right_pos[1], right_pos[0]] == 1:
+        nearby_positions.append(right_pos)
+    return nearby_positions
+
+
+# 自身の周囲kタイル以内にいる敵ユニットを抽出
+def get_nearby_enemy_unit_ids(
+    unit_pos: tuple[int, int], opp_unit_positions: list[tuple[int, int]], k: int
+) -> list[int]:
+    return [unit_id for unit_id, pos in enumerate(opp_unit_positions) if is_within_k_tiles(unit_pos, pos, k)]
