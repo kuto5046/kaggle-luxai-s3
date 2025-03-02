@@ -112,7 +112,7 @@ class Config:
 
     # learner
     training_minutes: int = 60 * 24  # 1日
-    learner_queue_size: int = 100  # workerからLearnerに送られるバッチのキューの最大サイズ. [batch_size]*queue_sizeがcpuメモリに乗りbatchごとに学習する
+    learner_queue_size: int = 20  # workerからLearnerに送られるバッチのキューの最大サイズ. [batch_size]*queue_sizeがcpuメモリに乗りbatchごとに学習する
     gamma: float = 0.99
     lr: float = 1e-5
     # batch size 一応1episodeのサイズにしてるが不要かも。もしくはrollout_fragment_length部分で調整する
@@ -131,6 +131,7 @@ class Config:
             self.num_env_runners: int = 96 - 4 - 10  # actorの数
             self.num_learners: int = 4
             self.evaluation_num_env_runners: int = 10
+            self.learner_queue_size: int = 100
 
         if self.debug:
             self.num_env_runners = 1
