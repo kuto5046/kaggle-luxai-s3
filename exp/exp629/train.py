@@ -23,7 +23,7 @@ LOGGER = logging.getLogger(__name__)
 @dataclass
 class Config:
     exp_name: str = Path(__file__).parent.name
-    notes: str = "Frog Parade, ConvLSTM"
+    notes: str = "Frog Parade, UNet"
     seed: int = 2025
     debug: bool = False
     n_splits: int = 5
@@ -38,7 +38,7 @@ class Config:
     limit_train_batches: float = 1.0
     limit_val_batches: float = 1.0
     use_amp: bool = True
-    batch_size: int = 512
+    batch_size: int = 1024
     num_workers: int = 24
     ckpt_path: str = None
     lr: float = 0.001
@@ -46,16 +46,13 @@ class Config:
     warmup_step_rate: float = 0
     
     # model
-    num_repeats: int = 3
-    num_layers: int = 3
-    hidden_dim: int = 64
-    n_stack: int = 8
-    kernel_size: int = 5
+    res: bool = True
     aug: bool = True
+    n_stack: int = 4
     freeze: bool = False
     
     # loss
-    loss_weight_policy: float = 1
+    loss_weight_policy: float = 1.0
     loss_weight_state: float = 1.0
     loss_weight_global_state: float = 0.0
     # loss_weight_value: float = 0.0

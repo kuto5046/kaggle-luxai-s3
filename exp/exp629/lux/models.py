@@ -224,14 +224,12 @@ class LaxLitModel(LightningModule):
         super().__init__()
         self.cfg = cfg
         self.output_dir = self.cfg.output_dir
-        self.model = LuxConvLSTMModel(
+        self.model = self.model = LuxUNetModel(
             state_space_size=len(State),
             global_state_space_size=len(GlobalState),
             action_space_size=len(Action),
-            num_repeats=cfg.num_repeats,
-            num_layers=cfg.num_layers,
-            hidden_dim=cfg.hidden_dim, 
-            kernel_size=cfg.kernel_size,
+            n_stack=cfg.n_stack,
+            res=cfg.res,
         )
         if self.cfg.freeze:
             self.freeze()
