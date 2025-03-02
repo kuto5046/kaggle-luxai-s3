@@ -34,7 +34,7 @@ class Config:
     # 同じマスに複数のユニットが移動する場合のペナルティ、0=重複を許可(greedy)、1=重複を禁止
     overlap_penalty: float = 2.0
 
-    checkpoint_path: Path = Path(__file__).parent / "output/best_model.ckpt"
+    checkpoint_path: Path = Path(__file__).parent / "output/best_model-v2.ckpt"
 
 
 ###########################################################################
@@ -183,10 +183,10 @@ class ILAgent:
             sap_map = np.flip(sap_map, axis=(0, 1, 2, 3)).copy()
 
         policy_map = get_legal_policy(obs, policy_map, team_id, episode_store)
-        sap_map = get_legal_sap_policy(obs, sap_map, team_id, episode_store)
+        unit_sap_maps = get_legal_sap_policy(obs, sap_map, team_id, episode_store)
         point_map = state[State.POINTS]
 
-        return policy_map, point_map, sap_map
+        return policy_map, point_map, unit_sap_maps
 
 
 def get_legal_policy(
@@ -203,17 +203,9 @@ def get_legal_policy(
 def get_legal_sap_policy(
     obs: dict[str, Any], sap_map: np.ndarray, team_id: int, episode_store: EpisodeStore
 ) -> np.ndarray:
-    legal_sap_map = np.zeros_like(sap_map)
+    unit_sap_maps = np.zeros((EnvParams.max_units, 1 + 2 * EnvParams.max_sap_range, 1 + 2 * EnvParams.max_sap_range))
+    sap_mask = np.ones_like(sap_map) * -1e9
     available_unit_ids = np.where(obs["units_mask"][team_id])[0]
-    # SAPマップにsoftmaxを適用する
-    # 各ユニットごとに独立してsoftmaxを適用
-    for unit_id in available_unit_ids:
-        y, x = obs["units"]["position"][team_id][unit_id]
-        # ユニットの位置に対応するSAPマップを取得
-        unit_sap_map = sap_map[y, x]
-        # softmaxを適用（値が0のセルは0のまま保持）
-        unit_sap_map = softmax(unit_sap_map.flatten()).reshape(unit_sap_map.shape)
-        sap_map[y, x] = unit_sap_map
 
     for unit_id in available_unit_ids:
         unit_pos = obs["units"]["position"][team_id][unit_id]
@@ -221,16 +213,20 @@ def get_legal_sap_policy(
             for dy in range(-EnvParams.unit_sap_range, EnvParams.unit_sap_range + 1):
                 sap_pos = (unit_pos[0] + dx, unit_pos[1] + dy)
                 if in_map(sap_pos):
-                    legal_sap_map[
-                        unit_pos[1], unit_pos[0], dy + EnvParams.max_sap_range, dx + EnvParams.max_sap_range
-                    ] = 1
-    # 無効な場所は0にする
-    sap_map *= legal_sap_map
-    # print("sap_map", file=sys.stderr)
-    # print(sap_map, file=sys.stderr)
-    # print("legal_sap_map", file=sys.stderr)
-    # print(legal_sap_map, file=sys.stderr)
-    return sap_map
+                    sap_mask[unit_pos[1], unit_pos[0], dy + EnvParams.max_sap_range, dx + EnvParams.max_sap_range] = 0
+
+    # SAPマップにsoftmaxを適用する
+    # 各ユニットごとに独立してsoftmaxを適用
+    for unit_id in available_unit_ids:
+        x, y = obs["units"]["position"][team_id][unit_id]
+        # ユニットの位置に対応するSAPマップを取得
+        unit_sap_map = sap_map[y, x].copy()
+        # logit maskを適用
+        unit_sap_map += sap_mask[y, x]
+        # softmaxを適用（値が0のセルは0のまま保持）
+        unit_sap_map = softmax(unit_sap_map.flatten()).reshape(unit_sap_map.shape)
+        unit_sap_maps[unit_id] = unit_sap_map
+    return unit_sap_maps
 
 
 cfg = Config()
@@ -258,7 +254,7 @@ class Agent:
             self.episode_store.reset()
         else:
             self.episode_store.update(obs, self.prev_actions)
-        policy_map, point_map, sap_map = imitation_model.predict(obs, self.team_id, self.episode_store)
+        policy_map, point_map, unit_sap_maps = imitation_model.predict(obs, self.team_id, self.episode_store)
 
         unit_mask = np.array(obs["units_mask"][self.team_id])  # shape (max_units, )
         unit_positions = np.array(obs["units"]["position"][self.team_id])  # shape (max_units, 2)
@@ -269,12 +265,26 @@ class Agent:
         if len(available_unit_ids) > 1 and self.cfg.overlap_penalty > 0:
             actions = np.zeros((self.env_cfg["max_units"], 3), dtype=int)
             self._assign_actions_with_flow(
-                actions, available_unit_ids, unit_positions, policy_map, point_map, obs, opp_unit_positions, sap_map
+                actions,
+                available_unit_ids,
+                unit_positions,
+                policy_map,
+                point_map,
+                obs,
+                opp_unit_positions,
+                unit_sap_maps,
             )
         else:
             actions = np.zeros((self.env_cfg["max_units"], 3), dtype=int)
             self._assign_greedy_actions(
-                actions, available_unit_ids, unit_positions, policy_map, point_map, obs, opp_unit_positions, sap_map
+                actions,
+                available_unit_ids,
+                unit_positions,
+                policy_map,
+                point_map,
+                obs,
+                opp_unit_positions,
+                unit_sap_maps,
             )
 
         self.prev_opp_unit_positions = opp_unit_positions
@@ -282,7 +292,7 @@ class Agent:
         return actions
 
     def _assign_actions_with_flow(
-        self, actions, available_unit_ids, unit_positions, policy_map, point_map, obs, opp_unit_positions, sap_map
+        self, actions, available_unit_ids, unit_positions, policy_map, point_map, obs, opp_unit_positions, unit_sap_maps
     ):
         """最小費用流問題としてグリッドへの割り当てを解く"""
         # self._assign_greedy_actions(
@@ -313,11 +323,8 @@ class Agent:
                 if action == Action.SAP:
                     next_pos = unit_pos  # SAPは移動しない
                     # ユニットの位置に対応するsap_mapを取得
-                    unit_sap_map = sap_map[y, x]
-                    if unit_sap_map.sum() > 0:  # 有効なSAPがある場合
-                        sap_pos_relative = get_sap_pos_relative(unit_sap_map)
-                    else:
-                        continue  # 有効なSAPがない場合はこのアクションをスキップ
+                    unit_sap_map = unit_sap_maps[unit_id]
+                    sap_pos_relative = get_sap_pos_relative(unit_sap_map)
                 else:
                     next_pos = calc_next_pos(unit_pos, action)
                     if not in_map(next_pos):
@@ -378,7 +385,14 @@ class Agent:
         if flow_result == -1:
             print("flow=-1", file=sys.stderr)
             self._assign_greedy_actions(
-                actions, available_unit_ids, unit_positions, policy_map, point_map, obs, opp_unit_positions, sap_map
+                actions,
+                available_unit_ids,
+                unit_positions,
+                policy_map,
+                point_map,
+                obs,
+                opp_unit_positions,
+                unit_sap_maps,
             )
             return
 
@@ -404,7 +418,7 @@ class Agent:
         # print(f"Flow assignment took {(end_time - start_time) * 1000:.1f} ms")  # ミリ秒単位で表示
 
     def _assign_greedy_actions(
-        self, actions, available_unit_ids, unit_positions, policy_map, point_map, obs, opp_unit_positions, sap_map
+        self, actions, available_unit_ids, unit_positions, policy_map, point_map, obs, opp_unit_positions, unit_sap_maps
     ):
         for unit_id in available_unit_ids:
             unit_pos = unit_positions[unit_id]
@@ -425,19 +439,9 @@ class Agent:
                 # print(policy, file=sys.stderr)
                 if action == Action.SAP:
                     # ユニットの位置に対応するsap_mapを取得
-                    unit_sap_map = sap_map[y, x]
-                    if unit_sap_map.sum() > 0:  # 有効なSAPがある場合
-                        sap_pos_relative = get_sap_pos_relative(unit_sap_map)
-                        actions[unit_id] = [Action.SAP, sap_pos_relative[0], sap_pos_relative[1]]
-                    else:
-                        # 有効なSAPがない場合はCENTERを選択
-                        policy[Action.SAP] = 0
-                        if policy.sum() > 0:
-                            policy = policy / policy.sum()
-                            continue  # 再度アクションを選択
-                        else:
-                            actions[unit_id] = [Action.CENTER, 0, 0]
-                    break
+                    unit_sap_map = unit_sap_maps[unit_id]
+                    sap_pos_relative = get_sap_pos_relative(unit_sap_map)
+                    actions[unit_id] = [Action.SAP, sap_pos_relative[0], sap_pos_relative[1]]
                 else:
                     actions[unit_id] = [action, 0, 0]
                     break

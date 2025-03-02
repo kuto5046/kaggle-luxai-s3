@@ -38,7 +38,7 @@ class Config:
     # team_name: str = "kuto & okumura"
 
     exp_name: str = Path(__file__).parent.name
-    checkpoint_path: Path = Path(f"/home/task/kaggle/kaggle-luxai-s3/exp/{exp_name}/output/best_model.ckpt")
+    checkpoint_path: Path = Path(f"/home/task/kaggle/kaggle-luxai-s3/exp/{exp_name}/output/best_model-v3.ckpt")
 
 
 def sigmoid(x):

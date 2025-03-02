@@ -233,8 +233,8 @@ class LaxLitModel(LightningModule):
             n_stack=cfg.n_stack,
             res=cfg.res,
         )
-        if self.cfg.load_model_path:
-            self.model.load_state_dict(torch.load(self.cfg.load_model_path))
+        # if self.cfg.load_model_path is not None:
+        #     self.model.load_state_dict(torch.load(self.cfg.load_model_path)["state_dict"])
         self.criterion1 = DiceLoss(n_classes=len(Action))
         # self.criterion1 = MaskedBCEWithLogitsLoss()
         self.criterion2 = nn.BCEWithLogitsLoss()
@@ -287,6 +287,8 @@ class LaxLitModel(LightningModule):
 
         # ターゲットとマスクを取得
         sap_targets = batch["sap"][:, Sap.SAP_MAP, :, :, :]  # (batch_size, max_units, sap_window_size, sap_window_size)
+        # SAPターゲットを5倍にスケーリングし、0から1の範囲にクリップする
+        sap_targets = torch.clamp(sap_targets * 5.0, 0.0, 1.0)
         sap_available_mask = batch["sap"][
             :, Sap.SAP_MASK, :, :, :
         ]  # (batch_size, max_units, sap_window_size, sap_window_size)

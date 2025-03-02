@@ -155,10 +155,11 @@ class DataProcessor:
             env_params = EnvParams(**json_load["configuration"]["env_cfg"])
             episode_store = EpisodeStore(target_team_id, env_params, self.cfg.validation, episode_id)
             steps = json_load["steps"]
+            step_idx = 0
             gt_env_params = EnvParams(**steps[0][0]["info"]["replay"]["params"])
-            for step_idx in range(len(steps) - 1):  # 505でdoneとなるため-1
-                step_info = steps[step_idx]
-                next_step_info = steps[step_idx + 1]
+            for idx in range(len(steps) - 1):  # 505でdoneとなるため-1
+                step_info = steps[idx]
+                next_step_info = steps[idx + 1]
                 obs = json.loads(step_info[target_team_id]["observation"]["obs"])
                 gt_obs = step_info[0]["info"]["replay"]["observations"][0]
 
@@ -210,8 +211,9 @@ class DataProcessor:
 
                 # スカラー値は圧縮できないのでcompressionは指定しない
                 episode_win_group.create_dataset(f"{step_idx}", data=is_win)
+                step_idx += 1
 
-        return str(episode_id), len(steps) - 1, target_team_id, is_win
+        return str(episode_id), step_idx, target_team_id, is_win
 
     def preprocess(self, df: pl.DataFrame) -> pl.DataFrame:
         # 並列処理の実行

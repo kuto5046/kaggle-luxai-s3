@@ -15,6 +15,7 @@ from lux.utils import (
     Action,
     GlobalState,
     EpisodeStore,
+    extract_sap,
     extract_state,
     extract_gt_state,
     extract_global_state,
@@ -110,14 +111,16 @@ def extract_results(
         state = extract_state(obs, target_team_id, episode_store)
         global_state = extract_global_state(obs, target_team_id, env_params, episode_store)
         gt_state = extract_gt_state(gt_obs, target_team_id)
-        policy_map, _, sap_map = model.predict(obs, target_team_id, episode_store)
+        gt_sap_map = extract_sap(gt_obs, target_team_id)
+        policy_map, _, unit_sap_maps = model.predict(obs, target_team_id, episode_store)
 
         results["obs"].append(obs)
         results["state"].append(state)
         results["gt_state"].append(gt_state)
         results["global_state"].append(global_state)
         results["policy_map"].append(policy_map)
-        results["sap_map"].append(sap_map)
+        results["unit_sap_maps"].append(unit_sap_maps)
+        results["gt_sap_map"].append(gt_sap_map)
         results["action"].append(next_actions)  # その状態からどう行動したかを知りたいのnext_actions
     return results
 
@@ -204,6 +207,15 @@ def visualize_policy(
         margin=dict(t=30, l=30, r=30, b=30),
     )
     st.plotly_chart(fig, key="policy_plots")
+
+
+def visualize_sap_map(
+    unit_sap_maps: np.ndarray, gt_sap_map: np.ndarray, unit_positions: list[tuple[int, int]], title="SAP Map"
+):
+    fig = go.Figure()
+    for unit_id, (x, y) in enumerate(unit_positions):
+        fig.add_trace(go.Heatmap(z=unit_sap_maps[unit_id], showscale=False))
+    st.plotly_chart(fig, key="sap_map")
 
 
 def visualize_global_state(global_state: np.ndarray):
@@ -295,6 +307,14 @@ def main():
             visualize_unit_positions(unit_positions, target_team_id, title="Unit Positions")
         with cols[1]:
             visualize_policy(policy_map, real_actions, unit_positions, title="Policy", n_cols=8)
+
+        ############################################################
+        # SAPマップの可視化
+        ############################################################
+        unit_sap_maps = results["unit_sap_maps"][step_idx]
+        gt_sap_map = results["gt_sap_map"][step_idx]
+        st.subheader("SAP Map")
+        visualize_sap_map(unit_sap_maps, gt_sap_map, unit_positions, title="SAP Map")
 
 
 if __name__ == "__main__":

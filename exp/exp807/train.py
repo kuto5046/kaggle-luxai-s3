@@ -1,9 +1,9 @@
-import shutil
 import logging
 import argparse
 from pathlib import Path
 from dataclasses import dataclass
 
+import torch
 import seaborn as sns
 from lightning import Trainer, seed_everything
 from lux.models import LaxLitModel, LaxLitDataModule
@@ -32,7 +32,7 @@ class Config:
     feature_version: str = exp_name
     feature_dir: Path = root_dir / f"output/feature_store/{feature_version}"
     output_dir = root_dir / f"exp/{exp_name}/output"
-    load_model_path: str = f"exp/{exp_name}/output/best_model.pt"
+    load_model_path: str = f"exp/{exp_name}/output/best_model_806.ckpt"
 
     # trainer
     epoch: int = 20
@@ -54,7 +54,7 @@ class Config:
     loss_weight_state: float = 1.0
     loss_weight_global_state: float = 0.0
     # loss_weight_value: float = 0.0
-    loss_weight_sap: float = 4.0
+    loss_weight_sap: float = 50.0
 
     @classmethod
     def from_args(cls) -> "Config":
@@ -78,8 +78,8 @@ class TrainPipeline:
     def __init__(self, cfg: Config) -> None:
         seed_everything(cfg.seed, workers=True)  # data loaderのworkerもseedする
         self.output_dir = cfg.output_dir
-        if self.output_dir.exists():
-            shutil.rmtree(self.output_dir)
+        # if cfg.load_model_path is None and self.output_dir.exists():
+        #     shutil.rmtree(self.output_dir)
         self.output_dir.mkdir(exist_ok=True, parents=True)
 
         self.cfg = cfg
@@ -140,6 +140,16 @@ class TrainPipeline:
             limit_val_batches=self.cfg.limit_val_batches,
             deterministic=True,  # for reproducibility
         )
+        # モデルのみをチェックポイントからロードする
+        if self.cfg.load_model_path is not None:
+            state_dict = torch.load(self.cfg.load_model_path)["state_dict"]
+            # state_dictのキーから"model."プレフィックスを削除
+            model_state_dict = {
+                k.replace("model.", "").replace("base_", "base_model."): v
+                for k, v in state_dict.items()
+                if k.startswith("model.")
+            }
+            self.model.model.load_state_dict(model_state_dict)
         self.trainer.fit(self.model, datamodule=self.datamodule, ckpt_path=self.cfg.ckpt_path)
 
     def run(self) -> None:
