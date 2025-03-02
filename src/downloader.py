@@ -24,10 +24,12 @@ def saveEpisode(epid: int, save_path: Path) -> None:
 
 def main():
     max_episode_count = 3000
-    df = pl.read_csv("/home/task/kaggle/kaggle-luxai-s3/output/feature_store/episodes/episodes_0224.csv")
+    df = pl.read_csv("/home/task/kaggle/kaggle-luxai-s3/output/feature_store/episodes/episodes_0302.csv")
     agents_to_load = [
         42704976,  # Frog Parade
         42705163,  # Frog Parade
+        43152191,  # Frog Parade
+        43155694,  # Frog Parade
     ]
     df = df.filter(pl.col("SubmissionId").is_in(agents_to_load))
     start_time = datetime.datetime.now(tz=datetime.timezone.utc)
