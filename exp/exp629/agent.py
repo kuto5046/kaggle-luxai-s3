@@ -32,13 +32,9 @@ class Config:
     seed: int = 2025
     # 確率的な行動を取るかどうか
     stochastic: bool = True  # Falseにするとargmaxで行動を選択する
-    # model
-    n_stack: int = 8
-    num_layers: int = 3
-    hidden_dim: int = 64
-    kernel_size: int = 5
-    num_repeats: int = 3
-
+    res: bool = True
+    n_stack: int = 4
+    # 同じマスに複数のユニットが移動する場合のペナルティ、0=重複を許可(greedy)、1=重複を禁止
     overlap_penalty: float = 2.0
 
     tta: bool = False
@@ -124,16 +120,13 @@ class MinimumCostFlow:
 
 
 class ILAgent:
-    def __init__(self, env_cfg: EnvParams, checkpoint_path: Path, n_stack: int) -> None:
-        self.model = LuxConvLSTMModel(
+    def __init__(self, env_cfg: EnvParams, checkpoint_path: Path, n_stack: int, res: bool = True) -> None:
+        self.model = LuxUNetModel(
             state_space_size=len(State),
             global_state_space_size=len(GlobalState),
             action_space_size=len(Action),
-            hidden_state_space_size=len(HiddenState),
-            num_layers=cfg.num_layers,
-            hidden_dim=cfg.hidden_dim,
-            kernel_size=cfg.kernel_size,
-            num_repeats=cfg.num_repeats,
+            n_stack=n_stack,
+            res=res,
         )
         ckpt = torch.load(checkpoint_path, weights_only=True, map_location="cpu")
         state_dict = {k.replace("model.", ""): v for k, v in ckpt["state_dict"].items()}
@@ -261,7 +254,7 @@ class SingleSapInfo:
 
 cfg = Config()
 seed_everything(cfg.seed, workers=True)
-imitation_model = ILAgent(EnvParams, cfg.checkpoint_path, cfg.n_stack)
+imitation_model = ILAgent(EnvParams, cfg.checkpoint_path, cfg.n_stack, cfg.res)
 
 
 class Agent:
