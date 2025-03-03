@@ -40,8 +40,8 @@ class Config:
     use_amp: bool = True
     batch_size: int = 512
     num_workers: int = 24
-    ckpt_path: str = "agents/exp622_epoch21/output/best_model.ckpt"
-    lr: float = 0.001
+    ckpt_path: str = "agents/exp627/output/best_model.ckpt"
+    lr: float = 5e-4
     weight_decay: float = 0.01
     warmup_step_rate: float = 0.1
     
@@ -55,7 +55,7 @@ class Config:
     freeze: bool = False
     
     # loss
-    loss_weight_policy: float = 1
+    loss_weight_policy: float = 1.0
     loss_weight_state: float = 1.0
     loss_weight_global_state: float = 0.0
     # loss_weight_value: float = 0.0
