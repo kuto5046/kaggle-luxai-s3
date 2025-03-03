@@ -6,7 +6,6 @@ from dataclasses import dataclass
 import h5py
 import numpy as np
 import torch
-import wandb
 import polars as pl
 import torch.nn.functional as F
 from torch import nn, optim
@@ -16,8 +15,11 @@ from torchmetrics import Accuracy, MetricCollection
 from transformers import get_cosine_schedule_with_warmup
 from torch.utils.data import Dataset, DataLoader
 
+import wandb
+
 from .utils import State, Action, GlobalState, to_np
 from .params import EnvParams
+from .convlstm import ConvLSTM
 
 
 class LuxAugmentBase:
@@ -230,12 +232,12 @@ class LaxLitModel(LightningModule):
             action_space_size=len(Action),
             num_repeats=cfg.num_repeats,
             num_layers=cfg.num_layers,
-            hidden_dim=cfg.hidden_dim, 
+            hidden_dim=cfg.hidden_dim,
             kernel_size=cfg.kernel_size,
         )
         if self.cfg.freeze:
             self.freeze()
-        
+
         self.criterion1 = DiceLoss(n_classes=len(Action))
         # self.criterion1 = MaskedBCEWithLogitsLoss()
         self.criterion2 = nn.BCEWithLogitsLoss()
@@ -256,7 +258,7 @@ class LaxLitModel(LightningModule):
             param.requires_grad = False
         for param in self.model.policy_net.parameters():
             param.requires_grad = False
-            
+
     def forward(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
         return self.model(batch)
 
@@ -651,7 +653,7 @@ class ConvLSTMCell(nn.Module):
             out_channels=4 * self.hidden_dim,
             kernel_size=self.kernel_size,
             padding=self.padding,
-            bias=self.bias
+            bias=self.bias,
         )
 
     def init_hidden(self, input_size, batch_size):
@@ -665,7 +667,7 @@ class ConvLSTMCell(nn.Module):
         combined = torch.cat([input_tensor, h_cur], dim=-3)  # (B, C_in + C_hidden, H, W)
         combined_conv = self.conv(combined)
         cc_i, cc_f, cc_o, cc_g = torch.split(combined_conv, self.hidden_dim, dim=-3)
-        
+
         i = torch.sigmoid(cc_i)
         f = torch.sigmoid(cc_f)
         o = torch.sigmoid(cc_o)
@@ -683,12 +685,11 @@ class DRC(nn.Module):
 
         blocks = []
         for _ in range(self.num_layers):
-            blocks.append(ConvLSTMCell(
-                input_dim=input_dim,
-                hidden_dim=hidden_dim,
-                kernel_size=(kernel_size, kernel_size),
-                bias=bias
-            ))
+            blocks.append(
+                ConvLSTMCell(
+                    input_dim=input_dim, hidden_dim=hidden_dim, kernel_size=(kernel_size, kernel_size), bias=bias
+                )
+            )
         self.blocks = nn.ModuleList(blocks)
 
     def init_hidden(self, input_size, batch_size, device):
@@ -708,11 +709,11 @@ class DRC(nn.Module):
         hs, cs = hidden
         for _ in range(num_repeats):
             for i, block in enumerate(self.blocks):
-                input_i = hs[i-1] if i > 0 else x
+                input_i = hs[i - 1] if i > 0 else x
                 hs[i], cs[i] = block(input_i, (hs[i], cs[i]))
 
         return hs[-1], (hs, cs)
-    
+
 
 class LuxConvLSTMModel(nn.Module):
     def __init__(
@@ -721,7 +722,7 @@ class LuxConvLSTMModel(nn.Module):
         global_state_space_size: int,
         action_space_size: int,
         num_layers: int,
-        hidden_dim: int, 
+        hidden_dim: int,
         kernel_size: int = 3,
         num_repeats: int = 1,
     ) -> None:
@@ -730,24 +731,43 @@ class LuxConvLSTMModel(nn.Module):
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
         self.num_repeats = num_repeats
-        
+
         self.inc = DoubleConv(state_space_size + global_state_space_size, self.hidden_dim, res=False)
-        
-        self.drc = DRC(
-            num_layers=self.num_layers,
-            input_dim=self.hidden_dim,
-            hidden_dim=self.hidden_dim,
-            kernel_size=kernel_size,
-            bias=True
+
+        # TODO 引数で設定できるようにする
+        # embed 部分の設定
+        self.embed_configs = []
+        # recurrent_config の設定に repeats_per_step を追加
+        self.recurrent_config = {
+            "input_channels": self.hidden_dim,  # embed 層出力のチャネル数
+            "hidden_channels": self.hidden_dim,
+            "kernel_size": kernel_size,
+            "n_recurrent": self.num_layers,  # lstmのブロック数 論文中のD
+            "repeats_per_step": self.num_repeats,  # 1時刻あたりの内部更新回数 論文中のN
+            "pool_and_inject": "horizontal",
+            "pool_projection": "per-channel",
+            "output_activation": "tanh",
+            "forget_bias": 0.0,
+            "fence_pad": "no",
+            "residual": False,
+            "skip_final": False,
+        }
+
+        self.convlstm = ConvLSTM(
+            self.embed_configs,
+            self.recurrent_config,
         )
 
         self.policy_net = OutConv(self.hidden_dim, action_space_size)
         self.sap_net = nn.Sequential(
-            ResidualBlock(self.hidden_dim, self.hidden_dim, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False),
-            ResidualBlock(self.hidden_dim, self.hidden_dim, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False),
-            OutConvWithNorm(self.hidden_dim, 1)
+            ResidualBlock(
+                self.hidden_dim, self.hidden_dim, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False
+            ),
+            ResidualBlock(
+                self.hidden_dim, self.hidden_dim, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False
+            ),
+            OutConvWithNorm(self.hidden_dim, 1),
         )
-
 
     def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         state = batch["state"]
@@ -757,19 +777,32 @@ class LuxConvLSTMModel(nn.Module):
         gx = global_state.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, _x, _y)
         x = torch.cat([state, gx], dim=2)
 
-        hidden = None
-        for t in range(T):
-            xt = x[:, t]
-            xt = self.inc(xt)
-            xt, hidden = self.drc(xt, hidden, num_repeats=self.num_repeats)    
-       
+        # import sys
+
+        # print(x.shape, file=sys.stderr)
+        x = x.view(-1, _c + _cg, _x, _y)
+        # print(x.shape, file=sys.stderr)
+        x = self.inc(x)
+        # print(x.shape, file=sys.stderr)
+        x = x.view(_n, T, self.hidden_dim, _x, _y)
+
+        # print(x.shape, file=sys.stderr)
+        x = x.transpose(1, 0).contiguous()
+
+        # print(x.shape, file=sys.stderr)
+        x, hidden = self.convlstm(x)
+        # print(x.shape, file=sys.stderr)
+        if T > 1:
+            xt = x[-1]
+        else:
+            xt = x
+
+        # print(xt.shape, file=sys.stderr)
+
         policy_logits = self.policy_net(xt)
         sap_logits = self.sap_net(xt)
-        
-        return {
-            "policy": policy_logits,
-            "sap": sap_logits
-        }
+
+        return {"policy": policy_logits, "sap": sap_logits}
 
 
 class MaskedFocalTverskyLoss(nn.Module):
@@ -925,7 +958,7 @@ class ResidualBlock(nn.Module):
         x = self.squeeze_excitation(self.norm2(x))
         x = x + self.change_n_channels(identity)
         return self.final_act(x)
-    
+
 
 def save_model(model, output_dir: Path, latest: bool = False):
     if latest:
