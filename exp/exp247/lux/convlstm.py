@@ -42,10 +42,10 @@ class ConvLSTMCell(nn.Module):
         padding = kernel_size // 2  # "same" padding
 
         self.conv_i = nn.Conv2d(conv_in_channels, 4 * hidden_channels, kernel_size, padding=padding, bias=True)
-        self.conv_h = nn.Conv2d(hidden_channels, 4 * hidden_channels, kernel_size, padding=padding, bias=False)
+        self.conv_h = nn.Conv2d(hidden_channels, 4 * hidden_channels, kernel_size, padding=padding, bias=True)
 
         if fence_pad != "no":
-            self.conv_fence = nn.Conv2d(1, 4 * hidden_channels, kernel_size, padding=padding, bias=False)
+            self.conv_fence = nn.Conv2d(1, 4 * hidden_channels, kernel_size, padding=padding, bias=True)
         else:
             self.conv_fence = None
 
