@@ -34,14 +34,14 @@ class Config:
     output_dir = root_dir / f"exp/{exp_name}/output"
 
     # trainer
-    epoch: int = 10
+    epoch: int = 20
     limit_train_batches: float = 1.0
     limit_val_batches: float = 1.0
     use_amp: bool = True
     batch_size: int = 512
     num_workers: int = 24
     ckpt_path: str = "agents/exp622_epoch21/output/best_model.ckpt"
-    lr: float = 0.001
+    lr: float = 5e-4
     weight_decay: float = 0.01
     warmup_step_rate: float = 0.1
     
