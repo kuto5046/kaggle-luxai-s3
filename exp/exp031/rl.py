@@ -131,7 +131,7 @@ class Config:
             self.num_learners: int = 0
             self.evaluation_num_env_runners: int = 15
             self.learner_queue_size: int = 100
-            self.evaluation_interval: int = 20
+            self.evaluation_interval: int = 10
 
         if self.debug:
             self.num_env_runners = 1
