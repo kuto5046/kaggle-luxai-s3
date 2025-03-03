@@ -38,6 +38,16 @@ class GlobalState(IntEnum):
     UNIT_SAP_COST = auto()
     UNIT_SAP_RANGE = auto()
     UNIT_SENSOR_RANGE = auto()
+    NEBULA_TILE_VISION_REDUCTION_MEAN = auto()  # 推定値
+    NEBULA_TILE_VISION_REDUCTION_SIGMA = auto()  # 推定精度
+    ENERGY_NODE_DRIFT_SPEED_MEAN = auto()  # 推定値
+    ENERGY_NODE_DRIFT_SPEED_SIGMA = auto()  # 推定精度
+    # ENERGY_VOID_FACTOR_MEAN = auto()  # 推定値 推定可能だが未実装
+    # ENERGY_VOID_FACTOR_SIGMA = auto()  # 推定精度
+    NEBULA_TILE_ENERGY_REDUCTION_MEAN = auto()  # 推定値 二次元特徴量とは別に渡しているが必要かは不明
+    NEBULA_TILE_ENERGY_REDUCTION_SIGMA = auto()  # 推定精度
+    UNIT_SAP_DROPOFF_FACTOR_MEAN = auto()  # 推定値
+    UNIT_SAP_DROPOFF_FACTOR_SIGMA = auto()  # 推定精度
 
 
 class HiddenState(IntEnum):
@@ -48,13 +58,13 @@ class HiddenState(IntEnum):
 
 # episodeごとに変動する環境パラメータ
 class HiddenGlobalState(IntEnum):
-    NEBULA_TILE_VISION_REDUCTION = 0
-    NEBULA_TILE_ENERGY_REDUCTION = auto()
-    UNIT_SAP_DROPOFF_FACTOR = auto()
-    UNIT_ENERGY_VOID_FACTOR = auto()
+    # NEBULA_TILE_VISION_REDUCTION = 0
+    # NEBULA_TILE_ENERGY_REDUCTION = 0
+    # UNIT_SAP_DROPOFF_FACTOR = auto()
+    # UNIT_ENERGY_VOID_FACTOR = auto()
     # NEBULA_TILE_DRIFT_SPEED = auto() . # 推定可能なので不要
-    ENERGY_NODE_DRIFT_SPEED = auto()  # 推定可能だがあまり意味がなさそうなので Auxilary Lossのままにしてある
-    ENERGY_NODE_DRIFT_MAGNITUDE = auto()  # 多分推定できる
+    # ENERGY_NODE_DRIFT_SPEED = auto()
+    ENERGY_NODE_DRIFT_MAGNITUDE = 0  # 多分推定できるが重要度は低いと想定
 
 
 class Action(IntEnum):
@@ -93,18 +103,28 @@ class EnergyNodeGuesser:
 
         self._energy_func = lambda d: np.sin(d * 1.2 + 1) * 4
         self._energy_tile_patterns = self.precalculate_energy_tile_pattern()
+
+        self._drift_speed_prob = [
+            1 / len(env_params_ranges["energy_node_drift_speed"])
+            for _ in range(len(env_params_ranges["energy_node_drift_speed"]))
+        ]
         # fmt: off
-        ok_drift_steps = {
-            2,102,202,302,402,502,2,52,102,152,202,252,302,352,402,452,502,2,69,102,136,169,202,236,269,302,336,369,402,436,469,502,2,27,52,77,102,127,177,202,227,252,277,302,327,352,377,402,427,452,477,502,2,22,42,62,82,102,122,142,162,182,202,222,242,262,282,302,322,342,362,382,402,422,442,462,482,502,
-        }
+        self.ok_drift_steps = [
+            {2,102,202,302,402,502},
+            {2,52,102,152,202,252,302,352,402,452,502},
+            {2,36,69,102,136,169,202,236,269,302,336,369,402,436,469,502},
+            {2,27,52,77,102,127,177,202,227,252,277,302,327,352,377,402,427,452,477,502},
+            {2,22,42,62,82,102,122,142,162,182,202,222,242,262,282,302,322,342,362,382,402,422,442,462,482,502}
+        ]
         # fmt: on
         # ほとんどは上記でカバーされるが、episodeId 66954207でステップ203でdriftが発生するケースがあったので数値誤差を考慮して前後1ステップを追加
         # もし他にも落ちるようであれば毎ターン確認するようにしたほうがいいかも
         self._drift_steps = set()
-        for i in ok_drift_steps:
-            self._drift_steps.add(i)
-            self._drift_steps.add(i - 1)
-            self._drift_steps.add(i + 1)
+        for step_set in self.ok_drift_steps:
+            for i in step_set:
+                self._drift_steps.add(i)
+                self._drift_steps.add(i - 1)
+                self._drift_steps.add(i + 1)
 
     def precalculate_energy_tile_pattern(self):
         energy_tile_patterns = np.empty((EnvParams.map_height, EnvParams.map_width), dtype=object)
@@ -129,7 +149,8 @@ class EnergyNodeGuesser:
         return energy_tile_patterns
 
     def _will_drift(self, obs: dict[str, Any]) -> bool:
-        return obs["steps"] in self._drift_steps
+        steps = obs["steps"] if isinstance(obs["steps"], int) else obs["steps"].item()
+        return steps in self._drift_steps
 
     def _drift_energy_node(self, obs: dict[str, Any]) -> None:
         # driftさせる
@@ -156,8 +177,10 @@ class EnergyNodeGuesser:
     def get_energy_map(self) -> np.ndarray:
         return np.array([[value for _, value in row] for row in self._energy_map])
 
-    def update_energy_map(self, obs: dict[str, Any]) -> None:
-        """ """
+    def is_determistic(self) -> bool:
+        return len(self._energy_node_candidates) == 1
+
+    def _update_energy_map(self, obs: dict[str, Any]) -> None:
         sensor_mask = np.array(obs["sensor_mask"]).T
         obs_energy_map = np.array(obs["map_features"]["energy"]).T
         # energy driftが発生しているかどうか
@@ -204,6 +227,369 @@ class EnergyNodeGuesser:
                     # 平均
                     self._energy_map[y, x] = (False, result_by_node_candidates.mean())
 
+    def _bayesian_update(self, priors: list, likelihoods: list) -> list:
+        """
+        ベイズ更新を行います。
+        :param priors: 各候補の事前確率 (shape=(5,), 合計は1)
+        :param likelihoods: 各候補の尤度 (shape=(5,))。各要素は 0, 1, 1/n のいずれか。
+        :return: 更新後の確率分布 (事後確率)
+        """
+        # 事前確率と尤度の積を計算
+        post = priors * likelihoods
+        total = post.sum()
+        # 全候補の尤度がゼロの場合は例外とする（またはそのまま事前を返す）
+        if total == 0:
+            # driftするターンが間違っている場合は稀にここに入る
+            # この場合はそのまま事前を返す
+            return priors
+        return post / total
+
+    def _update_energy_speed(self, obs: dict[str, Any]) -> None:
+        # まずenergyの位置が移動しているかどうかを判断する
+        current_energy_map = np.array(obs["map_features"]["energy"]).T
+        sensor_mask = np.array(obs["sensor_mask"]).T
+        drifted = False
+        for y in range(EnvParams.map_height):
+            for x in range(EnvParams.map_width):
+                if self._energy_map[y, x][0] and sensor_mask[y, x]:
+                    if current_energy_map[y, x] != self._energy_map[y, x][1]:
+                        drifted = True
+                        break
+            if drifted:
+                break
+
+        # 今回の観測が得られた条件下での各候補の確率 = 事前確率 * speedが該当の場合に今回の観測が得られる確率 / normalizing constant
+        likelihoods = np.zeros(len(self._drift_speed_prob))
+        max_magnitude = max(env_params_ranges["energy_node_drift_magnitude"])
+        non_move_prob = 1 / (2 * max_magnitude + 1) ** 2
+        steps = obs["steps"] if isinstance(obs["steps"], int) else obs["steps"].item()
+        for i in range(len(self._drift_speed_prob)):
+            if steps in self.ok_drift_steps[i]:
+                if drifted:
+                    # 動くはずで動いている場合
+                    likelihoods[i] = 1 - non_move_prob
+                else:
+                    # 動くはずで動いていない場合
+                    likelihoods[i] = non_move_prob
+            elif drifted:
+                # 動かないはずで動いている場合
+                likelihoods[i] = 0
+            else:
+                # 動かないはずで動いていない場合
+                likelihoods[i] = 1
+
+        self._drift_speed_prob = self._bayesian_update(self._drift_speed_prob, likelihoods)
+
+    def update_energy(self, obs: dict[str, Any]) -> None:
+        self._update_energy_speed(obs)
+        self._update_energy_map(obs)
+
+    # meanとsigmaを返す
+    def get_energy_drft_speed_estimate(self) -> tuple[float, float]:
+        sum = 0
+        sigma = 0
+        for i, prob in enumerate(self._drift_speed_prob):
+            sum += prob * env_params_ranges["energy_node_drift_speed"][i]
+        for i, prob in enumerate(self._drift_speed_prob):
+            sigma += prob * (env_params_ranges["energy_node_drift_speed"][i] - sum) ** 2
+        sigma = np.sqrt(sigma)
+        return (sum, sigma)
+
+
+class NebulaTileVisionReductionGuesser:
+    def __init__(self, target_team_id: int, unit_sensor_range: int) -> None:
+        self._nebula_tile_vision_reduction_candidates = env_params_ranges["nebula_tile_vision_reduction"]
+        self._target_team_id = target_team_id
+        self._unit_sensor_range = unit_sensor_range
+        self._prev_tile_type_obs = None
+
+    def compute_sensor_masks(self, obs: dict[str, Any]):
+        """Compute the vision power and sensor mask for both teams
+
+        Algorithm:
+
+        generate a integer vision power array over the map.
+        For each unit, add unit sensor range value (its kind of like the units sensing power/depth) to each tile the unit's sensor range
+        Clamp the vision power array to range [0, unit_sensing_range].
+
+        With 2 vision power maps, take the nebula vision mask * nebula vision power and subtract it from the vision power maps.
+        This forms the sensor mask
+        """
+
+        max_sensor_range = self._unit_sensor_range
+        vision_power_map_padding = max_sensor_range
+        vision_power_map = np.zeros(
+            shape=(
+                EnvParams.map_height + 2 * vision_power_map_padding,
+                EnvParams.map_width + 2 * vision_power_map_padding,
+            ),
+            dtype=np.int16,
+        )
+
+        # Update sensor mask based on the sensor range
+        def update_vision_power_map(unit_pos, vision_power_map):
+            x, y = unit_pos
+            start_x = x - max_sensor_range + vision_power_map_padding
+            start_y = y - max_sensor_range + vision_power_map_padding
+            # 対象領域のサイズは (max_sensor_range * 2 + 1) × (max_sensor_range * 2 + 1)
+            slice_size = max_sensor_range * 2 + 1
+            # Python のスライスを用いて、対象領域を抽出
+            existing_vision_power = vision_power_map[start_x : start_x + slice_size, start_y : start_y + slice_size]
+
+            update = np.zeros_like(existing_vision_power)
+            for i in range(max_sensor_range + 1):
+                val = np.where(
+                    i > max_sensor_range - self._unit_sensor_range - 1,
+                    i + 1 - (max_sensor_range - self._unit_sensor_range),
+                    0,
+                ).astype(np.int16)
+                update[i : max_sensor_range * 2 + 1 - i, i : max_sensor_range * 2 + 1 - i] = val
+            # vision of position at center of update has an extra 10
+            update[max_sensor_range, max_sensor_range] += 10
+            new_region = existing_vision_power + update
+            vision_power_map[start_x : start_x + slice_size, start_y : start_y + slice_size] = new_region
+            return vision_power_map
+
+        own_unit_positions = np.array(obs["units"]["position"][self._target_team_id])
+
+        for unit_id in range(EnvParams.max_units):
+            pos = own_unit_positions[unit_id]
+            if pos[0] != -1 and pos[1] != -1:
+                # 転置しているのでx,yが逆
+                pos = (pos[1], pos[0])
+                vision_power_map = update_vision_power_map(pos, vision_power_map)
+
+        vision_power_map = vision_power_map[
+            vision_power_map_padding:-vision_power_map_padding,
+            vision_power_map_padding:-vision_power_map_padding,
+        ]
+        return vision_power_map
+
+    def _update_nebula_tile_vision_reduction(self, obs: dict[str, Any]) -> None:
+        if self._nebula_tile_vision_reduction_candidates == 1:
+            return
+        if self._prev_tile_type_obs is None:
+            self._prev_tile_type_obs = np.array(obs["map_features"]["tile_type"]).T
+            return
+
+        vision_power_map = self.compute_sensor_masks(
+            obs,
+        )
+
+        sensor_mask = np.array(obs["sensor_mask"]).T
+
+        for y in range(EnvParams.map_height):
+            for x in range(EnvParams.map_width):
+                if len(self._nebula_tile_vision_reduction_candidates) == 1:
+                    break
+                new_candidates = set()
+                if sensor_mask[y, x]:
+                    # 前のターンのtile_type_mapに基づいて視界が決まることに注意
+                    if self._prev_tile_type_obs[y, x] == TileType.NEBULA:
+                        # nebulaの影響があっても見える
+                        max_vision_reduction = vision_power_map[y, x] - 1
+                        # 候補をしぼる
+                        for candidate in self._nebula_tile_vision_reduction_candidates:
+                            if max_vision_reduction >= candidate:
+                                new_candidates.add(candidate)
+                elif vision_power_map[y, x] > 0:
+                    # 本来は見えるはずの場所が見えない場合はそこにnebula tileがあるとわかる
+                    min_vision_reduction = vision_power_map[y, x]
+                    # 候補をしぼる
+                    for candidate in self._nebula_tile_vision_reduction_candidates:
+                        if min_vision_reduction <= candidate:
+                            new_candidates.add(candidate)
+                # TODO: 100試合に1回程度(バグっていて？)0になるので直す
+                if len(new_candidates) != 0:
+                    self._nebula_tile_vision_reduction_candidates = new_candidates
+
+        self._prev_tile_type_obs = np.array(obs["map_features"]["tile_type"]).T
+
+    def get_nebula_tile_vision_reduction_estimate(self) -> tuple[float, float]:
+        sum = 0
+        for candidate in self._nebula_tile_vision_reduction_candidates:
+            sum += candidate
+        mean = sum / len(self._nebula_tile_vision_reduction_candidates)
+        sigma = 0
+        for candidate in self._nebula_tile_vision_reduction_candidates:
+            sigma += (candidate - mean) ** 2
+        sigma = np.sqrt(sigma / len(self._nebula_tile_vision_reduction_candidates))
+        return (mean, sigma)
+
+
+def get_action_cost(action: Action, unit_energy: int, unit_sap_cost: int, unit_move_cost: int) -> int:
+    if action == Action.SAP:
+        if unit_energy >= unit_sap_cost:
+            action_cost = unit_sap_cost
+        else:
+            action_cost = 0
+    elif action == Action.CENTER:
+        action_cost = 0
+    elif unit_energy >= unit_move_cost:
+        action_cost = unit_move_cost
+    else:
+        action_cost = 0
+    return action_cost
+
+
+# sap dropoff factor/energy void factorの推定
+class EnergyAttackFactorGuesser:
+    def __init__(self, target_team_id: int, unit_sap_cost: int, unit_move_cost: int) -> None:
+        # TODO: ロジックの確認が終わったら、すべての候補を覚えておいて平均を使う方が安全かもしれない
+        self._sap_dropoff_factor = None
+        self._unit_energy_void_factor_candidates = env_params_ranges["unit_energy_void_factor"]
+        self._target_team_id = target_team_id
+        self._unit_sap_cost = unit_sap_cost
+        self._unit_move_cost = unit_move_cost
+        # fmt off
+        self._adj_8_vec = [[-1, -1], [0, -1], [1, -1], [-1, 0], [1, 0], [-1, 1], [0, 1], [1, 1]]
+
+    # fmt on
+
+    def _update_energy_drop_factor(
+        self, obs: dict[str, Any], prev_obs: dict[str, Any], actions: np.ndarray, energy_node_guesser: EnergyNodeGuesser
+    ) -> None:
+        if self._sap_dropoff_factor is not None:
+            return
+
+        unit_positions = np.array(obs["units"]["position"])  # (max_units, 2)
+        prev_unit_positions = np.array(prev_obs["units"]["position"])
+        unit_energies = np.array(obs["units"]["energy"])  # (max_units, 1)
+        prev_unit_energies = prev_obs["units"]["energy"]
+        tile_type_map = np.array(prev_obs["map_features"]["tile_type"]).T
+        prev_energy_map = np.array(prev_obs["map_features"]["energy"]).T
+
+        unit_positions_set = set()
+        prev_unit_positions_set = set()
+        for unit_id in range(EnvParams.max_units):
+            if unit_positions[self._target_team_id][unit_id][0] != -1:
+                unit_positions_set.add(
+                    (unit_positions[self._target_team_id][unit_id][0], unit_positions[self._target_team_id][unit_id][1])
+                )
+            if prev_unit_positions[self._target_team_id][unit_id][0] != -1:
+                prev_unit_positions_set.add(
+                    (
+                        prev_unit_positions[self._target_team_id][unit_id][0],
+                        prev_unit_positions[self._target_team_id][unit_id][1],
+                    )
+                )
+
+        my_sap_count = np.zeros_like(tile_type_map)
+        my_adj_sap_count = np.zeros_like(tile_type_map)
+        for unit_id, action in enumerate(actions):
+            (prev_x, prev_y) = prev_unit_positions[self._target_team_id][unit_id]
+            # 有効なshipである (今のターンはいなくてもよい)
+            if prev_x == -1 or prev_y == -1:
+                continue
+
+            if action[0] == Action.SAP and prev_unit_energies[self._target_team_id][unit_id] >= self._unit_sap_cost:
+                sap_pos = (prev_x + action[1], prev_y + action[2])
+                # env.pyのl.333-334相当
+                if not in_map(sap_pos):
+                    continue
+                my_sap_count[sap_pos[1], sap_pos[0]] += 1
+                for dx, dy in self._adj_8_vec:
+                    nx = sap_pos[0] + dx
+                    ny = sap_pos[1] + dy
+                    if in_map((nx, ny)):
+                        my_adj_sap_count[ny, nx] += 1
+
+        # energy void の影響がなく、前後で位置が確定している相手ユニットからsap drop off factorを推定
+        for unit_id in range(EnvParams.max_units):
+            # 位置が確定している
+            (x, y) = unit_positions[1 - self._target_team_id][unit_id]
+            (prev_x, prev_y) = prev_unit_positions[1 - self._target_team_id][unit_id]
+            if x == -1 or y == -1 or prev_x == -1 or prev_y == -1:
+                continue
+            # respawnしてない
+            if (x == 0 and y == 0) or (x == EnvParams.map_width - 1 and y == EnvParams.map_height - 1):
+                continue
+            # 移動してないと行動コストがわからないので無視
+            if (x, y) == (prev_x, prev_y):
+                continue
+            # 隣接にsapしてないとわからない
+            if my_adj_sap_count[y, x] == 0:
+                continue
+            # energy void の影響がない(移動後の位置で判定)
+            # 衝突の可能性がない(移動前の位置で判定)
+            adjacent = False
+            for dx in [-1, 1]:
+                if (x + dx, y) in unit_positions_set:
+                    adjacent = True
+                if (prev_x + dx, prev_y) in prev_unit_positions_set:
+                    adjacent = True
+            for dy in [-1, 1]:
+                if (x, y + dy) in unit_positions_set:
+                    adjacent = True
+                if (prev_x, prev_y + dy) in prev_unit_positions_set:
+                    adjacent = True
+
+            if adjacent:
+                continue
+
+            # nebula energy reductionの影響があるところは一旦無視
+            # TODO: あった方が正確かもしれない (energy reductionの精度次第)
+            if tile_type_map[y, x] == TileType.NEBULA:
+                continue
+
+            if energy_node_guesser._energy_map[y, x][0] is False:
+                assert prev_energy_map[y, x] == -1
+                continue
+
+            # 今のエネルギー - 前のエネルギー = energy_map (-nebula reduction) - sap(中央)*回数 - sap(8隣接)*回数 - 行動のコスト
+            # sap(8隣接)*回数 = energ_map (- nebula reduction) - sap(中央)*回数 - 行動のコスト + 前のエネルギー - 今のエネルギー
+            prev_energy_field = energy_node_guesser._energy_map[y, x][1]
+            sap_adj_sum = (
+                -my_sap_count[y, x] * self._unit_sap_cost
+                - self._unit_move_cost
+                + prev_unit_energies[1 - self._target_team_id][unit_id]
+                - unit_energies[1 - self._target_team_id][unit_id]
+            )
+
+            # 0未満のものはfieldからenergyを得られない
+            if unit_energies[1 - self._target_team_id][unit_id] >= 0:
+                sap_adj_sum += prev_energy_field
+
+            # print(f"{sap_adj_sum=} {obs['steps']=} {x=}, {y=}, {prev_energy_field=}, {my_sap_count[y, x]=}, {self._unit_sap_cost=}, {self._unit_move_cost=}, {prev_unit_energies[1 - self._target_team_id][unit_id]=}, {unit_energies[1 - self._target_team_id][unit_id]=} {my_adj_sap_count[y, x]=}")
+            sap_dropoff_factor = sap_adj_sum / (self._unit_sap_cost * my_adj_sap_count[y, x])
+
+            # candidateから一番近いものを選ぶ
+            min_diff = 1e9
+            for candidate in env_params_ranges["unit_sap_dropoff_factor"]:
+                diff = abs(candidate - sap_dropoff_factor)
+                if diff < min_diff:
+                    min_diff = diff
+                    self._sap_dropoff_factor = candidate
+            # assert min_diff < 1e-1, f"guess {sap_dropoff_factor=} is too far"
+            return
+
+    def _update_energy_void_factor(
+        self, obs: dict[str, Any], prev_obs: dict[str, Any], actions: np.ndarray, energy_node_guesser: EnergyNodeGuesser
+    ) -> None:
+        # 0ステップ目は計算できないのでskip
+        if prev_obs is None:
+            return
+        # TODO
+
+    def update(
+        self, obs: dict[str, Any], prev_obs: dict[str, Any], actions: np.ndarray, energy_node_guesser: EnergyNodeGuesser
+    ) -> None:
+        # 0ステップ目は計算できないのでskip
+        if prev_obs is None:
+            return
+
+        self._update_energy_drop_factor(obs, prev_obs, actions, energy_node_guesser)
+        self._update_energy_void_factor(obs, prev_obs, actions, energy_node_guesser)
+
+    def get_sap_dropoff_factor_estimate(self) -> tuple[float, float]:
+        if self._sap_dropoff_factor is None:
+            return (
+                np.mean(env_params_ranges["unit_sap_dropoff_factor"]),
+                np.std(env_params_ranges["unit_sap_dropoff_factor"]),
+            )
+        else:
+            return (self._sap_dropoff_factor, 0)
+
 
 class EpisodeStore:
     def __init__(
@@ -244,6 +630,10 @@ class EpisodeStore:
         self.unit_move_cost = env_cfg["unit_move_cost"]
         self.unit_sap_cost = env_cfg["unit_sap_cost"]
         self.unit_sap_range = env_cfg["unit_sap_range"]
+        self.nebula_tile_vision_reduction_guesser = NebulaTileVisionReductionGuesser(
+            target_team_id, env_cfg["unit_sensor_range"]
+        )
+        self.energy_attack_guesser = EnergyAttackFactorGuesser(target_team_id, self.unit_sap_cost, self.unit_move_cost)
         self.max_sensor_range = env_params_ranges["unit_sensor_range"][-1]
         self.unit_sensor_range = env_cfg["unit_sensor_range"]
         self.reset()
@@ -297,10 +687,10 @@ class EpisodeStore:
     def nebula_energy_reduction(self) -> np.ndarray:
         """
         nebula tileによるエネルギ減少を表す
-        パラメータが未知の場合は-1で埋める
+        パラメータが未知の場合は平均で埋める
         """
         if self._nebula_energy_reduction is None:
-            return (self.tile_type_map == TileType.NEBULA) * -1
+            return (self.tile_type_map == TileType.NEBULA) * np.mean(env_params_ranges["nebula_tile_energy_reduction"])
         else:
             target_map = (
                 (self.tile_type_map == TileType.NEBULA) * self._nebula_energy_reduction / EnvParams.init_unit_energy
@@ -319,7 +709,9 @@ class EpisodeStore:
         self._update_visit_count(obs)
         self._update_points(obs)
         self._update_point_map(obs)
-        self.energy_node_guesser.update_energy_map(obs)
+        self.energy_node_guesser.update_energy(obs)
+        self.nebula_tile_vision_reduction_guesser._update_nebula_tile_vision_reduction(obs)
+        self.energy_attack_guesser.update(obs, self.prev_obs, actions, self.energy_node_guesser)
         self.prev_obs = obs
 
     def _is_finished_relic_search(self) -> bool:
@@ -643,13 +1035,27 @@ class EpisodeStore:
             return
 
         unit_positions = np.array(obs["units"]["position"][self._target_team_id])  # (max_units, 2)
+        prev_unit_positions = np.array(self.prev_obs["units"]["position"][self._target_team_id])  # (max_units, 2)
         unit_energies = np.array(obs["units"]["energy"][self._target_team_id])  # (max_units, 1)
         map_energies = np.array(obs["map_features"]["energy"]).T
         prev_unit_energies = self.prev_obs["units"]["energy"][self._target_team_id]
-        for unit_id, ((x, y), unit_energy) in enumerate(zip(unit_positions, unit_energies)):
+        prev_tile_type_map = np.array(self.prev_obs["map_features"]["tile_type"]).T
+        # TODO: energy voidとかsapされることを考慮してない. ほとんど場合には相手と会う前に決まるので問題ない
+        for unit_id, ((x, y), (prev_x, prev_y), unit_energy) in enumerate(
+            zip(unit_positions, prev_unit_positions, unit_energies)
+        ):
             if x == -1 and y == -1:
                 continue
-            if self._tile_type_map[y, x] != TileType.NEBULA:
+            # このターンspawnしたunitにもactionを送れるが無効なので取り除く
+            if prev_x == -1 and prev_y == -1:
+                continue
+            if abs(x - prev_x) + abs(y - prev_y) > 1:
+                continue
+            if prev_tile_type_map[y, x] != TileType.NEBULA:
+                continue
+            # sap等の相手からの干渉なしでは0未満にならないようになっている. 負の場合は相手から干渉されている.
+            # どちらのケースもnebula_energy_reductionを計算することができないのでスキップ
+            if unit_energy <= 0:
                 continue
 
             map_energy = map_energies[y, x]
@@ -657,16 +1063,12 @@ class EpisodeStore:
 
             # 前ステップからの行動によってユニットのエネルギーが減少するのでそれを考慮
             action = actions[unit_id][0].item()
-            if action == Action.SAP:
-                action_cost = self.unit_sap_cost
-            elif action == Action.CENTER:
-                action_cost = 0
-            else:
-                action_cost = self.unit_move_cost
+            action_cost = get_action_cost(action, unit_energy, self.unit_sap_cost, self.unit_move_cost)
 
             # 現在のエネルギ = 前stepのエネルギ - 移動コスト + マップのエネルギ - nebulaによるエネルギ減少
             # unit_energy = prev_unit_energy - action_cost + map_energy - nebula_energy_reduction
             nebula_energy_reduction = (prev_unit_energy - action_cost + map_energy) - unit_energy
+            # print(f"{obs['steps']=} {nebula_energy_reduction=} {prev_unit_energy=} {unit_energy=} {action_cost=} {map_energy=} {unit_id=}")
             if nebula_energy_reduction in env_params_ranges["nebula_tile_energy_reduction"]:
                 self._nebula_energy_reduction = nebula_energy_reduction
                 return
@@ -686,6 +1088,8 @@ def extract_hidden_state(gt_obs: dict[str, Any], target_team_id: int) -> np.ndar
         unit_positions = np.array(gt_obs["units"]["position"][team_id])  # (max_units, 2)
         for unit_id in range(EnvParams.max_units):
             x, y = unit_positions[unit_id]
+            if x == -1 and y == -1:
+                continue
 
             if team_id == target_team_id:
                 pass
@@ -785,22 +1189,12 @@ def extract_gt_state(obs: dict[str, Any], target_team_id: int) -> np.ndarray:
 
             # 味方同士は重複可能なのでincrementする（敵との重複はないため打ち消し合うことはないはず）
             if team_id == target_team_id:
-                # 重複はそんなに発生しないだろうということで正規化はしない
-                state_map[State.OWN_UNIT_COUNT, y, x] += 1
+                state_map[State.OWN_UNIT_COUNT, y, x] += 1 / EnvParams.max_units
                 state_map[State.OWN_UNIT_ENERGY, y, x] += unit_energy / EnvParams.init_unit_energy
-                state_map[State.OWN_UNIT_MASK, y, x] = unit_mask
             else:
-                state_map[State.OPP_UNIT_COUNT, y, x] += 1
+                state_map[State.OPP_UNIT_COUNT, y, x] += 1 / EnvParams.max_units
                 state_map[State.OPP_UNIT_ENERGY, y, x] += unit_energy / EnvParams.init_unit_energy
-                state_map[State.OPP_UNIT_MASK, y, x] = unit_mask
 
-    # game state
-    state_map[State.MATCH_STEPS] = obs["match_steps"] / EnvParams.max_steps_in_match  # そのマッチの進行度
-    state_map[State.MATCH_COUNT] = obs["steps"] // EnvParams.max_steps_in_match  # 何試合目か
-    state_map[State.TEAM_POINTS] = (obs["team_points"][target_team_id] - obs["team_points"][enemy_team_id]) / 100
-    state_map[State.TEAM_WINS] = (
-        obs["team_wins"][target_team_id] - obs["team_wins"][enemy_team_id]
-    ) / EnvParams.match_count_per_episode
     return state_map
 
 
@@ -826,22 +1220,23 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
     state_map[State.VISIT_COUNT] = episode_store.visit_count
 
     # unit state
+    opp_unit_position_set = set()
     for team_id in range(2):
         # 敵チームの情報はvision内にいない限り見れない
         unit_energies = np.array(obs["units"]["energy"][team_id])  # (max_units, 1)
         unit_positions = np.array(obs["units"]["position"][team_id])  # (max_units, 2)
         unit_masks = np.array(obs["units_mask"][team_id])  # (max_units, )
-        if team_id != target_team_id:
-            # sensor_maskが1(見える範囲)の場合は0にする。それ以外は0.5
-            state_map[State.OPP_UNIT_COUNT] = -1
-            state_map[State.OPP_UNIT_COUNT] *= 1 - state_map[State.SENSOR_MASK]
-            # アステロイドのところは存在しないので0
-            state_map[State.OPP_UNIT_COUNT] *= 1 - (state_map[State.TILE_TYPE] == TileType.ASTEROID)
+        # if team_id != target_team_id:
+        #     # sensor_maskが1(見える範囲)の場合は0にする。それ以外は0.5
+        #     state_map[State.OPP_UNIT_COUNT] = -1
+        #     state_map[State.OPP_UNIT_COUNT] *= 1 - state_map[State.SENSOR_MASK]
+        #     # アステロイドのところは存在しないので0
+        #     state_map[State.OPP_UNIT_COUNT] *= 1 - (state_map[State.TILE_TYPE] == TileType.ASTEROID)
 
-            state_map[State.OPP_UNIT_ENERGY] = -1
-            state_map[State.OPP_UNIT_ENERGY] *= 1 - state_map[State.SENSOR_MASK]
-            # アステロイドのところは存在しないので0
-            state_map[State.OPP_UNIT_ENERGY] *= 1 - (state_map[State.TILE_TYPE] == TileType.ASTEROID)
+        #     state_map[State.OPP_UNIT_ENERGY] = -1
+        #     state_map[State.OPP_UNIT_ENERGY] *= 1 - state_map[State.SENSOR_MASK]
+        #     # アステロイドのところは存在しないので0
+        #     state_map[State.OPP_UNIT_ENERGY] *= 1 - (state_map[State.TILE_TYPE] == TileType.ASTEROID)
 
         # available_unit_ids = np.where(unit_masks)[0]
         for unit_id in range(EnvParams.max_units):
@@ -867,11 +1262,34 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
             else:
                 state_map[State.OPP_UNIT_COUNT, y, x] += 1 / EnvParams.max_units
                 state_map[State.OPP_UNIT_ENERGY, y, x] += unit_energy / EnvParams.init_unit_energy
+                opp_unit_position_set.add((x, y))
                 # state_map[State.OPP_UNIT_MASK, y, x] = unit_mask
+        # 5方向でsensor_maskが1でどこにもOPP_UNITがいない場合はSAP_AVAILABLE_AREAを0にする
+        directions = [(0, 1), (1, 0), (0, -1), (-1, 0), (0, 0)]
+        for y in range(EnvParams.map_height):
+            for x in range(EnvParams.map_width):
+                if state_map[State.SAP_AVAILABLE_AREA, y, x] != 1:
+                    continue
+                condition_ok = True
+                for dx, dy in directions:
+                    nx, ny = x + dx, y + dy
+                    if not in_map((nx, ny)):
+                        continue
+                    if state_map[State.SENSOR_MASK, ny, nx] != 1:
+                        condition_ok = False
+                        break
+                    if (nx, ny) in opp_unit_position_set:
+                        condition_ok = False
+                        break
+                if condition_ok:
+                    state_map[State.SAP_AVAILABLE_AREA, y, x] = 0
+
     return state_map
 
 
-def extract_global_state(obs: dict[str, Any], target_team_id: int, env_params: EnvParams) -> np.ndarray:
+def extract_global_state(
+    obs: dict[str, Any], target_team_id: int, env_params: EnvParams, episode_store: EpisodeStore
+) -> np.ndarray:
     enemy_team_id = 1 - target_team_id
     global_states = np.zeros((len(GlobalState),), dtype=np.float32)
     # game state
@@ -890,24 +1308,61 @@ def extract_global_state(obs: dict[str, Any], target_team_id: int, env_params: E
     global_states[GlobalState.UNIT_SAP_COST] = env_params.unit_sap_cost / env_params.init_unit_energy
     global_states[GlobalState.UNIT_SAP_RANGE] = env_params.unit_sap_range
     global_states[GlobalState.UNIT_SENSOR_RANGE] = env_params.unit_sensor_range
+    (vision_reduction_mean, vision_reduction_std) = (
+        episode_store.nebula_tile_vision_reduction_guesser.get_nebula_tile_vision_reduction_estimate()
+    )
+    global_states[GlobalState.NEBULA_TILE_VISION_REDUCTION_MEAN] = vision_reduction_mean / max(
+        env_params_ranges["nebula_tile_vision_reduction"]
+    )
+    global_states[GlobalState.NEBULA_TILE_VISION_REDUCTION_SIGMA] = vision_reduction_std / max(
+        env_params_ranges["nebula_tile_vision_reduction"]
+    )
+    (energy_drift_speed_mean, energy_drift_speed_std) = (
+        episode_store.energy_node_guesser.get_energy_drft_speed_estimate()
+    )
+    global_states[GlobalState.ENERGY_NODE_DRIFT_SPEED_MEAN] = energy_drift_speed_mean / max(
+        env_params_ranges["energy_node_drift_speed"]
+    )
+    global_states[GlobalState.ENERGY_NODE_DRIFT_SPEED_SIGMA] = energy_drift_speed_std / max(
+        env_params_ranges["energy_node_drift_speed"]
+    )
+    global_states[GlobalState.NEBULA_TILE_ENERGY_REDUCTION_MEAN] = (
+        episode_store._nebula_energy_reduction
+        if episode_store._nebula_energy_reduction is not None
+        else np.mean(env_params_ranges["nebula_tile_energy_reduction"])
+    ) / max(env_params_ranges["nebula_tile_energy_reduction"])
+    global_states[GlobalState.NEBULA_TILE_ENERGY_REDUCTION_SIGMA] = (
+        0
+        if episode_store._nebula_energy_reduction is not None
+        else np.std(env_params_ranges["nebula_tile_energy_reduction"])
+    ) / max(env_params_ranges["nebula_tile_energy_reduction"])
+    (unit_sap_dropoff_factor_mean, unit_sap_dropoff_factor_std) = (
+        episode_store.energy_attack_guesser.get_sap_dropoff_factor_estimate()
+    )
+    global_states[GlobalState.UNIT_SAP_DROPOFF_FACTOR_MEAN] = unit_sap_dropoff_factor_mean / max(
+        env_params_ranges["unit_sap_dropoff_factor"]
+    )
+    global_states[GlobalState.UNIT_SAP_DROPOFF_FACTOR_SIGMA] = unit_sap_dropoff_factor_std / max(
+        env_params_ranges["unit_sap_dropoff_factor"]
+    )
     return global_states
 
 
 def extract_hidden_global_state(env_params: dict[str, Any]) -> np.ndarray:
     hidden_global_states = np.zeros((len(HiddenGlobalState),), dtype=np.float32)
-    hidden_global_states[HiddenGlobalState.NEBULA_TILE_VISION_REDUCTION] = env_params.nebula_tile_vision_reduction
-    hidden_global_states[HiddenGlobalState.NEBULA_TILE_ENERGY_REDUCTION] = env_params.nebula_tile_energy_reduction
-    hidden_global_states[HiddenGlobalState.UNIT_SAP_DROPOFF_FACTOR] = env_params.unit_sap_dropoff_factor
-    hidden_global_states[HiddenGlobalState.UNIT_ENERGY_VOID_FACTOR] = env_params.unit_energy_void_factor
+    # hidden_global_states[HiddenGlobalState.NEBULA_TILE_VISION_REDUCTION] = env_params.nebula_tile_vision_reduction
+    # hidden_global_states[HiddenGlobalState.NEBULA_TILE_ENERGY_REDUCTION] = env_params.nebula_tile_energy_reduction
+    # hidden_global_states[HiddenGlobalState.UNIT_SAP_DROPOFF_FACTOR] = env_params.unit_sap_dropoff_factor
+    # hidden_global_states[HiddenGlobalState.UNIT_ENERGY_VOID_FACTOR] = env_params.unit_energy_void_factor
     # hidden_global_states[HiddenGlobalState.NEBULA_TILE_DRIFT_SPEED] = env_params.nebula_tile_drift_speed
-    hidden_global_states[HiddenGlobalState.ENERGY_NODE_DRIFT_SPEED] = env_params.energy_node_drift_speed
+    # hidden_global_states[HiddenGlobalState.ENERGY_NODE_DRIFT_SPEED] = env_params.energy_node_drift_speed
     hidden_global_states[HiddenGlobalState.ENERGY_NODE_DRIFT_MAGNITUDE] = env_params.energy_node_drift_magnitude
 
     return hidden_global_states
 
 
 def extract_action(actions: np.ndarray, obs: dict[str, Any], target_team_id: int) -> np.ndarray:
-    action_map = np.zeros((2, EnvParams.map_width, EnvParams.map_height), dtype=np.float32)
+    action_map = np.zeros((3, EnvParams.map_width, EnvParams.map_height), dtype=np.float32)
     # unit state
     unit_masks = np.array(obs["units_mask"][target_team_id])  # (max_units, )
     unit_positions = np.array(obs["units"]["position"][target_team_id])  # (max_units, 2)
@@ -923,6 +1378,7 @@ def extract_action(actions: np.ndarray, obs: dict[str, Any], target_team_id: int
             ny = y + dy
             if in_map((nx, ny)):
                 action_map[1, ny, nx] = 1
+                action_map[2, ny, nx] += 1
     return action_map
 
 
@@ -997,4 +1453,40 @@ def can_move(pos: tuple[int, int], energy: int, dir: int, tile_type_map: np.ndar
 
 
 def can_sap(x: int, y: int, energy: int, unit_sap_cost: int, tile_type_map: np.ndarray):
-    return energy >= unit_sap_cost and tile_type_map[y, x] != TileType.ASTEROID
+    return energy >= unit_sap_cost
+
+
+# 相対位置を計算
+def calc_relative_pos(base_pos: np.ndarray, target_pos: np.ndarray) -> np.ndarray:
+    return target_pos - base_pos
+
+
+# マスの半径kマス以内に該当するかどうか
+def is_within_k_tiles(base_pos: np.ndarray, target_pos: np.ndarray, k: int) -> bool:
+    return np.abs(base_pos[0] - target_pos[0]) <= k and np.abs(base_pos[1] - target_pos[1]) <= k
+
+
+# 隣接するマスにあるポイントマスを取得
+def get_nearby_point_positions(pos: np.ndarray, point_map: np.ndarray, k: int = 1) -> list[np.ndarray]:
+    # posを中心にkマス以内のマスを取得
+    nearby_positions = []
+    up_pos = (pos[0], pos[1] - k)
+    if in_map(up_pos) and point_map[up_pos[1], up_pos[0]] == 1:
+        nearby_positions.append(up_pos)
+    down_pos = (pos[0], pos[1] + k)
+    if in_map(down_pos) and point_map[down_pos[1], down_pos[0]] == 1:
+        nearby_positions.append(down_pos)
+    left_pos = (pos[0] - k, pos[1])
+    if in_map(left_pos) and point_map[left_pos[1], left_pos[0]] == 1:
+        nearby_positions.append(left_pos)
+    right_pos = (pos[0] + k, pos[1])
+    if in_map(right_pos) and point_map[right_pos[1], right_pos[0]] == 1:
+        nearby_positions.append(right_pos)
+    return nearby_positions
+
+
+# 自身の周囲kタイル以内にいる敵ユニットを抽出
+def get_nearby_enemy_unit_ids(
+    unit_pos: tuple[int, int], opp_unit_positions: list[tuple[int, int]], k: int
+) -> list[int]:
+    return [unit_id for unit_id, pos in enumerate(opp_unit_positions) if is_within_k_tiles(unit_pos, pos, k)]

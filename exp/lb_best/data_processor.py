@@ -4,7 +4,6 @@ import logging
 from typing import Any
 from pathlib import Path
 from dataclasses import field, dataclass
-from concurrent.futures import ProcessPoolExecutor
 
 import h5py
 import numpy as np
@@ -37,8 +36,8 @@ class Config:
     stratify: bool = False
     root_dir: Path = Path("/kaggle")
     input_dir: Path = root_dir / "input"
-    episode_dir: Path = root_dir / "data/42704976/episodes"
-    episode_path: Path = root_dir / "data/42704976/episodes.csv"
+    episode_dir: Path = root_dir / "data/42704976_latest/episodes"
+    episode_path: Path = root_dir / "data/42704976_latest/episodes.csv"
     feature_dir: Path = root_dir / f"output/feature_store/{exp_name}"
     target_team_name: str = "Frog Parade"
     target_sub_ids: list[int] = field(default_factory=lambda: [42704976])
@@ -46,6 +45,7 @@ class Config:
 
     use_only_win_data: bool = True
     ignore_after_3_wins: bool = False
+    only_win_final_match: bool = False
 
 
 def get_fold(_train: pl.DataFrame, cv: list[tuple[np.ndarray, np.ndarray]]) -> pl.DataFrame:
@@ -112,8 +112,8 @@ class DataProcessor:
     def _process_episode(self, row) -> tuple[str, int, int]:
         sub_id = row["SubmissionId"]
         episode_id = row["EpisodeId"]
+        episode_path = self.episode_dir / f"{sub_id}/{episode_id}.json"
 
-        episode_path = f"{self.episode_dir}/{sub_id}/{episode_id}.json"
         try:
             with open(episode_path) as f:
                 json_load = json.load(f)
@@ -131,9 +131,8 @@ class DataProcessor:
         
         target_team_id = json_load["info"]["TeamNames"].index(self.cfg.target_team_name)
         match_results = get_match_results(json_load, target_team_id)
-        
-        # experimental
-        if not match_results[-1]:
+
+        if not match_results[-1] and self.cfg.only_win_final_match:
             return None
         
         final_step_in_match = [(i_match + 1) * EnvParams.max_steps_in_match + i_match for i_match in range(EnvParams.match_count_per_episode)]
@@ -176,7 +175,7 @@ class DataProcessor:
                     state = extract_state(obs, target_team_id, episode_store)
                 episode_state_group.create_dataset(f"{step_idx}", data=state)
 
-                global_state = extract_global_state(obs, target_team_id, env_params)
+                global_state = extract_global_state(obs, target_team_id, env_params, episode_store)
                 episode_global_state_group.create_dataset(f"{step_idx}", data=global_state)
 
                 hidden_state = extract_hidden_state(gt_obs, target_team_id)
@@ -222,9 +221,8 @@ class DataProcessor:
         return get_kfold(df, self.cfg.n_splits, self.cfg.seed, stratify=self.cfg.stratify)
 
     def run(self) -> None:
-        episode_df = self.read_data()
-
-        df = self.preprocess(episode_df)
+        episode_paths = self.read_data()
+        df = self.preprocess(episode_paths)
         if not self.cfg.debug:
             df = self.add_fold(df)
         df.write_csv(self.feature_dir / "train.csv")
@@ -235,8 +233,12 @@ def get_match_results(json_load: dict[str, Any], target_team_id: int) -> list[bo
     for i_match in range(EnvParams.match_count_per_episode):
         final_step_in_match = (i_match + 1) * 100 + i_match  # 100, 201, 302, 403, 504
 
-        teams_wins_after = np.asarray(json_load["steps"][final_step_in_match + 1][0]["info"]["replay"]["observations"][0]["team_wins"])
-        teams_wins_before = np.asarray(json_load["steps"][final_step_in_match][0]["info"]["replay"]["observations"][0]["team_wins"])
+        teams_wins_after = np.asarray(
+            json_load["steps"][final_step_in_match + 1][0]["info"]["replay"]["observations"][0]["team_wins"]
+        )
+        teams_wins_before = np.asarray(
+            json_load["steps"][final_step_in_match][0]["info"]["replay"]["observations"][0]["team_wins"]
+        )
         win_team = np.argmax(teams_wins_after - teams_wins_before)
 
         is_win = win_team == target_team_id
