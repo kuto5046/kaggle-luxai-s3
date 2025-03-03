@@ -741,11 +741,20 @@ class LuxConvLSTMModel(nn.Module):
             bias=True
         )
 
-        self.policy_net = OutConv(self.hidden_dim, action_space_size)
+        # self.policy_net = OutConv(self.hidden_dim, action_space_size)
         self.sap_net = nn.Sequential(
             ResidualBlock(self.hidden_dim, self.hidden_dim, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False),
             ResidualBlock(self.hidden_dim, self.hidden_dim, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False),
             OutConvWithNorm(self.hidden_dim, 1)
+        )
+        self.policy_net1_from_sap = ResidualBlock(
+            1, 16, EnvParams.map_width, EnvParams.map_width, kernel_size=15, squeeze_excitation=False
+        )
+        self.concat_norm = nn.BatchNorm2d(self.hidden_dim + 16)
+        self.policy_net = nn.Sequential(
+            ResidualBlock(self.hidden_dim + 16, self.hidden_dim, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False),
+            ResidualBlock(self.hidden_dim, self.hidden_dim, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False),
+            OutConv(self.hidden_dim, action_space_size)
         )
 
 
@@ -763,8 +772,12 @@ class LuxConvLSTMModel(nn.Module):
             xt = self.inc(xt)
             xt, hidden = self.drc(xt, hidden, num_repeats=self.num_repeats)    
        
-        policy_logits = self.policy_net(xt)
         sap_logits = self.sap_net(xt)
+        
+        policy_logits = self.policy_net1_from_sap(sap_logits)
+        policy_logits = torch.cat([xt, policy_logits], dim=1)
+        policy_logits = self.concat_norm(policy_logits)
+        policy_logits = self.policy_net(policy_logits)
         
         return {
             "policy": policy_logits,
