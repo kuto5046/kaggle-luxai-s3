@@ -1382,22 +1382,22 @@ def extract_action(actions: np.ndarray, obs: dict[str, Any], target_team_id: int
     return action_map
 
 
-def get_valid_policy_map(obs: dict[str, Any], team_id: int, episode_store: EpisodeStore) -> np.ndarray:
-    validate_policy_map = np.zeros((len(Action), EnvParams.map_width, EnvParams.map_height), dtype=np.float32)
+def get_valid_policy_per_unit(obs: dict[str, Any], team_id: int, episode_store: EpisodeStore) -> np.ndarray:
+    validate_policy_map = np.zeros((EnvParams.max_units, len(Action)), dtype=np.float32)
     available_unit_ids = np.where(obs["units_mask"][team_id])[0]
     for unit_id in available_unit_ids:
         pos = tuple(obs["units"]["position"][team_id][unit_id])
         x, y = pos
+        assert x != -1 and y != -1
         energy = obs["units"]["energy"][team_id][unit_id]
 
-        validate_policy_map[:, y, x] = 1  # 行動は一旦全て有効化
-
+        validate_policy_map[unit_id, :] = 1
         for dir in [Action.UP, Action.RIGHT, Action.DOWN, Action.LEFT]:
             if not can_move(pos, energy, dir, episode_store.tile_type_map, episode_store.unit_move_cost):
-                validate_policy_map[dir, y, x] = 0
+                validate_policy_map[unit_id, dir] = 0
 
         if not can_sap(x, y, energy, episode_store.unit_sap_cost, episode_store.tile_type_map):
-            validate_policy_map[Action.SAP, y, x] = 0
+            validate_policy_map[unit_id, Action.SAP] = 0
     return validate_policy_map
 
 
