@@ -129,7 +129,7 @@ class ILAgent:
             state_space_size=len(State),
             global_state_space_size=len(GlobalState),
             action_space_size=len(Action),
-            hidden_state_space_size=len(HiddenState),
+            # hidden_state_space_size=len(HiddenState),
             num_layers=cfg.num_layers,
             hidden_dim=cfg.hidden_dim,
             kernel_size=cfg.kernel_size,
