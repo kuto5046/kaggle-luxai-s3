@@ -34,10 +34,10 @@ class Config:
     use_gt: bool = False
     n_splits: int = 5
     stratify: bool = False
-    root_dir: Path = Path("/kaggle")
+    root_dir: Path = Path("/home/user/work")
     input_dir: Path = root_dir / "input"
-    episode_dir: Path = root_dir / "data/42704976_latest/episodes"
-    episode_path: Path = root_dir / "data/42704976_latest/episodes.csv"
+    episode_dir: Path = input_dir / "kaggle_datasets/luxai-s3-frog-parade-42704976-ver2/episodes"
+    episode_path: Path = input_dir / "kaggle_datasets/luxai-s3-frog-parade-42704976-ver2/episodes.csv"
     feature_dir: Path = root_dir / f"output/feature_store/{exp_name}"
     target_team_name: str = "Frog Parade"
     target_sub_ids: list[int] = field(default_factory=lambda: [42704976])

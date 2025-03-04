@@ -28,7 +28,7 @@ class Config:
     debug: bool = False
     n_splits: int = 5
     use_fold: int = 0
-    root_dir: Path = Path("/kaggle")
+    root_dir: Path = Path("/home/user/work")
     feature_version: str = exp_name
     feature_dir: Path = root_dir / f"output/feature_store/{feature_version}"
     output_dir = root_dir / f"exp/{exp_name}/output"
@@ -38,10 +38,10 @@ class Config:
     limit_train_batches: float = 1.0
     limit_val_batches: float = 1.0
     use_amp: bool = True
-    batch_size: int = 512
-    num_workers: int = 24
-    ckpt_path: str = "agents/exp622_epoch21/output/best_model.ckpt"
-    lr: float = 0.001
+    batch_size: int = 192
+    num_workers: int = 20
+    ckpt_path: Path = root_dir / "agents/exp627/output/best_model.ckpt"
+    lr: float = 0.0003
     weight_decay: float = 0.01
     warmup_step_rate: float = 0.1
     
@@ -49,7 +49,7 @@ class Config:
     num_repeats: int = 3
     num_layers: int = 3
     hidden_dim: int = 64
-    n_stack: int = 8
+    n_stack: int = 12
     kernel_size: int = 5
     aug: bool = True
     freeze: bool = False
@@ -122,7 +122,7 @@ class TrainPipeline:
         if not self.cfg.debug:
             self.pl_logger = WandbLogger(
                 project="kaggle-luxai-s3",
-                entity="okumura",
+                entity="cnumber",
                 # name=f"{self.cfg.exp_name}",
                 group=self.cfg.exp_name,
                 mode="disabled" if self.cfg.debug else "online",
