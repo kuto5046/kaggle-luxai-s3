@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import h5py
 import numpy as np
 import torch
+import wandb
 import polars as pl
 import torch.nn.functional as F
 from torch import nn, optim
@@ -15,9 +16,7 @@ from torchmetrics import Accuracy, MetricCollection
 from transformers import get_cosine_schedule_with_warmup
 from torch.utils.data import Dataset, DataLoader
 
-import wandb
-
-from .utils import State, Action, GlobalState, HiddenState, HiddenGlobalState, to_np
+from .utils import State, Action, GlobalState, to_np
 from .params import EnvParams
 
 
@@ -48,6 +47,7 @@ class LuxAugmentBase:
         action = np.where(action == -1, 2 + offset, action)
         return action
 
+
 # 自陣を(0,0)にする
 class LuxAugmentStandardize(LuxAugmentBase):
     def __init__(self) -> None:
@@ -59,6 +59,7 @@ class LuxAugmentStandardize(LuxAugmentBase):
         hidden_state = inputs["hidden_state"].copy()
         action = inputs["action"].copy()
         sap = inputs["sap"].copy()
+        sap_count = inputs["sap_count"].copy()
 
         # 原点を自陣とする
         # TODO agent_id を用いて自陣を判定する
@@ -74,11 +75,13 @@ class LuxAugmentStandardize(LuxAugmentBase):
             action = self.switch_action(action, Action.UP, Action.DOWN)
             action = self.switch_action(action, Action.LEFT, Action.RIGHT)
             sap = np.flip(sap, axis=(0, 1)).copy()
+            sap_count = np.flip(sap_count, axis=(0, 1)).copy()
 
         inputs["state"] = state
         inputs["hidden_state"] = hidden_state
         inputs["action"] = action
         inputs["sap"] = sap
+        inputs["sap_count"] = sap_count
         return inputs
 
 
@@ -92,6 +95,7 @@ class LuxAugmentTranspose(LuxAugmentBase):
         hidden_state = inputs["hidden_state"].copy()
         action = inputs["action"].copy()
         sap = inputs["sap"].copy()
+        sap_count = inputs["sap_count"].copy()
 
         if random.random() < self.p:
             state = np.transpose(state, (0, 1, 3, 2)).copy()
@@ -100,11 +104,13 @@ class LuxAugmentTranspose(LuxAugmentBase):
             action = self.switch_action(action, Action.UP, Action.LEFT)
             action = self.switch_action(action, Action.DOWN, Action.RIGHT)
             sap = np.transpose(sap, (1, 0)).copy()
+            sap_count = np.transpose(sap_count, (1, 0)).copy()
 
         inputs["state"] = state
         inputs["hidden_state"] = hidden_state
         inputs["action"] = action
         inputs["sap"] = sap
+        inputs["sap_count"] = sap_count
         return inputs
 
 
@@ -144,19 +150,21 @@ class LaxDataset(Dataset):
         global_state = np.stack(global_states, axis=0)  # (n_stack, channel)
 
         hidden_state = np.array(self.h5_file[str(episode_id)]["hidden_states"][str(step_idx)]).astype(np.float32)
-        hidden_global_state = np.array(self.h5_file[str(episode_id)]["hidden_global_states"][str(step_idx)]).astype(
-            np.float32
-        )
+        # hidden_global_state = np.array(self.h5_file[str(episode_id)]["hidden_global_states"][str(step_idx)]).astype(
+        #     np.float32
+        # )
         actions = np.array(self.h5_file[str(episode_id)]["actions"][str(step_idx)]).astype(np.float32)
         action = actions[0]
         sap = actions[1]
+        sap_count = actions[2]
         win = np.array(self.h5_file[str(episode_id)]["win"][str(step_idx)]).astype(np.float32)
         inputs = {
             "state": state,
             "global_state": global_state,
             "hidden_state": hidden_state,
-            "hidden_global_state": hidden_global_state,
+            # "hidden_global_state": hidden_global_state,
             "action": action,
+            "sap_count": sap_count,
             "sap": sap,
             "win": win,
         }
@@ -216,25 +224,39 @@ class LaxLitModel(LightningModule):
         super().__init__()
         self.cfg = cfg
         self.output_dir = self.cfg.output_dir
-        self.model = LuxUNetModel(
+        self.model = LuxConvLSTMModel(
             state_space_size=len(State),
             global_state_space_size=len(GlobalState),
             action_space_size=len(Action),
-            hidden_state_space_size=len(HiddenState),
-            n_stack=cfg.n_stack,
-            res=cfg.res,
+            num_repeats=cfg.num_repeats,
+            num_layers=cfg.num_layers,
+            hidden_dim=cfg.hidden_dim, 
+            kernel_size=cfg.kernel_size,
         )
+        if self.cfg.freeze:
+            self.freeze()
+        
         self.criterion1 = DiceLoss(n_classes=len(Action))
         # self.criterion1 = MaskedBCEWithLogitsLoss()
         self.criterion2 = nn.BCEWithLogitsLoss()
         self.criterion3 = nn.MSELoss()
-        self.criterion4 = MaskedFocalLoss()
+        self.criterion4 = MaskedFocalTverskyLoss(
+            alpha=0.3, beta=0.7, gamma=1.0, smooth=1e-3
+        )  # sapを行わない背景が多数で学習が進まない問題を解決するための損失関数
 
         metrics = self.get_metrics()
         self.train_metrics = metrics.clone(postfix="/train")
         self.valid_metrics = metrics.clone(postfix="/valid")
         self.valid_outputs = {"ground_truth": [], "predictions": []}
 
+    def freeze(self):
+        for param in self.model.inc.parameters():
+            param.requires_grad = False
+        for param in self.model.drc.parameters():
+            param.requires_grad = False
+        for param in self.model.policy_net.parameters():
+            param.requires_grad = False
+            
     def forward(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
         return self.model(batch)
 
@@ -249,22 +271,27 @@ class LaxLitModel(LightningModule):
 
         policy_preds = torch.softmax(outputs["policy"], dim=1)
         policy_targets = one_hot_encoder(batch["action"], n_classes=len(Action))
-        # policy_mask = (batch["state"][:, -1, State.OWN_UNIT_COUNT] > 0).unsqueeze(1)  # (batch_size, 1, w, h)
-        # policy_loss = self.criterion1(policy_preds, policy_targets, policy_mask)
         policy_loss = self.criterion1(policy_preds, policy_targets)
 
-        # value_loss = self.criterion2(outputs["value"].flatten(), batch["win"])
-        state_loss = self.criterion3(outputs["state"].flatten(), batch["hidden_state"].flatten())
-        global_state_loss = self.criterion3(outputs["global_state"].flatten(), batch["hidden_global_state"].flatten())
+        sap_available_mask = batch["state"][:, -1, State.SAP_AVAILABLE_AREA] > 0  # (batch_size, w, h)
+        sap_output = outputs["sap"].squeeze(1)  # shape: (batch, H, W)
+        # 各サンプルごとに空間軸 (H, W) の和を計算し、sap が行われているか判定
+        sap_present_mask = batch["sap"].view(sap_output.shape[0], -1).sum(dim=1) > 0
 
-        # sap_available_mask = (batch["state"][:, -1, State.SAP_AVAILABLE_AREA] > 0)  # (batch_size, w, h)
-        # sap_loss = self.criterion4(outputs["sap"].squeeze(1), batch["sap"], sap_available_mask)
+        if sap_present_mask.sum() > 0:
+            # sap_loss は、sap が存在するサンプルのみで計算
+            # 背景の部分が多すぎて学習が進みにくいので、sap_available_mask を使って背景をマスクする
+            sap_loss = self.criterion4(
+                sap_output[sap_present_mask], batch["sap"][sap_present_mask], sap_available_mask[sap_present_mask]
+            )
+        else:
+            sap_loss = 0
         loss = (
             policy_loss * self.cfg.loss_weight_policy
-            + state_loss * self.cfg.loss_weight_state
+            # + state_loss * self.cfg.loss_weight_state
             # + value_loss * self.cfg.loss_weight_value
-            + global_state_loss * self.cfg.loss_weight_global_state
-            # + sap_loss * self.cfg.loss_weight_sap
+            # + global_state_loss * self.cfg.loss_weight_global_state
+            + sap_loss * self.cfg.loss_weight_sap
         )
 
         self.log(
@@ -275,14 +302,14 @@ class LaxLitModel(LightningModule):
             prog_bar=False,
             logger=True,
         )
-        # self.log(
-        #     f"SapLoss/{mode}",
-        #     sap_loss,
-        #     on_step=False,
-        #     on_epoch=True,
-        #     prog_bar=False,
-        #     logger=True,
-        # )
+        self.log(
+            f"SapLoss/{mode}",
+            sap_loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+        )
         # self.log(
         #     f"ValueLoss/{mode}",
         #     value_loss,
@@ -291,23 +318,23 @@ class LaxLitModel(LightningModule):
         #     prog_bar=False,
         #     logger=True,
         # )
-        self.log(
-            f"StateLoss/{mode}",
-            state_loss,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=False,
-            logger=True,
-        )
+        # self.log(
+        #     f"StateLoss/{mode}",
+        #     state_loss,
+        #     on_step=False,
+        #     on_epoch=True,
+        #     prog_bar=False,
+        #     logger=True,
+        # )
 
-        self.log(
-            f"GlobalStateLoss/{mode}",
-            global_state_loss,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=False,
-            logger=True,
-        )
+        # self.log(
+        #     f"GlobalStateLoss/{mode}",
+        #     global_state_loss,
+        #     on_step=False,
+        #     on_epoch=True,
+        #     prog_bar=False,
+        #     logger=True,
+        # )
         self.log(
             f"Loss/{mode}",
             loss,
@@ -329,6 +356,7 @@ class LaxLitModel(LightningModule):
             self.valid_metrics.update(preds, gts)
             self.valid_outputs["ground_truth"].append(to_np(gts))
             self.valid_outputs["predictions"].append(to_np(preds))
+
         return loss
 
     def on_train_epoch_end(self) -> None:
@@ -414,7 +442,7 @@ def one_hot_encoder(input_tensor: torch.Tensor, n_classes: int) -> torch.Tensor:
 
 
 class DoubleConv(nn.Module):
-    """(convolution => [BN] => ReLU) * 2"""
+    """(convolution => [BN] => LeakyReLU) * 2"""
 
     def __init__(self, in_channels: int, out_channels: int, mid_channels: int | None = None, res: bool = False) -> None:
         super().__init__()
@@ -423,10 +451,10 @@ class DoubleConv(nn.Module):
         self.double_conv = nn.Sequential(
             nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(mid_channels),
-            nn.ReLU(inplace=True),
+            nn.LeakyReLU(inplace=True),
             nn.Conv2d(mid_channels, out_channels, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
+            nn.LeakyReLU(inplace=True),
         )
         self.res = res
         # 入力と出力のチャンネル数が異なる場合のための1x1 convolution
@@ -506,13 +534,24 @@ class OutConv(nn.Module):
         return self.conv(x)
 
 
+class OutConvWithNorm(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int) -> None:
+        super().__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
+        self.bn = nn.BatchNorm2d(out_channels)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.conv(x)
+        x = self.bn(x)
+        return x
+
+
 class LuxUNetModel(nn.Module):
     def __init__(
         self,
         state_space_size: int,
         global_state_space_size: int,
         action_space_size: int,
-        hidden_state_space_size: int,
         n_stack: int,
         bilinear: bool = True,
         res: bool = False,
@@ -525,29 +564,27 @@ class LuxUNetModel(nn.Module):
         self.down2 = Down(128, 256, res=res)
         self.down3 = Down(256, 256, res=res)
 
-        #
         factor = 2 if bilinear else 1
+
+        # グローバル状態の情報を統合した後の特徴マップを各タスクに分岐
         self.up1 = Up(256 * 2 + global_state_space_size, 256 // factor, bilinear)
         self.up2 = Up(256, 128 // factor, bilinear)
         self.up3 = Up(128, 64, bilinear)
-        self.policy_net = OutConv(64 * n_stack, action_space_size)
-        # self.sap_net = OutConv(64 * n_stack, 1)
-        self.state_net = OutConv(64 * n_stack, hidden_state_space_size)
-        self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
-        # self.value_net = nn.Sequential(
-        #     nn.Linear((256 + global_state_space_size) * n_stack, 128),
-        #     nn.ReLU(),
-        #     nn.Linear(128, 64),
-        #     nn.ReLU(),
-        #     nn.Linear(64, 1),
-        # )
-        self.global_state_net = nn.Sequential(
-            nn.Linear((256 + global_state_space_size) * n_stack, 128),
-            nn.ReLU(),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, len(HiddenGlobalState)),
+        self.sap_net1 = ResidualBlock(
+            64 * n_stack, 64, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False
         )
+        self.sap_net2 = ResidualBlock(64, 64, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False)
+        self.sap_net3 = OutConvWithNorm(64, 1)  # かなり極端な値を出力するので正規化することで学習を安定化させる
+        # sap候補位置をpolicyの特徴マップに統合. sap rangeの最大値が7なのでkernel_size=15にしている
+        self.policy_net1_from_sap = ResidualBlock(
+            1, 16, EnvParams.map_width, EnvParams.map_width, kernel_size=15, squeeze_excitation=False
+        )
+        self.concat_norm = nn.BatchNorm2d(64 * n_stack + 16)
+        self.policy_net2 = ResidualBlock(
+            64 * n_stack + 16, 64, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False
+        )
+        self.policy_net3 = ResidualBlock(64, 64, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False)
+        self.policy_net4 = OutConv(64, action_space_size)  # ここでWithNormを使うとCenterが全部Sapと予測されてしまった。
 
     def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         state = batch["state"]
@@ -566,27 +603,329 @@ class LuxUNetModel(nn.Module):
         gx = gx.repeat(1, 1, sx, sy)
 
         x4 = torch.cat([x4, gx], dim=1)
-        x = self.global_avg_pool(x4).view(_n, -1)
+        # x = self.global_avg_pool(x4).view(_n, -1)
         # value_logits = self.value_net(x)
-        global_state_logits = self.global_state_net(x)
+        # global_state_logits = self.global_state_net(x)
 
         x = self.up1(x4, x3)
         x = self.up2(x, x2)
         x = self.up3(x, x1)
-
         x = x.view(_n, -1, _x, _y)
-        policy_logits = self.policy_net(x)
-        # sap_logits = self.sap_net(x)
-        state_logits = self.state_net(x)
+
+        sap_logits1 = self.sap_net1(x)
+        sap_logits2 = self.sap_net2(sap_logits1)
+        sap_logits = self.sap_net3(sap_logits2)
+
+        # sap_net の出力は logits のまま扱う(ここで sigmoid はかけない)
+        policy_logits1 = self.policy_net1_from_sap(sap_logits)
+        # x は [N, 64*n_stack, H, W]、policy_logits1 は [N, 16, H, W] なので連結後のチャネル数は 64*n_stack+16
+        policy_features = torch.cat([x, policy_logits1], dim=1)
+        # 連結後に正規化を適用
+        policy_features = self.concat_norm(policy_features)
+        policy_logits = self.policy_net2(policy_features)
+        policy_logits = self.policy_net3(policy_logits)
+        policy_logits = self.policy_net4(policy_logits)
 
         return {
             "policy": policy_logits,
-            # "sap": sap_logits,
-            "state": state_logits,
-            "global_state": global_state_logits,
+            "sap": sap_logits,
+            # "state": state_logits,
+            # "global_state": global_state_logits,
             # "value": value_logits,
         }
 
+
+class ConvLSTMCell(nn.Module):
+    def __init__(self, input_dim, hidden_dim, kernel_size, bias):
+        super().__init__()
+
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+
+        self.kernel_size = kernel_size
+        self.padding = kernel_size[0] // 2, kernel_size[1] // 2
+        self.bias = bias
+
+        self.conv = nn.Conv2d(
+            in_channels=self.input_dim + self.hidden_dim,
+            out_channels=4 * self.hidden_dim,
+            kernel_size=self.kernel_size,
+            padding=self.padding,
+            bias=self.bias
+        )
+
+    def init_hidden(self, input_size, batch_size):
+        return (
+            torch.zeros(*batch_size, self.hidden_dim, *input_size),
+            torch.zeros(*batch_size, self.hidden_dim, *input_size),
+        )
+
+    def forward(self, input_tensor, cur_state):
+        h_cur, c_cur = cur_state
+        combined = torch.cat([input_tensor, h_cur], dim=-3)  # (B, C_in + C_hidden, H, W)
+        combined_conv = self.conv(combined)
+        cc_i, cc_f, cc_o, cc_g = torch.split(combined_conv, self.hidden_dim, dim=-3)
+        
+        i = torch.sigmoid(cc_i)
+        f = torch.sigmoid(cc_f)
+        o = torch.sigmoid(cc_o)
+        g = torch.tanh(cc_g)
+
+        c_next = f * c_cur + i * g
+        h_next = o * torch.tanh(c_next)
+        return h_next, c_next
+
+
+class DRC(nn.Module):
+    def __init__(self, num_layers, input_dim, hidden_dim, kernel_size=3, bias=True):
+        super().__init__()
+        self.num_layers = num_layers
+
+        blocks = []
+        for _ in range(self.num_layers):
+            blocks.append(ConvLSTMCell(
+                input_dim=input_dim,
+                hidden_dim=hidden_dim,
+                kernel_size=(kernel_size, kernel_size),
+                bias=bias
+            ))
+        self.blocks = nn.ModuleList(blocks)
+
+    def init_hidden(self, input_size, batch_size, device):
+        hs, cs = [], []
+        for block in self.blocks:
+            h, c = block.init_hidden(input_size, batch_size)
+            h = h.to(device)
+            c = c.to(device)
+            hs.append(h)
+            cs.append(c)
+        return hs, cs
+
+    def forward(self, x, hidden, num_repeats):
+        if hidden is None:
+            hidden = self.init_hidden(x.shape[-2:], x.shape[:-3], device=x.device)
+
+        hs, cs = hidden
+        for _ in range(num_repeats):
+            for i, block in enumerate(self.blocks):
+                input_i = hs[i-1] if i > 0 else x
+                hs[i], cs[i] = block(input_i, (hs[i], cs[i]))
+
+        return hs[-1], (hs, cs)
+    
+
+class LuxConvLSTMModel(nn.Module):
+    def __init__(
+        self,
+        state_space_size: int,
+        global_state_space_size: int,
+        action_space_size: int,
+        num_layers: int,
+        hidden_dim: int, 
+        kernel_size: int = 3,
+        num_repeats: int = 1,
+    ) -> None:
+        super().__init__()
+
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+        self.num_repeats = num_repeats
+        
+        self.inc = DoubleConv(state_space_size + global_state_space_size, self.hidden_dim, res=False)
+        
+        self.drc = DRC(
+            num_layers=self.num_layers,
+            input_dim=self.hidden_dim,
+            hidden_dim=self.hidden_dim,
+            kernel_size=kernel_size,
+            bias=True
+        )
+
+        self.policy_net = OutConv(self.hidden_dim, action_space_size)
+        self.sap_net = nn.Sequential(
+            ResidualBlock(self.hidden_dim, self.hidden_dim, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False),
+            ResidualBlock(self.hidden_dim, self.hidden_dim, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False),
+            OutConvWithNorm(self.hidden_dim, 1)
+        )
+
+
+    def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        state = batch["state"]
+        global_state = batch["global_state"]
+        _n, T, _c, _x, _y = state.shape
+        _ng, _tg, _cg = global_state.shape
+        gx = global_state.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, _x, _y)
+        x = torch.cat([state, gx], dim=2)
+
+        hidden = None
+        for t in range(T):
+            xt = x[:, t]
+            xt = self.inc(xt)
+            xt, hidden = self.drc(xt, hidden, num_repeats=self.num_repeats)    
+       
+        policy_logits = self.policy_net(xt)
+        sap_logits = self.sap_net(xt)
+        
+        return {
+            "policy": policy_logits,
+            "sap": sap_logits
+        }
+
+
+class MaskedFocalTverskyLoss(nn.Module):
+    def __init__(
+        self, alpha: float = 0.5, beta: float = 0.5, gamma: float = 1.0, smooth: float = 1e-6, reduction: str = "mean"
+    ):
+        """
+        Focal Tversky Loss with mask support.
+        :param alpha: False Positive に対する重み (通常 0.5)
+        :param beta: False Negative に対する重み (通常 0.5)
+        :param gamma: Focal項のパラメータ。gamma > 1 で難しい例に注目
+        :param smooth: 数値安定性のためのスムージング項
+        :param reduction: 'mean' もしくは 'sum'
+        ※この損失関数は、モデルの出力として logitsd(シグモイド未適用値)を入力として受け取ります。
+        """
+        super().__init__()
+        self.alpha = alpha
+        self.beta = beta
+        self.gamma = gamma
+        self.smooth = smooth
+        self.reduction = reduction
+
+    def forward(self, inputs: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """
+        :param inputs: 予測値。logitsd(シグモイド未適用値)を想定。
+                       形状は (batch, ...) であることを前提とする。
+        :param targets: 教師ラベル。0/1のバイナリマスク。
+        :param mask: 損失計算対象となる領域を示すバイナリマスク。inputs と同じ形状。
+        :return: Focal Tversky Loss
+        """
+        # logits から確率値に変換
+        inputs = torch.sigmoid(inputs)
+        # 入力、ターゲット、mask を (batch, -1) にフラット化
+        inputs = inputs.view(inputs.size(0), -1)
+        targets = targets.view(targets.size(0), -1).float()
+        mask = mask.view(mask.size(0), -1).float()
+
+        # マスクを考慮してTP, FP, FNを計算
+        TP = (inputs * targets * mask).sum(dim=1)
+        FP = (inputs * (1 - targets) * mask).sum(dim=1)
+        FN = ((1 - inputs) * targets * mask).sum(dim=1)
+
+        Tversky = (TP + self.smooth) / (TP + self.alpha * FP + self.beta * FN + self.smooth)
+        focal_loss = (1 - Tversky) ** self.gamma
+
+        if self.reduction == "mean":
+            return focal_loss.mean()
+        elif self.reduction == "sum":
+            return focal_loss.sum()
+        else:
+            return focal_loss
+
+
+class SELayer(nn.Module):
+    def __init__(self, n_channels: int, reduction: int = 16):
+        """
+        Squeeze-and-Excitation (SE) Layer.
+        Args:
+            n_channels (int): 入力のチャネル数
+            reduction (int): 圧縮率 (デフォルト: 16)
+        """
+        super().__init__()
+        self.fc = nn.Sequential(
+            nn.Linear(n_channels, n_channels // reduction, bias=False),
+            nn.LeakyReLU(inplace=True),
+            nn.Linear(n_channels // reduction, n_channels, bias=False),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x (torch.Tensor): 入力テンソル (B, C, H, W)
+
+        Returns:
+            torch.Tensor: チャネルごとのスケーリングを適用した出力テンソル
+        """
+        b, c, _, _ = x.shape
+
+        # グローバル平均プーリング (B, C, 1, 1)
+        y = x.mean(dim=[2, 3], keepdim=True)
+
+        # FC層を適用してチャネルごとの重みを学習 (B, C, 1, 1)
+        y = self.fc(y.view(b, c)).view(b, c, 1, 1)
+
+        # スケール適用
+        return x * y.expand_as(x)
+
+
+class ResidualBlock(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        height: int,
+        width: int,
+        kernel_size: int = 3,
+        normalize: bool = False,
+        activation=nn.LeakyReLU,
+        squeeze_excitation: bool = True,
+        rescale_se_input: bool = True,
+        **conv2d_kwargs,
+    ):
+        super().__init__()
+
+        # Calculate "same" padding
+        # https://pytorch.org/docs/stable/generated/torch.nn.Conv2d.html
+        # https://www.wolframalpha.com/input/?i=i%3D%28i%2B2x-k-%28k-1%29%28d-1%29%2Fs%29+%2B+1&assumption=%22i%22+-%3E+%22Variable%22
+        assert "padding" not in conv2d_kwargs.keys()
+        k = kernel_size
+        d = conv2d_kwargs.get("dilation", 1)
+        s = conv2d_kwargs.get("stride", 1)
+        padding = (k - 1) * (d + s - 1) / (2 * s)
+        assert padding == int(padding), f"padding should be an integer, was {padding:.2f}"
+        padding = int(padding)
+
+        self.conv1 = nn.Conv2d(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=(kernel_size, kernel_size),
+            padding=(padding, padding),
+            **conv2d_kwargs,
+        )
+        # We use LayerNorm here since the size of the input "images" may vary based on the board size
+        self.norm1 = nn.LayerNorm([out_channels, height, width]) if normalize else nn.Identity()
+        self.act1 = activation()
+
+        self.conv2 = nn.Conv2d(
+            in_channels=out_channels,
+            out_channels=out_channels,
+            kernel_size=(kernel_size, kernel_size),
+            padding=(padding, padding),
+            **conv2d_kwargs,
+        )
+        self.norm2 = nn.LayerNorm([out_channels, height, width]) if normalize else nn.Identity()
+        self.final_act = activation()
+
+        if in_channels != out_channels:
+            self.change_n_channels = nn.Conv2d(in_channels, out_channels, (1, 1))
+        else:
+            self.change_n_channels = nn.Identity()
+
+        if squeeze_excitation:
+            self.squeeze_excitation = SELayer(out_channels, rescale_se_input)
+        else:
+            self.squeeze_excitation = nn.Identity()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        identity = x
+        x = self.conv1(x)
+        x = self.act1(self.norm1(x))
+        x = self.conv2(x)
+        x = self.squeeze_excitation(self.norm2(x))
+        x = x + self.change_n_channels(identity)
+        return self.final_act(x)
+    
 
 def save_model(model, output_dir: Path, latest: bool = False):
     if latest:
