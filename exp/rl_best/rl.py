@@ -92,7 +92,7 @@ class Config:
     exp_dir: Path = root_dir / f"exp/{exp_name}"
     best_pretrained_path: Path | None = exp_dir / "output/best_model.ckpt"
     # lb_best_pretrained_path: Path | None = exp_dir / "output/lb_best_model.ckpt"
-    debug: bool = False
+    debug: bool = True
     output_dir: Path = root_dir / f"output/{exp_name}"
 
     # 以下の3つのrunnerにcpuとgpuを割り振る。cpuの合計値がcpu数を超えないように注意(現在は24をactor: 21,learner: 1,evaluator:2に割り振る)
@@ -100,9 +100,10 @@ class Config:
     num_env_runners: int = 18  # actorの数
     num_cpus_per_env_runner: int = 1
     num_gpus_per_env_runner: int = 0
-    rollout_fragment_length: int | str | None = (
-        101  # 考慮したいstep数を設定してやる。報酬が含まれるように1マッチ分の長さにする
-    )
+
+    # 学習時に同じ時系列として扱いたいstep数を設定してやる。報酬が含まれるように1マッチ分の長さにする
+    # batch_mode="truncate_episodes"の場合はmin(rollout_fragment_length, 101)stepごとにデータが送信される
+    rollout_fragment_length: int | str | None = 101
 
     # 学習用(GPUの数=learnerと考えて良い)
     num_learners: int = 0  # IMPALAの場合gpuが1つなら0に設定するとlocal learnerとして扱われる、処理が早くなる
@@ -116,14 +117,11 @@ class Config:
         50  # 1回の評価で何エピソード分評価するか(学習と並列してやるため達成できないこともあるかも)
     )
 
-    # 評価と学習を並列に実行するかどうか
-    # 並列に実行すると待機処理が短縮されるようだが、今回の設定だとtrainが30secくらいで終わってしまうため結果として評価がボトルネックになってしまう
-    # 1回の学習を長くするか、評価にworkerを多く割り当てて評価時間を短縮するのが良さそう
-    evaluation_parallel_to_training: bool = True
-
     # learner
     training_minutes: int = 60 * 24  # 1日
-    learner_queue_size: int = 20  # workerからLearnerに送られるバッチのキューの最大サイズ. [batch_size]*queue_sizeがcpuメモリに乗りbatchごとに学習する
+    learner_queue_size: int = (
+        2  # workerからLearnerに送られるバッチのキューの最大サイズ. env_runner数と同じくらいが良いのではと思っている
+    )
     gamma: float = 0.9995
     lr: float = 1e-5
     # batch size 一応1episodeのサイズにしてるが不要かも。もしくはrollout_fragment_length部分で調整する
@@ -136,6 +134,9 @@ class Config:
     vtrace_clip_pg_rho_threshold: float = 1.0  # ポリシー勾配のlossの係数
     vf_loss_coeff: float = 1.0  # 価値関数のlossの係数
     entropy_coeff: float = 1e-5  # エントロピーのlossの係数(大きくすると探索が活発になる)
+    sap_loss_coeff: float = 1e-1  # sapのlossの係数
+    # reward
+    point_weight: float = 0  # マッチの報酬を超えないようにすべきなので適用する場合1e-3程度
 
     def __post_init__(self):
         if self.is_gcp:
@@ -150,7 +151,6 @@ class Config:
             self.evaluation_num_env_runners = 1
             self.evaluation_interval = 1
             self.evaluation_duration = 2
-            # self.evaluation_parallel_to_training = False
             self.training_minutes = 10
             self.learner_queue_size = 1
             self.num_epochs = 1
@@ -171,6 +171,7 @@ class RLLibLuxEnv(MultiAgentEnv):
         self.n_stack = config["n_stack"]
         self.overlap_penalty = config["overlap_penalty"]
         self.stochastic = config["stochastic"]
+        self.point_weight = config["point_weight"]
         # アクション・観測空間の設定
         self.action_spaces = self._create_action_space()
         self.observation_spaces = self._create_obs_space()
@@ -334,10 +335,24 @@ class RLLibLuxEnv(MultiAgentEnv):
         sap_map2 = action_dict["player_1"]["sap"].reshape(EnvParams.map_height, EnvParams.map_width)
 
         actions["player_0"] = action_map_to_action(
-            action_map1, sap_map1, self.obs["player_0"], 0, self.env_params, self.stochastic, self.overlap_penalty
+            action_map1,
+            sap_map1,
+            self.obs["player_0"],
+            0,
+            self.env_params,
+            self.stochastic,
+            self.overlap_penalty,
+            self.episode_store1,
         )
         actions["player_1"] = action_map_to_action(
-            action_map2, sap_map2, self.obs["player_1"], 1, self.env_params, self.stochastic, self.overlap_penalty
+            action_map2,
+            sap_map2,
+            self.obs["player_1"],
+            1,
+            self.env_params,
+            self.stochastic,
+            self.overlap_penalty,
+            self.episode_store2,
         )
         return actions
 
@@ -359,11 +374,11 @@ class RLLibLuxEnv(MultiAgentEnv):
         # "__all__" (required) is used to indicate env termination.
         terminated["__all__"] = np.all(list(truncated.values()))  # luxaiはtruncatedがTrueになる
         info = {agent_id: {} for agent_id in self.agents}
-        reward = self.reward_fn(_reward, player0_point, player1_point)
+        reward = self.reward_fn(_reward, player0_point, player1_point, self.point_weight)
         return state, reward, terminated, truncated, info
 
     def reward_fn(
-        self, raw_reward: jnp.ndarray, player0_point: int, player1_point: int, point_weight: float = 1e-4
+        self, raw_reward: jnp.ndarray, player0_point: int, player1_point: int, point_weight: float = 0
     ) -> dict[str, int]:
         """
         raw_rewardは累積値なので、前回との差分を取って現在のステップでの報酬を計算する
@@ -657,7 +672,7 @@ class WandbLoggerCallback(RLlibCallback):
         # 1回の学習で学習したデータ数
         time_this_iter_s = result["time_this_iter_s"]
         time_total_s = result["time_total_s"]
-        num_training_step_calls_per_iteration = result["num_training_step_calls_per_iteration"]  # 累積値
+        num_training_step_calls_per_iteration = result["num_training_step_calls_per_iteration"]
         # sample_size = result["num_env_steps_sampled_lifetime"]
 
         # 学習状況をwandbに流す用
@@ -665,7 +680,7 @@ class WandbLoggerCallback(RLlibCallback):
             {
                 "train/training_iteration": result["timers"]["training_iteration"],  # 何回めの学習か
                 "train/time_this_iter_s": time_this_iter_s,  # 1回の学習時間
-                "train/time_total_s": time_total_s,  # 学習総時間
+                # "train/time_total_s": time_total_s,  # 学習総時間
                 "train/num_training_step_calls_per_iteration": num_training_step_calls_per_iteration,  # 1回の学習で何回training_stepが呼ばれたか
             }
         )
@@ -697,6 +712,7 @@ class WandbLoggerCallback(RLlibCallback):
             # "curr_entropy_coeff",  # 一定
             # "vf_loss",  # mean_vf_lossと同じ
             "entropy",
+            "sap_loss",
         ]
         for key in learner_metrics:
             wandb.log(
@@ -833,8 +849,7 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
         # Behavior actions logp and target actions logp.
         behaviour_actions_logp = batch[Columns.ACTION_LOGP]
         target_policy_dist = module.get_train_action_dist_cls().from_logits(fwd_out[Columns.ACTION_DIST_INPUTS])
-        target_actions_logp = target_policy_dist.logp(batch[Columns.ACTIONS])
-
+        target_actions_logp = target_policy_dist.logp(batch[Columns.ACTIONS]["action"])
         # loss_maskを適用した上でマップの次元を潰す
         # (batch_size, 24*24)のマップ状態をもつデータをunit位置のmaskを適用した上で(batch_size, 1)に潰す
         behaviour_actions_logp = (behaviour_actions_logp * loss_mask).sum(dim=1)
@@ -918,24 +933,11 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
         entropy_loss = -torch.sum(target_policy_dist.entropy() * loss_mask)
         mean_entropy_loss = entropy_loss / size_loss_mask
 
-        # sapアクションの損失を計算
-        # 二項交差エントロピー損失（Binary Cross Entropy Loss）を使用
-        # target_sap_probs = target_policy_dist.sap_probs
-        # sap_targets = batch[Columns.ACTIONS]["sap"]
-
-        # # sapアクションの損失を計算（0-1の連続値なのでBCELossを使用）
-        # sap_loss = torch.nn.functional.binary_cross_entropy(
-        #     target_sap_probs,
-        #     sap_targets,
-        #     reduction='mean'
-        # )
-
         # The summed weighted loss.
         total_loss = (
             mean_pi_loss
             + mean_vf_loss * config.vf_loss_coeff
             + (mean_entropy_loss * self.entropy_coeff_schedulers_per_module[module_id].get_current_value())
-            # + sap_loss  # sapアクションの損失を追加
         )
 
         # Log important loss stats.
@@ -945,7 +947,6 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
                 "mean_pi_loss": mean_pi_loss,
                 "vf_loss": vf_loss,
                 "mean_vf_loss": mean_vf_loss,
-                # "sap_loss": sap_loss,
                 ENTROPY_KEY: -mean_entropy_loss,
             },
             key=module_id,
@@ -1026,6 +1027,7 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
         "n_stack": cfg.n_stack,
         "stochastic": cfg.stochastic,
         "overlap_penalty": cfg.overlap_penalty,
+        "point_weight": cfg.point_weight,
     }
     tmp_env = env_creator(env_config)
     observation_space = tmp_env.get_observation_space("player_0")
@@ -1056,6 +1058,8 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
             num_cpus_per_env_runner=cfg.num_cpus_per_env_runner,
             num_gpus_per_env_runner=cfg.num_gpus_per_env_runner,
             sample_timeout_s=60 * 5,
+            # デフォルト値。101step（truncated=True)のタイミングでデータを収集する.
+            batch_mode="truncate_episodes",
             # batch_sizeから自動で適切な値を計算してくれるためこの設定が推奨されている
             # rollout_fragment_length = "auto",
             rollout_fragment_length=cfg.rollout_fragment_length,
@@ -1144,7 +1148,7 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
             evaluation_duration_unit="episodes",
             evaluation_sample_timeout_s=60 * 20,
             evaluation_force_reset_envs_before_iteration=True,  # 各評価の前に環境をリセット
-            evaluation_parallel_to_training=cfg.evaluation_parallel_to_training,  # 評価と学習を並列に実行
+            evaluation_parallel_to_training=True,  # 評価と学習を並列に実行
             # 評価用の上書き設定.これにより評価時はlb_bestポリシーと自身の対戦になる
             # evaluation_config={
             #     "multi_agent": {
@@ -1159,6 +1163,8 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
         #     export_native_model_files=True,
         # )
     )
+    # あまり良くなさそうだが参照しやすいようにここに係数を追加しておく
+    config.sap_loss_coeff = cfg.sap_loss_coeff
     return config
 
 
