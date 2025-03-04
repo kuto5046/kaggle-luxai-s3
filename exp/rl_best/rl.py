@@ -14,6 +14,47 @@ import torch
 import gymnasium as gym
 import jax.numpy as jnp
 import flax.serialization
+from torch import nn
+from luxai_s3.env import LuxAIS3Env
+from luxai_s3.utils import to_numpy
+from luxai_s3.params import env_params_ranges
+from ray.tune.registry import register_env
+from ray.rllib.core.columns import Columns
+from ray.rllib.utils.typing import ModuleID, TensorType, EpisodeType
+from ray.rllib.env.env_runner import EnvRunner
+from ray.rllib.utils.annotations import override
+from ray.rllib.callbacks.callbacks import RLlibCallback
+from ray.rllib.core.rl_module.apis import ValueFunctionAPI
+from ray.rllib.env.multi_agent_env import MultiAgentEnv
+from ray.rllib.algorithms.algorithm import Algorithm
+from ray.rllib.core.learner.learner import ENTROPY_KEY
+from ray.rllib.connectors.connector_v2 import ConnectorV2
+from ray.rllib.env.multi_agent_episode import MultiAgentEpisode
+from ray.rllib.algorithms.impala.impala import IMPALAConfig
+from ray.rllib.connectors.module_to_env import (
+    TensorToNumpy,
+    ModuleToAgentUnmapping,
+    ListifyDataForVectorEnv,
+    UnBatchToIndividualItems,
+    RemoveSingleTsTimeRankFromBatch,
+)
+from ray.rllib.core.rl_module.rl_module import RLModule, RLModuleSpec
+from ray.rllib.algorithms.algorithm_config import AlgorithmConfig
+from ray.rllib.utils.metrics.metrics_logger import MetricsLogger
+from ray.rllib.core.rl_module.multi_rl_module import MultiRLModuleSpec
+from ray.rllib.algorithms.impala.impala_learner import IMPALALearner
+from ray.rllib.core.learner.torch.torch_learner import TorchLearner
+from ray.rllib.models.torch.torch_distributions import (
+    TorchCategorical,
+    TorchDistribution,
+)
+from ray.rllib.core.rl_module.torch.torch_rl_module import TorchRLModule
+from ray.rllib.algorithms.impala.torch.vtrace_torch_v2 import (
+    vtrace_torch,
+    make_time_major,
+)
+
+import wandb
 from lux.utils import (
     State,
     Action,
@@ -25,35 +66,7 @@ from lux.utils import (
 )
 from lux.models import LuxUNetModel, LuxValueConvModel
 from lux.params import EnvParams
-from luxai_s3.env import LuxAIS3Env
-from luxai_s3.utils import to_numpy
-from luxai_s3.params import env_params_ranges
-from ray.tune.registry import register_env
-from lux.imitation_agent import policy_to_action
-from ray.rllib.core.columns import Columns
-from ray.rllib.utils.typing import ModuleID, TensorType, EpisodeType
-from ray.rllib.env.env_runner import EnvRunner
-from ray.rllib.utils.annotations import override
-from ray.rllib.callbacks.callbacks import RLlibCallback
-from ray.rllib.core.rl_module.apis import ValueFunctionAPI
-from ray.rllib.env.multi_agent_env import MultiAgentEnv
-from ray.rllib.algorithms.algorithm import Algorithm
-from ray.rllib.core.learner.learner import ENTROPY_KEY
-from ray.rllib.algorithms.impala.impala import IMPALAConfig
-from ray.rllib.core.rl_module.rl_module import RLModuleSpec
-from ray.rllib.algorithms.algorithm_config import AlgorithmConfig
-from ray.rllib.utils.metrics.metrics_logger import MetricsLogger
-from ray.rllib.core.rl_module.multi_rl_module import MultiRLModuleSpec
-from ray.rllib.algorithms.impala.impala_learner import IMPALALearner
-from ray.rllib.core.learner.torch.torch_learner import TorchLearner
-from ray.rllib.models.torch.torch_distributions import TorchCategorical, TorchDistribution
-from ray.rllib.core.rl_module.torch.torch_rl_module import TorchRLModule
-from ray.rllib.algorithms.impala.torch.vtrace_torch_v2 import (
-    vtrace_torch,
-    make_time_major,
-)
-
-import wandb
+from lux.imitation_agent import action_map_to_action
 
 # policy名
 OWN_POLICY = "p0"
@@ -72,13 +85,14 @@ class Config:
     model_name: str = "lux_unet"
     env_name: str = "lux-s3-v0"
     n_stack: int = 4
+    freeze: bool = True
     overlap_penalty: float = 2.0
     stochastic: bool = True
     root_dir: Path = Path("/home/user/work")
     exp_dir: Path = root_dir / f"exp/{exp_name}"
     best_pretrained_path: Path | None = exp_dir / "output/best_model.ckpt"
     # lb_best_pretrained_path: Path | None = exp_dir / "output/lb_best_model.ckpt"
-    debug: bool = True
+    debug: bool = False
     output_dir: Path = root_dir / f"output/{exp_name}"
 
     # 以下の3つのrunnerにcpuとgpuを割り振る。cpuの合計値がcpu数を超えないように注意(現在は24をactor: 21,learner: 1,evaluator:2に割り振る)
@@ -99,7 +113,7 @@ class Config:
     evaluation_num_env_runners: int = 5  # 評価用のenv runnerの数
     evaluation_interval: int = 50  # 何回trainをしたら評価を実施するか　１回が30secくらいなので50回で1500sec=25分くらい
     evaluation_duration: int = (
-        30  # 1回の評価で何エピソード分評価するか(学習と並列してやるため達成できないこともあるかも)
+        50  # 1回の評価で何エピソード分評価するか(学習と並列してやるため達成できないこともあるかも)
     )
 
     # 評価と学習を並列に実行するかどうか
@@ -182,12 +196,21 @@ class RLLibLuxEnv(MultiAgentEnv):
         (24*24)の形状
         本来のpolicyは(num_actions, height, width)の形状だが行動空間は実際に取る行動を扱うため(height, width)の形状で扱う(rllibの仕様上)
         加えて2次元マップ(height, width)ではなく1次元マップ(height * width)のMultiDiscreteを使用(rllibの仕様上)
+
+        sapアクションは0から1の連続値を持つ(h*w)の行動空間を追加
         """
-        num_actions = len(Action) + 1
+        num_actions = len(Action)
+        # 離散的な行動空間
         action_space = gym.spaces.MultiDiscrete([num_actions] * EnvParams.map_width * EnvParams.map_height)
+        # sapアクション用の連続値行動空間
+        sap_action_space = gym.spaces.Box(
+            low=0.0, high=1.0, shape=(EnvParams.map_width * EnvParams.map_height,), dtype=np.float32
+        )
+        # 複合的な行動空間
+        combined_action_space = gym.spaces.Dict({"action": action_space, "sap": sap_action_space})
         return {
-            "player_0": action_space,
-            "player_1": action_space,
+            "player_0": combined_action_space,
+            "player_1": combined_action_space,
         }
 
     def _create_obs_space(self) -> gym.spaces.Dict:
@@ -303,16 +326,17 @@ class RLLibLuxEnv(MultiAgentEnv):
         actions = {agent_id: np.zeros((EnvParams.max_units, 3), dtype=np.int32) for agent_id in self.agents}
 
         # 1次元マップの行動空間で渡ってくるので2次元マップに変換
-        action_map1 = action_dict["player_0"].reshape(EnvParams.map_height, EnvParams.map_width)
-        action_map2 = action_dict["player_1"].reshape(EnvParams.map_height, EnvParams.map_width)
-        # dummy
-        sap_map1 = np.zeros((EnvParams.map_height, EnvParams.map_width), dtype=np.float32)
-        sap_map2 = np.zeros((EnvParams.map_height, EnvParams.map_width), dtype=np.float32)
+        action_map1 = action_dict["player_0"]["action"].reshape(EnvParams.map_height, EnvParams.map_width)
+        action_map2 = action_dict["player_1"]["action"].reshape(EnvParams.map_height, EnvParams.map_width)
 
-        actions["player_0"] = policy_to_action(
+        # sapアクションも2次元マップに変換
+        sap_map1 = action_dict["player_0"]["sap"].reshape(EnvParams.map_height, EnvParams.map_width)
+        sap_map2 = action_dict["player_1"]["sap"].reshape(EnvParams.map_height, EnvParams.map_width)
+
+        actions["player_0"] = action_map_to_action(
             action_map1, sap_map1, self.obs["player_0"], 0, self.env_params, self.stochastic, self.overlap_penalty
         )
-        actions["player_1"] = policy_to_action(
+        actions["player_1"] = action_map_to_action(
             action_map2, sap_map2, self.obs["player_1"], 1, self.env_params, self.stochastic, self.overlap_penalty
         )
         return actions
@@ -369,6 +393,28 @@ class RLLibLuxEnv(MultiAgentEnv):
         return step_rewards
 
 
+def freeze(model: nn.Module):
+    # 全てFalseにする
+    for param in model.parameters():
+        param.requires_grad = False
+
+    # UNet後のpolicyネットワークのパラメータをTrueにする
+    for param in model.sap_net1.parameters():
+        param.requires_grad = True
+    for param in model.sap_net2.parameters():
+        param.requires_grad = True
+    for param in model.sap_net3.parameters():
+        param.requires_grad = True
+    for param in model.policy_net1_from_sap.parameters():
+        param.requires_grad = True
+    for param in model.policy_net2.parameters():
+        param.requires_grad = True
+    for param in model.policy_net3.parameters():
+        param.requires_grad = True
+    for param in model.policy_net4.parameters():
+        param.requires_grad = True
+
+
 class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
     @override(TorchRLModule)
     def setup(self):
@@ -380,6 +426,8 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
             n_stack=self.model_config["n_stack"],
             res=True,
         )
+        if self.model_config["freeze"]:
+            freeze(self.policy_model)
 
         self.value_model = LuxValueConvModel(
             state_space_size=len(State),
@@ -402,7 +450,7 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
         outputs = self.policy_model(batch[Columns.OBS])
         policy_logits = outputs["policy"]
         sap_logits = outputs["sap"]
-        sap_available_area = batch[Columns.OBS]["state"][:, :, State.SAP_AVAILABLE_AREA]
+        sap_available_area = batch[Columns.OBS]["state"][:, -1, State.SAP_AVAILABLE_AREA]
         player_id = batch[Columns.OBS]["player_id"]
 
         # player_id1のポリシーを反転して自陣を復元する(自陣固定の後処理)
@@ -436,7 +484,7 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
         unit_mask = unit_mask.reshape(batch_size, -1)
         return {
             Columns.ACTION_DIST_INPUTS: masked_policy_logits,
-            "sap": sap_logits,
+            "sap": torch.sigmoid(sap_logits),
             # unit位置のみpolicyを学習する
             "unit_mask": unit_mask,
         }
@@ -742,17 +790,18 @@ class WandbLoggerCallback(RLlibCallback):
         episode_rewards = episode.get_rewards()
         episode_total_reward = {k: sum(v) for k, v in episode_rewards.items()}
         is_win = (episode_total_reward["player_0"] > episode_total_reward["player_1"]) * 1
-
+        # duration = episode.get_duration()
+        episode_duration_s = episode.get_duration_s()
         if in_evaluation:
             ray.get(self._stats_collector.record_evaluation_result.remote(is_win))
             stats = ray.get(self._stats_collector.get_speed_stats.remote(in_evaluation))
             self.logger.info(
-                f"Evaluation Episode {stats['total_episodes']} finished. {is_win=} {episode_total_reward=} Collection speed: {stats['episode_per_minute']:.2f} eps/min"
+                f"Evaluation Episode {stats['total_episodes']} finished. {is_win=} {episode_total_reward=} Episode duration: {episode_duration_s:.2f} sec"
             )
         else:
             stats = ray.get(self._stats_collector.get_speed_stats.remote(in_evaluation))
             self.logger.info(
-                f"Episode {stats['total_episodes']} finished. {is_win=} {episode_total_reward=} Collection speed: {stats['episode_per_minute']:.2f} eps/min"
+                f"Episode {stats['total_episodes']} finished. {is_win=} {episode_total_reward=} Episode duration: {episode_duration_s:.2f} sec"
             )
 
 
@@ -869,11 +918,24 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
         entropy_loss = -torch.sum(target_policy_dist.entropy() * loss_mask)
         mean_entropy_loss = entropy_loss / size_loss_mask
 
+        # sapアクションの損失を計算
+        # 二項交差エントロピー損失（Binary Cross Entropy Loss）を使用
+        # target_sap_probs = target_policy_dist.sap_probs
+        # sap_targets = batch[Columns.ACTIONS]["sap"]
+
+        # # sapアクションの損失を計算（0-1の連続値なのでBCELossを使用）
+        # sap_loss = torch.nn.functional.binary_cross_entropy(
+        #     target_sap_probs,
+        #     sap_targets,
+        #     reduction='mean'
+        # )
+
         # The summed weighted loss.
         total_loss = (
             mean_pi_loss
             + mean_vf_loss * config.vf_loss_coeff
             + (mean_entropy_loss * self.entropy_coeff_schedulers_per_module[module_id].get_current_value())
+            # + sap_loss  # sapアクションの損失を追加
         )
 
         # Log important loss stats.
@@ -883,6 +945,7 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
                 "mean_pi_loss": mean_pi_loss,
                 "vf_loss": vf_loss,
                 "mean_vf_loss": mean_vf_loss,
+                # "sap_loss": sap_loss,
                 ENTROPY_KEY: -mean_entropy_loss,
             },
             key=module_id,
@@ -890,6 +953,72 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
         )
         # Return the total loss.
         return total_loss
+
+
+class CustomGetActions(ConnectorV2):
+    @override(ConnectorV2)
+    def __call__(
+        self,
+        *,
+        rl_module: RLModule,
+        batch: dict[str, Any],
+        episodes: list[EpisodeType],
+        explore: bool | None = None,
+        shared_data: dict | None = None,
+        **kwargs,
+    ) -> Any:
+        is_multi_agent = isinstance(episodes[0], MultiAgentEpisode)
+
+        if is_multi_agent:
+            for module_id, module_data in batch.copy().items():
+                self._get_actions(module_data, rl_module[module_id], explore)
+        else:
+            self._get_actions(batch, rl_module, explore)
+
+        return batch
+
+    def _get_actions(self, batch, sa_rl_module, explore):
+        # Action have already been sampled -> Early out.
+        if Columns.ACTIONS in batch:
+            return
+
+        # ACTION_DIST_INPUTS field returned by `forward_exploration|inference()` ->
+        # Create a new action distribution object.
+        if Columns.ACTION_DIST_INPUTS in batch:
+            if explore:
+                action_dist_class = sa_rl_module.get_exploration_action_dist_cls()
+            else:
+                action_dist_class = sa_rl_module.get_inference_action_dist_cls()
+            action_dist = action_dist_class.from_logits(
+                batch[Columns.ACTION_DIST_INPUTS],
+            )
+            if not explore:
+                action_dist = action_dist.to_deterministic()
+
+            # Sample actions from the distribution.
+            actions = action_dist.sample()
+            batch[Columns.ACTIONS] = {
+                "action": actions,
+                "sap": batch["sap"],
+            }
+
+            # For convenience and if possible, compute action logp from distribution
+            # and add to output.
+            if Columns.ACTION_LOGP not in batch:
+                batch[Columns.ACTION_LOGP] = action_dist.logp(actions)
+
+
+def custom_module_to_env_connector(env: MultiAgentEnv) -> list[ConnectorV2]:
+    return [
+        # GetActions(),
+        CustomGetActions(),
+        TensorToNumpy(),
+        UnBatchToIndividualItems(),
+        ModuleToAgentUnmapping(),
+        RemoveSingleTsTimeRankFromBatch(),
+        # NormalizeAndClipActions(),
+        ListifyDataForVectorEnv(),
+    ]
 
 
 def create_rl_config(cfg: Config) -> AlgorithmConfig:
@@ -909,6 +1038,7 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
         model_config={
             "n_stack": cfg.n_stack,
             "pretrained_path": cfg.best_pretrained_path,
+            "freeze": cfg.freeze,
         },
     )
     config = (
@@ -929,6 +1059,9 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
             # batch_sizeから自動で適切な値を計算してくれるためこの設定が推奨されている
             # rollout_fragment_length = "auto",
             rollout_fragment_length=cfg.rollout_fragment_length,
+            # module -> envの操作をカスタム実装したいためdefaultはoffにしている
+            add_default_connectors_to_module_to_env_pipeline=False,
+            module_to_env_connector=custom_module_to_env_connector,
         )
         # モデルを学習するlearnerの数。gpuの数と合わせる
         # Can't set both `num_cpus_per_learner` > 1 and  `num_gpus_per_learner` > 0! Either set `num_cpus_per_learner` > 1 (and `num_gpus_per_learner`=0)

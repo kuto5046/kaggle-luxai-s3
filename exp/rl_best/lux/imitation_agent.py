@@ -34,7 +34,7 @@ def load_model(model: nn.Module, checkpoint_path: Path) -> nn.Module:
     return model
 
 
-def policy_to_action(
+def policy_map_to_action(
     policy_map: np.ndarray,
     sap_map,
     obs: dict[str, Any],
@@ -46,6 +46,49 @@ def policy_to_action(
     unit_mask = np.array(obs["units_mask"][team_id])  # shape (max_units, )
     unit_positions = np.array(obs["units"]["position"][team_id])  # shape (max_units, 2)
     available_unit_ids = np.where(unit_mask)[0]
+
+    # sapの位置を決定 -> 残りの行動をフローで決定
+    actions = np.zeros((env_cfg.max_units, 3), dtype=int)
+    assign_greedy_actions_sap(actions, available_unit_ids, unit_positions, policy_map, sap_map, stochastic, env_cfg)
+    sapped_unit_next_pos_set = set()
+    for unit_id in available_unit_ids:
+        action = actions[unit_id]
+        if action[0] == Action.SAP:
+            sapped_unit_next_pos = (unit_positions[unit_id][0], unit_positions[unit_id][1])
+            sapped_unit_next_pos_set.add(sapped_unit_next_pos)
+
+    # available_unit_idsからsapしたユニットを除外
+    next_available_unit_ids = [unit_id for unit_id in available_unit_ids if actions[unit_id][0] != Action.SAP]
+
+    assign_actions_with_flow(
+        actions, next_available_unit_ids, unit_positions, policy_map, sapped_unit_next_pos_set, overlap_penalty
+    )
+    return actions
+
+
+def action_map_to_action(
+    action_map: np.ndarray,
+    sap_map,
+    obs: dict[str, Any],
+    team_id: int,
+    env_cfg: EnvParams,
+    stochastic: bool,
+    overlap_penalty: float,
+) -> np.ndarray:
+    """
+    RLLibではpolicyからサンプリングされた行動が渡されるためpolicyをもとにactionを決定することができない
+    そこでサンプリングされた行動から簡易的にactionを生成する
+    """
+    unit_mask = np.array(obs["units_mask"][team_id])  # shape (max_units, )
+    unit_positions = np.array(obs["units"]["position"][team_id])  # shape (max_units, 2)
+    available_unit_ids = np.where(unit_mask)[0]
+
+    # action_mapから擬似的にpolicy_mapを生成
+    policy_map = np.zeros((len(Action), env_cfg.map_width, env_cfg.map_height))
+    for i in range(env_cfg.map_width):
+        for j in range(env_cfg.map_height):
+            action_idx = action_map[i, j]
+            policy_map[action_idx, i, j] = 1.0
 
     # sapの位置を決定 -> 残りの行動をフローで決定
     actions = np.zeros((env_cfg.max_units, 3), dtype=int)

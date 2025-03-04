@@ -2,6 +2,7 @@ from pathlib import Path
 
 import torch
 from lightning import seed_everything
+
 from lux.utils import (
     State,
     Action,
@@ -10,7 +11,7 @@ from lux.utils import (
 )
 from lux.models import LuxUNetModel
 from lux.params import EnvParams
-from lux.imitation_agent import ILAgent, load_model, policy_to_action
+from lux.imitation_agent import ILAgent, load_model, policy_map_to_action
 
 
 class Config:
@@ -61,7 +62,7 @@ class Agent:
         else:
             self.episode_store.update(obs, self.prev_actions)
         policy_map, _point_map, sap_map = imitation_model.predict(obs, self.team_id, self.episode_store)
-        actions = policy_to_action(
+        actions = policy_map_to_action(
             policy_map, sap_map, obs, self.team_id, self.env_cfg, self.cfg.stochastic, self.cfg.overlap_penalty
         )
         self.prev_actions = actions
