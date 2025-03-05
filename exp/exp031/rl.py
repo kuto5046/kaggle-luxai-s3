@@ -71,8 +71,8 @@ LB_BEST_POLICY = "lb_best"  # TODO: モデルや特徴量が異なるため未�
 @dataclass
 class Config:
     exp_name: str = Path(__file__).parent.name
-    is_gcp: bool = False
-    notes: str = "自陣のバグ修正。lux1stのパラメータで学習"
+    is_gcp: bool = True
+    notes: str = "自陣のバグ修正。lux1stのパラメータで学習 in gcp"
     model_name: str = "lux_unet"
     env_name: str = "lux-s3-v0"
     n_stack: int = 4
@@ -113,7 +113,7 @@ class Config:
     training_minutes: int = 60 * 24  # 1日
     learner_queue_size: int = 20  # workerからLearnerに送られるバッチのキューの最大サイズ. [batch_size]*queue_sizeがcpuメモリに乗りbatchごとに学習する
     gamma: float = 0.9995
-    lr: float = 5e-5
+    lr: float = 1e-5
     # batch size 一応1episodeのサイズにしてるが不要かも。もしくはrollout_fragment_length部分で調整する
     train_batch_size_per_learner: int = 512
     # 1回の学習データ(train_batch_size*queue_size)を何epoch分学習するか
@@ -131,6 +131,7 @@ class Config:
             self.num_learners: int = 0
             self.evaluation_num_env_runners: int = 15
             self.learner_queue_size: int = 100
+            self.evaluation_interval: int = 10
 
         if self.debug:
             self.num_env_runners = 1
@@ -750,9 +751,10 @@ class WandbLoggerCallback(RLlibCallback):
         self.logger.info(f"Evaluation {self._current_evaluation_id} completed episodes={eval_stats['total']}")
 
         # 評価結果をリセット
+        save_model(algorithm, self.output_dir, suffix=f"model_eval_{self._current_evaluation_id}")
         best_win_rate = ray.get(self._stats_collector.get_best_win_rate.remote())
         if best_win_rate < current_win_rate:
-            save_model(algorithm, self.output_dir, suffix=f"model_eval_{self._current_evaluation_id}")
+            # save_model(algorithm, self.output_dir, suffix=f"model_eval_{self._current_evaluation_id}")
             self.logger.info(f"Best win rate updated. {best_win_rate=:.4f} -> {current_win_rate=:.4f}")
             # ベスト勝率を更新
             ray.get(self._stats_collector.update_best_win_rate.remote(current_win_rate))
