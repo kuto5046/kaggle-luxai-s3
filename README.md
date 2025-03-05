@@ -1,5 +1,5 @@
 # kaggle luxai season3
-kaggleコンペ用のテンプレートレポジトリ
+lux ai s3用のレポジトリ
 
 ## 環境構築
 dockerで環境構築を行う。
@@ -59,6 +59,19 @@ exp/exp017/
 ```sh
 uv run python exp/exp017/data_processor.py
 uv run python exp/exp017/train.py
+```
+
+## 強化学習の実行
+はじめにrayを起動する必要があります
+```sh
+ray start --head
+```
+上記を実行すると表示されるlocalhostのURL(ex;`127.0.0.1:8265`)を開くとrayのdashboardが見れます。
+ここではcpuの利用状況などが見れます。
+
+ray startを実行したら以下を実行して強化学習を行います。
+```sh
+uv run python exp/best/rl.py
 ```
 
 ## その他便利タスク
