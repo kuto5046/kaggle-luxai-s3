@@ -119,7 +119,7 @@ class Config:
     # learner
     training_minutes: int = 60 * 24  # 1日
     # workerからLearnerに送られるバッチのキューの最大サイズ. env_runner数と同じくらいが良いのではと思っている
-    learner_queue_size: int = 2
+    learner_queue_size: int = 20
     gamma: float = 0.9995
     lr: float = 1e-5
     # batch size 一応1episodeのサイズにしてるが不要かも。もしくはrollout_fragment_length部分で調整する
