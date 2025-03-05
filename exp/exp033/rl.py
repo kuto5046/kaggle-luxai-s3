@@ -138,8 +138,8 @@ class Config:
 
     def __post_init__(self):
         if self.is_gcp:
-            self.num_env_runners: int = 96 - 1 - 15  # actorの数
-            self.num_learners: int = 0
+            self.num_env_runners: int = 96 - 4 - 15  # actorの数
+            self.num_learners: int = 4
             self.evaluation_num_env_runners: int = 15
             self.learner_queue_size: int = 100
 
