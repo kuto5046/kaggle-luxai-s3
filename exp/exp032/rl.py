@@ -82,8 +82,7 @@ LB_BEST_POLICY = "lb_best"  # TODO: モデルや特徴量が異なるため未�
 class Config:
     exp_name: str = Path(__file__).parent.name
     is_gcp: bool = False
-    notes: str = "自陣のバグ修正。lux1stのパラメータで学習"
-    model_name: str = "lux_unet"
+    notes: str = "sap policyも合わせて学習する"
     env_name: str = "lux-s3-v0"
     n_stack: int = 4
     freeze: bool = True
@@ -119,7 +118,8 @@ class Config:
     # learner
     training_minutes: int = 60 * 24  # 1日
     # workerからLearnerに送られるバッチのキューの最大サイズ. env_runner数と同じくらいが良いのではと思っている
-    learner_queue_size: int = 2
+    learner_queue_size: int = 20
+
     gamma: float = 0.9995
     lr: float = 1e-5
     # batch size 一応1episodeのサイズにしてるが不要かも。もしくはrollout_fragment_length部分で調整する
@@ -132,7 +132,7 @@ class Config:
     vtrace_clip_pg_rho_threshold: float = 1.0  # ポリシー勾配のlossの係数
     vf_loss_coeff: float = 1.0  # 価値関数のlossの係数
     entropy_coeff: float = 1e-5  # エントロピーのlossの係数(大きくすると探索が活発になる)
-    sap_loss_coeff: float = 1e-1  # sapのlossの係数
+    sap_loss_coeff: float = 1e-2  # sapのlossの係数
     # reward
     point_weight: float = 0  # マッチの報酬を超えないようにすべきなので適用する場合1e-3程度
 
