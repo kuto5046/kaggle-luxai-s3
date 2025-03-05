@@ -55,10 +55,10 @@ RUN npm -y install n -g && \
     apt purge -y nodejs npm
 
 # neovim v0.9.1
-RUN curl -LO https://github.com/neovim/neovim/releases/latest/download/nvim.appimage
-RUN chmod u+x nvim.appimage
-RUN ./nvim.appimage --appimage-extract
-RUN sudo ln -s /squashfs-root/AppRun /usr/bin/nvim
+# RUN curl -LO https://github.com/neovim/neovim/releases/latest/download/nvim.appimage
+# RUN chmod u+x nvim.appimage
+# RUN ./nvim.appimage --appimage-extract
+# RUN sudo ln -s /squashfs-root/AppRun /usr/bin/nvim
 
 # install just
 RUN curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to /usr/local/bin
@@ -69,7 +69,7 @@ RUN curl --proto '=https' -fLsS https://rossmacarthur.github.io/install/crate.sh
 
 # 本当はハードコーディングではなくローカルのidと合わせた方が良い
 # https://qiita.com/yohm/items/047b2e68d008ebb0f001
-ARG DOCKER_UID=1000
+ARG DOCKER_UID=1002
 ARG DOCKER_USER="user"
 ARG DOCKER_PASSWORD="kuzira"
 
