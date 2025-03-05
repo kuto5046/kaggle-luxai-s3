@@ -89,8 +89,8 @@ class Model(IntEnum):
 class Config:
     # common
     exp_name: str = Path(__file__).parent.name
-    debug: bool = True
-    notes: str = "sap policyも合わせて学習する"
+    debug: bool = False
+    notes: str = "複数の敵と対戦を可能にした"
     env_name: str = "lux-s3-v0"
     root_dir: Path = Path("/home/user/work")
     exp_dir: Path = root_dir / f"exp/{exp_name}"
