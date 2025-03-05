@@ -1216,7 +1216,7 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
                 OWN_POLICY,
                 SELF_PLAY_POLICY,
                 BEST_POLICY,
-                # LB_BEST_POLICY,  # cpuで動かすと遅すぎるので使用していない TODO: onnx変換試す
+                LB_BEST_POLICY,  # cpuで動かすと遅すぎるので現在は使用していない TODO: onnx変換試す
             },
             # 各agentのポリシーを決める関数
             policy_mapping_fn=lambda aid, episode, **kwargs: (
