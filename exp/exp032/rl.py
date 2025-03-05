@@ -81,7 +81,7 @@ LB_BEST_POLICY = "lb_best"  # TODO: モデルや特徴量が異なるため未�
 @dataclass
 class Config:
     exp_name: str = Path(__file__).parent.name
-    is_gcp: bool = True
+    is_gcp: bool = False
     notes: str = "sap policyも合わせて学習する"
     env_name: str = "lux-s3-v0"
     n_stack: int = 4
@@ -90,7 +90,7 @@ class Config:
     stochastic: bool = True
     root_dir: Path = Path("/home/user/work")
     exp_dir: Path = root_dir / f"exp/{exp_name}"
-    best_pretrained_path: Path | None = exp_dir / "output/best_model.ckpt"
+    best_pretrained_path: Path | None = root_dir / "exp/rl_best/output/best_model.ckpt"
     # lb_best_pretrained_path: Path | None = exp_dir / "output/lb_best_model.ckpt"
     debug: bool = False
     output_dir: Path = root_dir / f"output/{exp_name}"
@@ -825,10 +825,10 @@ class WandbLoggerCallback(RLlibCallback):
 
         # 評価結果をリセット
         save_model(algorithm, self.output_dir, suffix=f"model_eval_{self._current_evaluation_id}")
-        save_model(algorithm, self.output_dir, suffix=f"latest_model")
+        save_model(algorithm, self.output_dir, suffix="latest_model")
         best_win_rate = ray.get(self._stats_collector.get_best_win_rate.remote())
         if best_win_rate < current_win_rate:
-            save_model(algorithm, self.output_dir, suffix=f"best_model")
+            save_model(algorithm, self.output_dir, suffix="best_model")
             self.logger.info(f"Best win rate updated. {best_win_rate=:.4f} -> {current_win_rate=:.4f}")
             # ベスト勝率を更新
             ray.get(self._stats_collector.update_best_win_rate.remote(current_win_rate))
