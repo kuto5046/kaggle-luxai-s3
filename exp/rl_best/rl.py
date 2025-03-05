@@ -93,7 +93,7 @@ class Config:
     exp_dir: Path = root_dir / f"exp/{exp_name}"
     best_pretrained_path: Path | None = exp_dir / "output/best_model.ckpt"
     # lb_best_pretrained_path: Path | None = exp_dir / "output/lb_best_model.ckpt"
-    debug: bool = True
+    debug: bool = False
     output_dir: Path = root_dir / f"output/{exp_name}"
 
     # 以下の3つのrunnerにcpuとgpuを割り振る。cpuの合計値がcpu数を超えないように注意(現在は24をactor: 21,learner: 1,evaluator:2に割り振る)
