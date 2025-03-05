@@ -58,7 +58,7 @@ class MinimumCostFlow:
         self.edges[f].append([t, capacity, cost, len(self.edges[t]), action])
         self.edges[t].append([f, 0, -cost, len(self.edges[f]) - 1, -1])  # reverse edge
 
-    def flow(self, s, t, flow, timeout=0.1):
+    def flow(self, s, t, flow, timeout=1.0):
         n = self.n
         g = self.edges
         inf = MinimumCostFlow.inf
@@ -73,7 +73,7 @@ class MinimumCostFlow:
 
         while flow != 0:
             if time.time() - start_time > timeout:
-                return -1
+                return -2
 
             dist = [inf for i in range(n)]
             dist[s] = 0
@@ -81,7 +81,7 @@ class MinimumCostFlow:
 
             while que:
                 if time.time() - start_time > timeout:
-                    return -1
+                    return -2
 
                 c, v = heappop(que)
                 if dist[v] < c:
@@ -367,9 +367,11 @@ class Agent:
         for pos in all_next_positions:
             pos_node = nodes[f"pos_{pos[0]}_{pos[1]}"]
             pos_node_additional = nodes[f"pos_{pos[0]}_{pos[1]}_additional"]
+            dec = 0
             if pos not in sapped_unit_next_pos_set:
                 flow.add_edge(pos_node, nodes["sink"], capacity=1, cost=0, action=-1)
-            additional_capacity = max(len(available_unit_ids) - 1, 1)  # 最低でも1の容量を確保
+                dec = 1
+            additional_capacity = max(len(available_unit_ids) - dec, 1)  # 最低でも1の容量を確保
             flow.add_edge(
                 pos_node_additional,
                 nodes["sink"],
@@ -390,6 +392,7 @@ class Agent:
         # try:
         flow_result = flow.flow(nodes["source"], nodes["sink"], len(available_unit_ids))
         assert flow_result != -1, "Flow calculation failed"
+        assert flow_result != -2, "Flow calculation timeout"
         # except Exception as e:
         #     print(f"フロー計算エラー: {e}")
         #     self._assign_greedy_actions(actions, available_unit_ids, unit_positions, policy_map, point_map, obs, opp_unit_positions)
@@ -575,6 +578,7 @@ class Agent:
         #     self._assign_greedy_actions(actions, available_unit_ids, unit_positions, policy_map, point_map, obs, opp_unit_positions)
         #     return
         assert flow_result != -1, "Flow calculation failed"
+        assert flow_result != -2, "Flow calculation timeout"
         # if flow_result == -1:
         #     print("flow=-1", file=sys.stderr)
         #     for i, sap_info in enumerate(sap_infos):

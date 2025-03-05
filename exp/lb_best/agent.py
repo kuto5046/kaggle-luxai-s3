@@ -1,10 +1,8 @@
+import time
+from heapq import heappop, heappush  # for dijkstra in MinimumCostFlow
 from typing import Any
 from pathlib import Path
 from collections import deque
-import time
-import sys
-from heapq import heappop, heappush  # for dijkstra in MinimumCostFlow
-
 
 import numpy as np
 import torch
@@ -13,16 +11,18 @@ from lux.utils import (
     State,
     Action,
     GlobalState,
-    HiddenState,
     EpisodeStore,
     in_map,
     calc_next_pos,
     extract_state,
+    calc_relative_pos,
     get_valid_sap_map,
     extract_global_state,
     get_valid_policy_map,
+    get_nearby_enemy_unit_ids,
+    get_nearby_point_positions,
 )
-from lux.models import LuxUNetModel
+from lux.models import LuxConvLSTMModel
 from lux.params import EnvParams
 from scipy.special import softmax
 
@@ -31,9 +31,16 @@ class Config:
     seed: int = 2025
     # 確率的な行動を取るかどうか
     stochastic: bool = True  # Falseにするとargmaxで行動を選択する
-    res: bool = True
-    n_stack: int = 4
+    # model
+    n_stack: int = 8
+    num_layers: int = 3
+    hidden_dim: int = 64
+    kernel_size: int = 5
+    num_repeats: int = 3
+
     overlap_penalty: float = 2.0
+
+    tta: bool = False
 
     checkpoint_path: Path = Path(__file__).parent / "output/best_model.ckpt"
 
@@ -55,7 +62,7 @@ class MinimumCostFlow:
         self.edges[f].append([t, capacity, cost, len(self.edges[t]), action])
         self.edges[t].append([f, 0, -cost, len(self.edges[f]) - 1, -1])  # reverse edge
 
-    def flow(self, s, t, flow, timeout=0.1):
+    def flow(self, s, t, flow, timeout=1.0):
         n = self.n
         g = self.edges
         inf = MinimumCostFlow.inf
@@ -70,7 +77,7 @@ class MinimumCostFlow:
 
         while flow != 0:
             if time.time() - start_time > timeout:
-                return -1
+                return -2
 
             dist = [inf for i in range(n)]
             dist[s] = 0
@@ -78,7 +85,7 @@ class MinimumCostFlow:
 
             while que:
                 if time.time() - start_time > timeout:
-                    return -1
+                    return -2
 
                 c, v = heappop(que)
                 if dist[v] < c:
@@ -116,14 +123,15 @@ class MinimumCostFlow:
 
 
 class ILAgent:
-    def __init__(self, env_cfg: EnvParams, checkpoint_path: Path, n_stack: int, res: bool = True) -> None:
-        self.model = LuxUNetModel(
+    def __init__(self, env_cfg: EnvParams, checkpoint_path: Path, n_stack: int) -> None:
+        self.model = LuxConvLSTMModel(
             state_space_size=len(State),
             global_state_space_size=len(GlobalState),
             action_space_size=len(Action),
-            hidden_state_space_size=len(HiddenState),
-            n_stack=n_stack,
-            res=res,
+            num_layers=cfg.num_layers,
+            hidden_dim=cfg.hidden_dim,
+            kernel_size=cfg.kernel_size,
+            num_repeats=cfg.num_repeats,
         )
         ckpt = torch.load(checkpoint_path, weights_only=True, map_location="cpu")
         state_dict = {k.replace("model.", ""): v for k, v in ckpt["state_dict"].items()}
@@ -140,9 +148,28 @@ class ILAgent:
             self.stack_states.append(np.zeros((len(State), 24, 24)))
             self.stack_global_states.append(np.zeros(len(GlobalState)))
 
-    def predict(self, obs: dict[str, Any], team_id: int, episode_store: EpisodeStore) -> tuple[np.ndarray, np.ndarray]:
+    def transpose_state(self, state: torch.Tensor) -> torch.Tensor:
+        assert state.dim() == 5
+        return state.permute(0, 1, 2, 4, 3)
+
+    def transpose_global_state(self, global_state: torch.Tensor) -> torch.Tensor:
+        return global_state
+
+    def transpose_policy(self, policy: torch.Tensor) -> torch.Tensor:
+        assert policy.dim() == 4
+        policy = policy.permute(0, 1, 3, 2)
+        policy[:, Action.UP], policy[:, Action.LEFT] = policy[:, Action.LEFT].clone(), policy[:, Action.UP].clone()
+        policy[:, Action.DOWN], policy[:, Action.RIGHT] = (
+            policy[:, Action.RIGHT].clone(),
+            policy[:, Action.DOWN].clone(),
+        )
+        return policy
+
+    def predict(
+        self, obs: dict[str, Any], team_id: int, episode_store: EpisodeStore, cfg: Config
+    ) -> tuple[np.ndarray, np.ndarray]:
         state = extract_state(obs, team_id, episode_store)
-        global_state = extract_global_state(obs, team_id, self.env_cfg)
+        global_state = extract_global_state(obs, team_id, self.env_cfg, episode_store)
         self.stack_states.append(state)
         self.stack_global_states.append(global_state)
         states = {
@@ -156,12 +183,24 @@ class ILAgent:
             states["state"] = torch.flip(states["state"], [3, 4])
 
         with torch.no_grad():
+            if cfg.tta:
+                states["state"] = torch.cat([states["state"], self.transpose_state(states["state"])], dim=0)
+                states["global_state"] = torch.cat(
+                    [states["global_state"], self.transpose_global_state(states["global_state"])], dim=0
+                )
             if torch.cuda.is_available():
                 states = {k: v.cuda() for k, v in states.items()}
             output = self.model(states)
             if torch.cuda.is_available():
                 output = {k: v.cpu() for k, v in output.items()}
+            if cfg.tta:
+                output["policy"] = (output["policy"][:1] + self.transpose_policy(output["policy"][1:])) / 2
+            if do_flip:
+                output["sap"] = torch.flip(output["sap"], [-2, -1])
             policy_map = output["policy"].squeeze().numpy()
+            sap = torch.sigmoid(output["sap"]).squeeze().numpy()
+            sap_available_area = state[State.SAP_AVAILABLE_AREA]
+            sap = sap * sap_available_area
 
         if do_flip:
             policy_map = np.flip(policy_map, axis=(1, 2)).copy()
@@ -177,7 +216,7 @@ class ILAgent:
         policy_map = get_legal_policy(obs, policy_map, team_id, episode_store)
         point_map = state[State.POINTS]
 
-        return policy_map, point_map
+        return policy_map, point_map, sap
 
 
 def get_legal_policy(
@@ -200,9 +239,27 @@ def get_legal_sap_policy(
     return sap_map
 
 
+class SingleSapInfo:
+    def __init__(
+        self,
+        sap_pos: list[tuple[int, int]],
+        sap_policy: list[float],
+        next_policy: float,
+        next_action,
+        unit_id: int,
+        unit_pos: tuple[int, int],
+    ) -> None:
+        self.sap_pos = sap_pos  # sapの位置
+        self.sap_policy = sap_policy  # sapの各位置のpolicy
+        self.next_policy = next_policy  # sap以外の行動のpolicyのうちの最大値
+        self.next_action = next_action  # sap以外の行動のうちの最大値の行動
+        self.unit_id = unit_id
+        self.unit_pos = unit_pos
+
+
 cfg = Config()
 seed_everything(cfg.seed, workers=True)
-imitation_model = ILAgent(EnvParams, cfg.checkpoint_path, cfg.n_stack, cfg.res)
+imitation_model = ILAgent(EnvParams, cfg.checkpoint_path, cfg.n_stack)
 
 
 class Agent:
@@ -225,7 +282,7 @@ class Agent:
             self.episode_store.reset()
         else:
             self.episode_store.update(obs, self.prev_actions)
-        policy_map, point_map = imitation_model.predict(obs, self.team_id, self.episode_store)
+        policy_map, _point_map, sap_map = imitation_model.predict(obs, self.team_id, self.episode_store, self.cfg)
 
         unit_mask = np.array(obs["units_mask"][self.team_id])  # shape (max_units, )
         unit_positions = np.array(obs["units"]["position"][self.team_id])  # shape (max_units, 2)
@@ -233,23 +290,29 @@ class Agent:
 
         opp_unit_positions = [tuple(pos) for pos in obs["units"]["position"][self.opp_team_id] if pos[0] != -1]
 
-        if len(available_unit_ids) > 1 and self.cfg.overlap_penalty > 0:
-            actions = np.zeros((self.env_cfg["max_units"], 3), dtype=int)
-            self._assign_actions_with_flow(
-                actions, available_unit_ids, unit_positions, policy_map, point_map, obs, opp_unit_positions
-            )
-        else:
-            actions = np.zeros((self.env_cfg["max_units"], 3), dtype=int)
-            self._assign_greedy_actions(
-                actions, available_unit_ids, unit_positions, policy_map, point_map, obs, opp_unit_positions
-            )
+        # sapの位置を決定 -> 残りの行動をフローで決定
+        actions = np.zeros((self.env_cfg["max_units"], 3), dtype=int)
+        self._assign_greedy_actions_sap(actions, available_unit_ids, unit_positions, policy_map, sap_map)
+        sapped_unit_next_pos_set = set()
+        for unit_id in available_unit_ids:
+            action = actions[unit_id]
+            if action[0] == Action.SAP:
+                sapped_unit_next_pos = (unit_positions[unit_id][0], unit_positions[unit_id][1])
+                sapped_unit_next_pos_set.add(sapped_unit_next_pos)
+
+        # available_unit_idsからsapしたユニットを除外
+        next_available_unit_ids = [unit_id for unit_id in available_unit_ids if actions[unit_id][0] != Action.SAP]
+
+        self._assign_actions_with_flow(
+            actions, next_available_unit_ids, unit_positions, policy_map, sapped_unit_next_pos_set
+        )
 
         self.prev_opp_unit_positions = opp_unit_positions
         self.prev_actions = actions
         return actions
 
     def _assign_actions_with_flow(
-        self, actions, available_unit_ids, unit_positions, policy_map, point_map, obs, opp_unit_positions
+        self, actions, available_unit_ids, unit_positions, policy_map, sapped_unit_next_pos_set
     ):
         """最小費用流問題としてグリッドへの割り当てを解く"""
         # self._assign_greedy_actions(
@@ -278,28 +341,10 @@ class Agent:
             for action in range(len(Action)):
                 sap_pos_relative = None
                 if action == Action.SAP:
-                    # 範囲内にいる敵ユニットを取得
-                    nearby_enemy_unit_ids = get_nearby_enemy_unit_ids(
-                        unit_pos, opp_unit_positions, self.env_cfg["unit_sap_range"]
-                    )
-                    if len(nearby_enemy_unit_ids) > 0:
-                        sap_pos = opp_unit_positions[np.random.choice(nearby_enemy_unit_ids)]
-                        # 敵ユニットが2ステップ以上動いていない場合はsapする
-                        if point_map[sap_pos[1], sap_pos[0]] == 1 or sap_pos in self.prev_opp_unit_positions:
-                            sap_pos_relative = calc_relative_pos(np.array(unit_pos), np.array(sap_pos))
-                        else:
-                            # 敵ユニットの隣接セルがポイント位置であればそこに移動すると考える。
-                            nearby_point_positions = get_nearby_point_positions(sap_pos, point_map)
-                            if len(nearby_point_positions) > 0:
-                                sap_pos = nearby_point_positions[np.random.choice(len(nearby_point_positions))]
-                                sap_pos_relative = calc_relative_pos(np.array(unit_pos), np.array(sap_pos))
-                    next_pos = unit_pos  # SAPは現在位置として扱う
-                    if sap_pos_relative is None:
-                        continue
-                else:
-                    next_pos = calc_next_pos(unit_pos, action)
-                    if not in_map(next_pos):
-                        continue
+                    continue
+                next_pos = calc_next_pos(unit_pos, action)
+                if not in_map(next_pos):
+                    continue
 
                 # score = -np.log(policy[action] + 1e-10)
                 score = 1.0 - policy[action]
@@ -328,8 +373,11 @@ class Agent:
         for pos in all_next_positions:
             pos_node = nodes[f"pos_{pos[0]}_{pos[1]}"]
             pos_node_additional = nodes[f"pos_{pos[0]}_{pos[1]}_additional"]
-            flow.add_edge(pos_node, nodes["sink"], capacity=1, cost=0, action=-1)
-            additional_capacity = max(len(available_unit_ids) - 1, 1)  # 最低でも1の容量を確保
+            dec = 0
+            if pos not in sapped_unit_next_pos_set:
+                flow.add_edge(pos_node, nodes["sink"], capacity=1, cost=0, action=-1)
+                dec = 1
+            additional_capacity = max(len(available_unit_ids) - dec, 1)  # 最低でも1の容量を確保
             flow.add_edge(
                 pos_node_additional,
                 nodes["sink"],
@@ -349,16 +397,18 @@ class Agent:
                 flow.add_edge(unit_node, pos_node_additional, capacity=1, cost=base_cost, action=action)
         # try:
         flow_result = flow.flow(nodes["source"], nodes["sink"], len(available_unit_ids))
+        assert flow_result != -1, "Flow calculation failed"
+        assert flow_result != -2, "Flow calculation timeout"
         # except Exception as e:
         #     print(f"フロー計算エラー: {e}")
         #     self._assign_greedy_actions(actions, available_unit_ids, unit_positions, policy_map, point_map, obs, opp_unit_positions)
         #     return
-        if flow_result == -1:
-            print("flow=-1", file=sys.stderr)
-            self._assign_greedy_actions(
-                actions, available_unit_ids, unit_positions, policy_map, point_map, obs, opp_unit_positions
-            )
-            return
+        # if flow_result == -1:
+        #     print("flow=-1", file=sys.stderr)
+        #     self._assign_greedy_actions(
+        #         actions, available_unit_ids, unit_positions, policy_map, point_map, obs, opp_unit_positions
+        #     )
+        #     return
 
         # フローから行動を抽出
         for i, unit_id in enumerate(available_unit_ids):
@@ -371,8 +421,6 @@ class Agent:
                     break
             if selected_action is None:
                 actions[unit_id] = [Action.CENTER, 0, 0]
-            elif selected_action["action_id"] == Action.SAP:
-                actions[unit_id] = [Action.SAP, selected_action["sap_pos"][0], selected_action["sap_pos"][1]]
             else:
                 actions[unit_id] = [selected_action["action_id"], 0, 0]
 
@@ -427,38 +475,131 @@ class Agent:
                     actions[unit_id] = [action, 0, 0]
                     break
 
+    def _assign_greedy_actions_sap(self, actions, available_unit_ids, unit_positions, policy_map, sap_map):
+        sap_infos: list[SingleSapInfo] = []
 
-# 相対位置を計算
-def calc_relative_pos(base_pos: np.ndarray, target_pos: np.ndarray) -> np.ndarray:
-    return target_pos - base_pos
+        for unit_id in available_unit_ids:
+            unit_pos = unit_positions[unit_id]
+            x, y = unit_pos
+            policy = policy_map[:, y, x].copy()
+            # print(f"{x=} {y=} {policy=}", file=sys.stderr)
 
+            if self.cfg.stochastic:
+                if policy.sum() == 0:
+                    actions[unit_id] = [Action.CENTER, 0, 0]
+                    continue
 
-# マスの半径kマス以内に該当するかどうか
-def is_within_k_tiles(base_pos: np.ndarray, target_pos: np.ndarray, k: int) -> bool:
-    return np.abs(base_pos[0] - target_pos[0]) <= k and np.abs(base_pos[1] - target_pos[1]) <= k
+                policy = policy / policy.sum()
+                action = np.random.choice(range(6), p=policy)
+            else:
+                action = policy.argmax()
 
+            if action == Action.SAP:
+                # 範囲内のpolicyをすべて取得
+                sap_poses = []
+                sap_policies = []
+                for dx in range(-self.env_cfg["unit_sap_range"], self.env_cfg["unit_sap_range"] + 1):
+                    for dy in range(-self.env_cfg["unit_sap_range"], self.env_cfg["unit_sap_range"] + 1):
+                        sap_pos = (x + dx, y + dy)
+                        if in_map(sap_pos):
+                            sap_poses.append(sap_pos)
+                            sap_policies.append(sap_map[sap_pos[1], sap_pos[0]] * policy[Action.SAP])
+                policy[Action.SAP] = 0
+                next_action = policy.argmax()
+                next_action_info = {
+                    "action_id": next_action,
+                    "next_pos": unit_pos,
+                    "score": 1.0 - policy[next_action],
+                    "sap_pos": None,
+                }
+                next_policy = policy[next_action]
+                sap_infos.append(
+                    SingleSapInfo(sap_poses, sap_policies, next_policy, next_action_info, unit_id, unit_pos)
+                )
 
-# 隣接するマスにあるポイントマスを取得
-def get_nearby_point_positions(pos: np.ndarray, point_map: np.ndarray, k: int = 1) -> list[np.ndarray]:
-    # posを中心にkマス以内のマスを取得
-    nearby_positions = []
-    up_pos = (pos[0], pos[1] - k)
-    if in_map(up_pos) and point_map[up_pos[1], up_pos[0]] == 1:
-        nearby_positions.append(up_pos)
-    down_pos = (pos[0], pos[1] + k)
-    if in_map(down_pos) and point_map[down_pos[1], down_pos[0]] == 1:
-        nearby_positions.append(down_pos)
-    left_pos = (pos[0] - k, pos[1])
-    if in_map(left_pos) and point_map[left_pos[1], left_pos[0]] == 1:
-        nearby_positions.append(left_pos)
-    right_pos = (pos[0] + k, pos[1])
-    if in_map(right_pos) and point_map[right_pos[1], right_pos[0]] == 1:
-        nearby_positions.append(right_pos)
-    return nearby_positions
+        # SAPの処理. min_cost_flowでSAPの位置を決定
+        if len(sap_infos) == 0:
+            return
 
+        n_units = len(sap_infos)
+        sap_unit_ids = [sap_info.unit_id for sap_info in sap_infos]
+        all_sap_positions = set()
+        for sap_info in sap_infos:
+            for sap_pos in sap_info.sap_pos:
+                all_sap_positions.add(sap_pos)
+        n_cells = len(all_sap_positions)
+        flow = MinimumCostFlow(2 + n_units + n_cells + 1)
+        nodes = {}
+        nodes["source"] = 0
+        nodes["sink"] = 1
+        nodes["unit_move"] = 2 + n_units + n_cells  # sap以外の行動のためのノード
+        for i in range(n_units):
+            nodes[f"unit_{i}"] = 2 + i
+        for i, (x, y) in enumerate(all_sap_positions):
+            nodes[f"pos_{x}_{y}"] = 2 + n_units + i
+            # nodes[f"pos_{x}_{y}_additional"] = 2 + n_units + n_cells + i
 
-# 自身の周囲kタイル以内にいる敵ユニットを抽出
-def get_nearby_enemy_unit_ids(
-    unit_pos: tuple[int, int], opp_unit_positions: list[tuple[int, int]], k: int
-) -> list[int]:
-    return [unit_id for unit_id, pos in enumerate(opp_unit_positions) if is_within_k_tiles(unit_pos, pos, k)]
+        flow.add_edge(nodes["unit_move"], nodes["sink"], capacity=n_units, cost=0, action=-1)
+        for i, unit_id in enumerate(sap_unit_ids):
+            flow.add_edge(nodes["source"], nodes[f"unit_{i}"], capacity=1, cost=0, action=-1)
+        for pos in all_sap_positions:
+            pos_node = nodes[f"pos_{pos[0]}_{pos[1]}"]
+            # pos_node_additional = nodes[f"pos_{pos[0]}_{pos[1]}_additional"]
+            flow.add_edge(pos_node, nodes["sink"], capacity=1, cost=0, action=-1)
+            # additional_capacity = max(len(available_unit_ids) - 1, 1)  # 最低でも1の容量を確保
+            # flow.add_edge(
+            #     pos_node_additional,
+            #     nodes["sink"],
+            #     capacity=additional_capacity,
+            #     cost=self.cfg.overlap_penalty,
+            #     action=-1,
+            # )
+
+        for i, sap_info in enumerate(sap_infos):
+            unit_node = nodes[f"unit_{i}"]
+            flow.add_edge(
+                unit_node,
+                nodes["unit_move"],
+                capacity=1,
+                cost=sap_info.next_action["score"],
+                action=sap_info.next_action,
+            )
+            for sap_pos, sap_policy in zip(sap_info.sap_pos, sap_info.sap_policy):
+                sap_pos_relative = calc_relative_pos(sap_info.unit_pos, sap_pos)
+                assert sap_policy >= 0 and sap_policy <= 1
+                action = {
+                    "action_id": Action.SAP,
+                    "next_pos": sap_info.unit_pos,
+                    "score": 1.0 - sap_policy,
+                    "sap_pos": sap_pos_relative,
+                }
+                flow.add_edge(
+                    unit_node, nodes[f"pos_{sap_pos[0]}_{sap_pos[1]}"], capacity=1, cost=action["score"], action=action
+                )
+
+        # try:
+        flow_result = flow.flow(nodes["source"], nodes["sink"], len(sap_unit_ids))
+        # except Exception as e:
+        #     print(f"フロー計算エラー: {e}")
+        #     self._assign_greedy_actions(actions, available_unit_ids, unit_positions, policy_map, point_map, obs, opp_unit_positions)
+        #     return
+        assert flow_result != -1, "Flow calculation failed"
+        assert flow_result != -2, "Flow calculation timeout"
+        # if flow_result == -1:
+        #     print("flow=-1", file=sys.stderr)
+        #     for i, sap_info in enumerate(sap_infos):
+        #         policy_map[Action.SAP, sap_info.unit_pos[1], sap_info.unit_pos[0]] = 0
+        #     self._assign_greedy_actions(actions, sap_unit_ids, unit_positions, policy_map, point_map, obs, sap_map)
+        #     return
+
+        # フローから行動を抽出
+        for i, unit_id in enumerate(sap_unit_ids):
+            unit_node = nodes[f"unit_{i}"]
+            unit_pos = unit_positions[unit_id]
+            selected_action = None
+            for edge in flow.edges[unit_node]:
+                if edge[1] == 0 and edge[4] != -1:
+                    selected_action = edge[4]
+                    break
+            if selected_action["action_id"] == Action.SAP:
+                actions[unit_id] = [Action.SAP, selected_action["sap_pos"][0], selected_action["sap_pos"][1]]
