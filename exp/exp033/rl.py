@@ -1,5 +1,7 @@
+import os
 import random
 import logging
+from enum import IntEnum, auto
 from time import time
 from typing import Any, Optional
 from pathlib import Path
@@ -65,90 +67,97 @@ from lux.utils import (
     extract_global_state,
     get_valid_policy_map,
 )
-from lux.models import LuxUNetModel, LuxValueConvModel
+from lux.models import LuxUNetModel, LuxConvLSTMModel, LuxValueConvModel
 from lux.params import EnvParams
 from lux.imitation_agent import action_map_to_action
 
+CPU_COUNT = os.cpu_count()
+
 # policy名
 OWN_POLICY = "p0"
-SELF_PLAY_POLICY = (
-    "self-play"  # TODO: 評価時に対戦相手をbestのみに制御することができていないため未使用だが本当は使いたい
-)
 BEST_POLICY = "best"
-LB_BEST_POLICY = "lb_best"  # TODO: モデルや特徴量が異なるため未使用だが本当は使いたい
+LB_BEST_POLICY = "lb_best"
+SELF_PLAY_POLICY = "self-play"
+
+
+class Model(IntEnum):
+    UNet = auto()
+    ConvLSTM = auto()
 
 
 @dataclass
 class Config:
+    # common
     exp_name: str = Path(__file__).parent.name
-    is_gcp: bool = True
+    debug: bool = True
     notes: str = "sap policyも合わせて学習する"
     env_name: str = "lux-s3-v0"
-    n_stack: int = 4
+    root_dir: Path = Path("/home/user/work")
+    exp_dir: Path = root_dir / f"exp/{exp_name}"
+    output_dir: Path = root_dir / f"output/{exp_name}"
+
+    # pretrained model
+    unet_n_stack: int = 4
+    lstm_n_stack: int = 8
+    num_layers: int = 3
+    hidden_dim: int = 64
+    kernel_size: int = 5
+    num_repeats: int = 3
     freeze: bool = True
     overlap_penalty: float = 2.0
     stochastic: bool = True
-    root_dir: Path = Path("/home/user/work")
-    exp_dir: Path = root_dir / f"exp/{exp_name}"
-    best_pretrained_path: Path | None = exp_dir / "output/best_model.ckpt"
-    # lb_best_pretrained_path: Path | None = exp_dir / "output/lb_best_model.ckpt"
-    debug: bool = False
-    output_dir: Path = root_dir / f"output/{exp_name}"
+    best_pretrained_path: Path | None = root_dir / "exp/best/output/best_model.ckpt"
+    lb_best_pretrained_path: Path | None = root_dir / "exp/lb_best/output/best_model.ckpt"
 
     # 以下の3つのrunnerにcpuとgpuを割り振る。cpuの合計値がcpu数を超えないように注意(現在は24をactor: 21,learner: 1,evaluator:2に割り振る)
-    # データ収集用
-    num_env_runners: int = 18  # actorの数
-    num_cpus_per_env_runner: int = 1
-    num_gpus_per_env_runner: int = 0
-
-    # 学習時に同じ時系列として扱いたいstep数を設定してやる。報酬が含まれるように1マッチ分の長さにする
-    # batch_mode="truncate_episodes"の場合はmin(rollout_fragment_length, 101)stepごとにデータが送信される
-    rollout_fragment_length: int | str | None = 101
-
     # 学習用(GPUの数=learnerと考えて良い)
-    num_learners: int = 0  # IMPALAの場合gpuが1つなら0に設定するとlocal learnerとして扱われる、処理が早くなる
+    num_learners: int = (
+        0  # IMPALAの場合gpuが1つならlearners=0に設定してlocal worker(gpuを利用しない)としての利用が推奨される
+    )
     num_cpus_per_learner: int = 1
     num_gpus_per_learner: int = 1
 
     # 評価用
-    evaluation_num_env_runners: int = 5  # 評価用のenv runnerの数
+    evaluation_num_env_runners: int = CPU_COUNT // 4  # 評価用のenv runnerの数 cpuの1/4を評価に使う
     evaluation_interval: int = 50  # 何回trainをしたら評価を実施するか　１回が30secくらいなので50回で1500sec=25分くらい
     evaluation_duration: int = 50  # 1回の評価で何エピソード分評価するか
 
-    # learner
+    # データ収集用
+    num_env_runners: int = CPU_COUNT - evaluation_num_env_runners - 1  # -1はlearner用
+    # num_env_runners: int = CPU_COUNT - evaluation_num_env_runners - num_learners
+    num_cpus_per_env_runner: int = 1
+    num_gpus_per_env_runner: int = 0
+
+    # 学習設定
     training_minutes: int = 60 * 24  # 1日
     # workerからLearnerに送られるバッチのキューの最大サイズ. env_runner数と同じくらいが良いのではと思っている
-    learner_queue_size: int = 20
+    learner_queue_size: int = num_env_runners
+    # 学習時に同じ時系列として扱いたいstep数を設定してやる。報酬が含まれるように1マッチ分の長さにする
+    # batch_mode="truncate_episodes"の場合はmin(rollout_fragment_length, 101)stepごとにデータが送信される
+    rollout_fragment_length: int | str | None = 101
 
+    # learner
     gamma: float = 0.9995
     lr: float = 1e-5
-    # batch size 一応1episodeのサイズにしてるが不要かも。もしくはrollout_fragment_length部分で調整する
     train_batch_size_per_learner: int = 512
-    # 1回の学習データ(train_batch_size*queue_size)を何epoch分学習するか
-    num_epochs: int = 1
+    num_epochs: int = 1  # 1回の学習のepoch数。新しいデータがどんどん追加されてくるためepoch数は1にしている
     replay_proportion: float = 0.0  # リプレイバッファの割合
     # loss
     vtrace_clip_rho_threshold: float = 1.0  # 価値関数のlossの係数
     vtrace_clip_pg_rho_threshold: float = 1.0  # ポリシー勾配のlossの係数
     vf_loss_coeff: float = 1.0  # 価値関数のlossの係数
     entropy_coeff: float = 1e-5  # エントロピーのlossの係数(大きくすると探索が活発になる)
-    sap_loss_coeff: float = 1e-2  # sapのlossの係数
+    sap_loss_coeff: float = 1e-3  # sapのlossの係数
     # reward
     point_weight: float = 0  # マッチの報酬を超えないようにすべきなので適用する場合1e-3程度
 
     def __post_init__(self):
-        if self.is_gcp:
-            self.num_env_runners: int = 96 - 4 - 15  # actorの数
-            self.num_learners: int = 4
-            self.evaluation_num_env_runners: int = 15
-            self.learner_queue_size: int = 100
-
         if self.debug:
             self.num_env_runners = 1
             self.num_cpus_per_env_runner = 1
             self.evaluation_num_env_runners = 1
             self.evaluation_interval = 1
-            self.evaluation_duration = 2
+            self.evaluation_duration = 1
             self.training_minutes = 10
             self.learner_queue_size = 1
             self.num_epochs = 1
@@ -325,15 +334,6 @@ class RLLibLuxEnv(MultiAgentEnv):
         if np.max(player1_opp_unit_map) > 1:
             player1_opp_unit_map = player1_opp_unit_map / np.max(player1_opp_unit_map)
 
-        assert player0_opp_unit_map.shape == (EnvParams.map_height, EnvParams.map_width)
-        assert player1_opp_unit_map.shape == (EnvParams.map_height, EnvParams.map_width)
-        assert player0_opp_unit_map.dtype == np.float32
-        assert player1_opp_unit_map.dtype == np.float32
-        assert player0_opp_unit_map.min() >= 0
-        assert player1_opp_unit_map.min() >= 0
-        assert player0_opp_unit_map.max() <= 1
-        assert player1_opp_unit_map.max() <= 1
-
         self.agent0_states.append(agent0_state)
         self.agent1_states.append(agent1_state)
         self.agent0_global_states.append(agent0_global_state)
@@ -439,46 +439,72 @@ class RLLibLuxEnv(MultiAgentEnv):
         return step_rewards
 
 
-def freeze(model: nn.Module):
-    # 全てFalseにする
-    for param in model.parameters():
-        param.requires_grad = False
+def freeze(model: nn.Module, model_name: Model):
+    if model_name == Model.UNet:
+        # 全てFalseにする
+        for param in model.parameters():
+            param.requires_grad = False
 
-    # UNet後のpolicyネットワークのパラメータをTrueにする
-    for param in model.sap_net1.parameters():
-        param.requires_grad = True
-    for param in model.sap_net2.parameters():
-        param.requires_grad = True
-    for param in model.sap_net3.parameters():
-        param.requires_grad = True
-    for param in model.policy_net1_from_sap.parameters():
-        param.requires_grad = True
-    for param in model.policy_net2.parameters():
-        param.requires_grad = True
-    for param in model.policy_net3.parameters():
-        param.requires_grad = True
-    for param in model.policy_net4.parameters():
-        param.requires_grad = True
+        # UNet後のpolicyネットワークのパラメータをTrueにする
+        for param in model.sap_net1.parameters():
+            param.requires_grad = True
+        for param in model.sap_net2.parameters():
+            param.requires_grad = True
+        for param in model.sap_net3.parameters():
+            param.requires_grad = True
+        for param in model.policy_net1_from_sap.parameters():
+            param.requires_grad = True
+        for param in model.policy_net2.parameters():
+            param.requires_grad = True
+        for param in model.policy_net3.parameters():
+            param.requires_grad = True
+        for param in model.policy_net4.parameters():
+            param.requires_grad = True
+
+    elif model_name == Model.ConvLSTM:
+        for param in model.inc.parameters():
+            param.requires_grad = False
+        for param in model.drc.parameters():
+            param.requires_grad = False
+        for param in model.policy_net.parameters():
+            param.requires_grad = False
+    else:
+        raise ValueError(f"Invalid model name: {model_name}")
 
 
 class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
     @override(TorchRLModule)
     def setup(self):
-        # torch.set_num_threads(1)
-        self.policy_model = LuxUNetModel(
-            state_space_size=len(State),
-            global_state_space_size=len(GlobalState),
-            action_space_size=len(Action),
-            n_stack=self.model_config["n_stack"],
-            res=True,
-        )
+        torch.set_num_threads(1)
+        model_name = self.model_config["model_name"]
+        self.n_stack = self.model_config["n_stack"]
+        if model_name == Model.UNet:
+            self.policy_model = LuxUNetModel(
+                state_space_size=len(State),
+                global_state_space_size=len(GlobalState),
+                action_space_size=len(Action),
+                n_stack=self.n_stack,
+                res=True,
+            )
+        elif model_name == Model.ConvLSTM:
+            self.policy_model = LuxConvLSTMModel(
+                state_space_size=len(State),
+                global_state_space_size=len(GlobalState),
+                action_space_size=len(Action),
+                num_layers=self.model_config["num_layers"],
+                hidden_dim=self.model_config["hidden_dim"],
+                kernel_size=self.model_config["kernel_size"],
+                num_repeats=self.model_config["num_repeats"],
+            )
+        else:
+            raise ValueError(f"Invalid model name: {model_name}")
         if self.model_config["freeze"]:
-            freeze(self.policy_model)
+            freeze(self.policy_model, model_name)
 
         self.value_model = LuxValueConvModel(
             state_space_size=len(State),
             global_state_space_size=len(GlobalState),
-            n_stack=self.model_config["n_stack"],
+            n_stack=self.n_stack,
         )
 
         if self.model_config["pretrained_path"]:
@@ -492,6 +518,10 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
 
     @override(TorchRLModule)
     def _forward(self, batch, **kwargs):
+        # (batch, stack, ch, height, width)であり,stackはモデルによって異なる。大きめのstackで渡ってくるためモデルに合わせて変形する
+        batch[Columns.OBS]["state"] = batch[Columns.OBS]["state"][:, -self.n_stack :, :, :, :]
+        batch[Columns.OBS]["global_state"] = batch[Columns.OBS]["global_state"][:, -self.n_stack :]
+
         batch_size = batch[Columns.OBS]["state"].shape[0]
         outputs = self.policy_model(batch[Columns.OBS])
         policy_logits = outputs["policy"]
@@ -825,10 +855,10 @@ class WandbLoggerCallback(RLlibCallback):
 
         # 評価結果をリセット
         save_model(algorithm, self.output_dir, suffix=f"model_eval_{self._current_evaluation_id}")
-        save_model(algorithm, self.output_dir, suffix=f"latest_model")
+        save_model(algorithm, self.output_dir, suffix="latest_model")
         best_win_rate = ray.get(self._stats_collector.get_best_win_rate.remote())
         if best_win_rate < current_win_rate:
-            save_model(algorithm, self.output_dir, suffix=f"best_model")
+            save_model(algorithm, self.output_dir, suffix="best_model")
             self.logger.info(f"Best win rate updated. {best_win_rate=:.4f} -> {current_win_rate=:.4f}")
             # ベスト勝率を更新
             ray.get(self._stats_collector.update_best_win_rate.remote(current_win_rate))
@@ -1089,7 +1119,8 @@ def custom_module_to_env_connector(env: MultiAgentEnv) -> list[ConnectorV2]:
 
 def create_rl_config(cfg: Config) -> AlgorithmConfig:
     env_config = {
-        "n_stack": cfg.n_stack,
+        # 環境では大きめにstackを作成しておきモデル側で必要なstackを抽出する
+        "n_stack": max(cfg.unet_n_stack, cfg.lstm_n_stack),
         "stochastic": cfg.stochastic,
         "overlap_penalty": cfg.overlap_penalty,
         "point_weight": cfg.point_weight,
@@ -1103,9 +1134,25 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
         action_space=action_space,
         # モデル内部でself.model_config["key"]でアクセスできる
         model_config={
-            "n_stack": cfg.n_stack,
+            "n_stack": cfg.unet_n_stack,
             "pretrained_path": cfg.best_pretrained_path,
             "freeze": cfg.freeze,
+            "model_name": Model.UNet,
+        },
+    )
+    lb_best_rl_module_spec = RLModuleSpec(
+        module_class=LuxUnetTorchRLModule,
+        observation_space=observation_space,
+        action_space=action_space,
+        model_config={
+            "n_stack": cfg.lstm_n_stack,
+            "pretrained_path": cfg.lb_best_pretrained_path,
+            "freeze": cfg.freeze,
+            "model_name": Model.ConvLSTM,
+            "num_layers": cfg.num_layers,
+            "hidden_dim": cfg.hidden_dim,
+            "kernel_size": cfg.kernel_size,
+            "num_repeats": cfg.num_repeats,
         },
     )
     config = (
@@ -1167,9 +1214,9 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
             # RLで扱うagent(policy)の名前
             policies={
                 OWN_POLICY,
-                # SELF_PLAY_POLICY,
+                SELF_PLAY_POLICY,
                 BEST_POLICY,
-                # LB_BEST_POLICY,
+                # LB_BEST_POLICY,  # cpuで動かすと遅すぎるので使用していない TODO: onnx変換試す
             },
             # 各agentのポリシーを決める関数
             policy_mapping_fn=lambda aid, episode, **kwargs: (
@@ -1177,17 +1224,14 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
                 if aid == "player_0"
                 else random.choice(
                     [
-                        # SELF_PLAY_POLICY,
+                        SELF_PLAY_POLICY,
                         BEST_POLICY,
                         # LB_BEST_POLICY,
                     ]
                 )
             ),
             # 学習は自身のpolicyとself-playのpolicyを学習
-            policies_to_train=[
-                OWN_POLICY,
-                # SELF_PLAY_POLICY
-            ],
+            policies_to_train=[OWN_POLICY, SELF_PLAY_POLICY],
         )
         # https://docs.ray.io/en/latest/rllib/rllib-rlmodule.html#construction-through-rlmodulespecs
         .rl_module(
@@ -1195,9 +1239,9 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
                 # policy名とモデルの紐づけ
                 rl_module_specs={
                     OWN_POLICY: best_rl_module_spec,
-                    # SELF_PLAY_POLICY: best_rl_module_spec,
+                    SELF_PLAY_POLICY: best_rl_module_spec,
                     BEST_POLICY: best_rl_module_spec,
-                    # LB_BEST_POLICY: lb_best_rl_module_spec,
+                    LB_BEST_POLICY: lb_best_rl_module_spec,
                 }
             )
         )
@@ -1214,15 +1258,14 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
             evaluation_sample_timeout_s=60 * 20,
             evaluation_force_reset_envs_before_iteration=True,  # 各評価の前に環境をリセット
             evaluation_parallel_to_training=True,  # 評価と学習を並列に実行
-            # 評価用の上書き設定.これにより評価時はlb_bestポリシーと自身の対戦になる
-            # evaluation_config={
-            #     "multi_agent": {
-            #         "policies": {OWN_POLICY: None, BEST_POLICY: None},
-            #         "policy_mapping_fn": lambda aid, episode, **kwargs: (
-            #             OWN_POLICY if aid == "player_0" else BEST_POLICY
-            #         ),
-            #     }
-            # },
+            # # 評価用の上書き設定.これにより評価時はlb_bestポリシーと自身の対戦になる
+            evaluation_config={
+                "multiagent": {
+                    "policy_mapping_fn": lambda aid, episode, **kwargs: (
+                        OWN_POLICY if aid == "player_0" else BEST_POLICY
+                    ),
+                }
+            },
         )
         # .checkpointing(
         #     export_native_model_files=True,
@@ -1261,6 +1304,7 @@ def main() -> None:
 
     # ロガーのセットアップ
     logger = setup_logger(cfg.output_dir)
+    logger.info(f"{cfg.num_env_runners=} {cfg.num_learners=} {cfg.evaluation_num_env_runners=}")
 
     setup_wandb(cfg)
     ray.init()
