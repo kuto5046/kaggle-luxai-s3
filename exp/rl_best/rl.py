@@ -14,22 +14,9 @@ import torch
 import gymnasium as gym
 import jax.numpy as jnp
 import flax.serialization
-from lux.utils import (
-    State,
-    Action,
-    GlobalState,
-    HiddenState,
-    EpisodeStore,
-    extract_state,
-    calc_relative_pos,
-    extract_global_state,
-    get_valid_policy_map,
-    get_nearby_enemy_unit_ids,
-    get_nearby_point_positions,
-)
-from lux.models import LuxUNetModel, LuxValueConvModel
-from lux.params import EnvParams
+from torch import nn
 from luxai_s3.env import LuxAIS3Env
+from scipy.signal import convolve2d
 from luxai_s3.utils import to_numpy
 from luxai_s3.params import env_params_ranges
 from ray.tune.registry import register_env
@@ -42,14 +29,26 @@ from ray.rllib.core.rl_module.apis import ValueFunctionAPI
 from ray.rllib.env.multi_agent_env import MultiAgentEnv
 from ray.rllib.algorithms.algorithm import Algorithm
 from ray.rllib.core.learner.learner import ENTROPY_KEY
+from ray.rllib.connectors.connector_v2 import ConnectorV2
+from ray.rllib.env.multi_agent_episode import MultiAgentEpisode
 from ray.rllib.algorithms.impala.impala import IMPALAConfig
-from ray.rllib.core.rl_module.rl_module import RLModuleSpec
+from ray.rllib.connectors.module_to_env import (
+    TensorToNumpy,
+    ModuleToAgentUnmapping,
+    ListifyDataForVectorEnv,
+    UnBatchToIndividualItems,
+    RemoveSingleTsTimeRankFromBatch,
+)
+from ray.rllib.core.rl_module.rl_module import RLModule, RLModuleSpec
 from ray.rllib.algorithms.algorithm_config import AlgorithmConfig
 from ray.rllib.utils.metrics.metrics_logger import MetricsLogger
 from ray.rllib.core.rl_module.multi_rl_module import MultiRLModuleSpec
 from ray.rllib.algorithms.impala.impala_learner import IMPALALearner
 from ray.rllib.core.learner.torch.torch_learner import TorchLearner
-from ray.rllib.models.torch.torch_distributions import TorchCategorical, TorchDistribution
+from ray.rllib.models.torch.torch_distributions import (
+    TorchCategorical,
+    TorchDistribution,
+)
 from ray.rllib.core.rl_module.torch.torch_rl_module import TorchRLModule
 from ray.rllib.algorithms.impala.torch.vtrace_torch_v2 import (
     vtrace_torch,
@@ -57,6 +56,18 @@ from ray.rllib.algorithms.impala.torch.vtrace_torch_v2 import (
 )
 
 import wandb
+from lux.utils import (
+    State,
+    Action,
+    GlobalState,
+    EpisodeStore,
+    extract_state,
+    extract_global_state,
+    get_valid_policy_map,
+)
+from lux.models import LuxUNetModel, LuxValueConvModel
+from lux.params import EnvParams
+from lux.imitation_agent import action_map_to_action
 
 # policy名
 OWN_POLICY = "p0"
@@ -75,6 +86,9 @@ class Config:
     model_name: str = "lux_unet"
     env_name: str = "lux-s3-v0"
     n_stack: int = 4
+    freeze: bool = True
+    overlap_penalty: float = 2.0
+    stochastic: bool = True
     root_dir: Path = Path("/home/user/work")
     exp_dir: Path = root_dir / f"exp/{exp_name}"
     best_pretrained_path: Path | None = exp_dir / "output/best_model.ckpt"
@@ -87,9 +101,10 @@ class Config:
     num_env_runners: int = 18  # actorの数
     num_cpus_per_env_runner: int = 1
     num_gpus_per_env_runner: int = 0
-    rollout_fragment_length: int | str | None = (
-        101  # 考慮したいstep数を設定してやる。報酬が含まれるように1マッチ分の長さにする
-    )
+
+    # 学習時に同じ時系列として扱いたいstep数を設定してやる。報酬が含まれるように1マッチ分の長さにする
+    # batch_mode="truncate_episodes"の場合はmin(rollout_fragment_length, 101)stepごとにデータが送信される
+    rollout_fragment_length: int | str | None = 101
 
     # 学習用(GPUの数=learnerと考えて良い)
     num_learners: int = 0  # IMPALAの場合gpuが1つなら0に設定するとlocal learnerとして扱われる、処理が早くなる
@@ -99,18 +114,12 @@ class Config:
     # 評価用
     evaluation_num_env_runners: int = 5  # 評価用のenv runnerの数
     evaluation_interval: int = 50  # 何回trainをしたら評価を実施するか　１回が30secくらいなので50回で1500sec=25分くらい
-    evaluation_duration: int = (
-        30  # 1回の評価で何エピソード分評価するか(学習と並列してやるため達成できないこともあるかも)
-    )
-
-    # 評価と学習を並列に実行するかどうか
-    # 並列に実行すると待機処理が短縮されるようだが、今回の設定だとtrainが30secくらいで終わってしまうため結果として評価がボトルネックになってしまう
-    # 1回の学習を長くするか、評価にworkerを多く割り当てて評価時間を短縮するのが良さそう
-    evaluation_parallel_to_training: bool = True
+    evaluation_duration: int = 50  # 1回の評価で何エピソード分評価するか
 
     # learner
     training_minutes: int = 60 * 24  # 1日
-    learner_queue_size: int = 20  # workerからLearnerに送られるバッチのキューの最大サイズ. [batch_size]*queue_sizeがcpuメモリに乗りbatchごとに学習する
+    # workerからLearnerに送られるバッチのキューの最大サイズ. env_runner数と同じくらいが良いのではと思っている
+    learner_queue_size: int = 2
     gamma: float = 0.9995
     lr: float = 1e-5
     # batch size 一応1episodeのサイズにしてるが不要かも。もしくはrollout_fragment_length部分で調整する
@@ -123,6 +132,9 @@ class Config:
     vtrace_clip_pg_rho_threshold: float = 1.0  # ポリシー勾配のlossの係数
     vf_loss_coeff: float = 1.0  # 価値関数のlossの係数
     entropy_coeff: float = 1e-5  # エントロピーのlossの係数(大きくすると探索が活発になる)
+    sap_loss_coeff: float = 1e-1  # sapのlossの係数
+    # reward
+    point_weight: float = 0  # マッチの報酬を超えないようにすべきなので適用する場合1e-3程度
 
     def __post_init__(self):
         if self.is_gcp:
@@ -137,56 +149,9 @@ class Config:
             self.evaluation_num_env_runners = 1
             self.evaluation_interval = 1
             self.evaluation_duration = 2
-            # self.evaluation_parallel_to_training = False
             self.training_minutes = 10
             self.learner_queue_size = 1
             self.num_epochs = 1
-
-
-def to_action(
-    action_map: np.ndarray,
-    point_map: np.ndarray,
-    obs: dict[str, Any],
-    prev_opp_unit_positions: list[tuple[int, int]],
-    team_id: int,
-    env_params: EnvParams,
-) -> np.ndarray:
-    """
-    sapの地点を決める
-    """
-    unit_mask = np.array(obs["units_mask"][team_id])  # shape (max_units, )
-    unit_positions = np.array(obs["units"]["position"][team_id])  # shape (max_units, 2)
-    available_unit_ids = np.where(unit_mask)[0]
-    opp_team_id = 1 - team_id
-
-    opp_unit_positions = [tuple(pos) for pos in obs["units"]["position"][opp_team_id] if pos[0] != -1]
-    actions = np.zeros((env_params.max_units, 3), dtype=int)
-    # unit ids range from 0 to max_units - 1
-    for unit_id in available_unit_ids:
-        unit_pos = unit_positions[unit_id]
-        x, y = unit_pos
-        action = action_map[y, x]
-
-        if action == Action.SAP:
-            # 範囲内にいる敵ユニットを取得
-            nearby_enemy_unit_ids = get_nearby_enemy_unit_ids(unit_pos, opp_unit_positions, env_params.unit_sap_range)
-            if len(nearby_enemy_unit_ids) > 0:
-                sap_pos = opp_unit_positions[np.random.choice(nearby_enemy_unit_ids)]
-                # 敵ユニットが2ステップ以上動いていない場合はsapする
-                if point_map[sap_pos[1], sap_pos[0]] == 1 or sap_pos in prev_opp_unit_positions:
-                    dx, dy = calc_relative_pos(unit_pos, sap_pos)
-                    actions[unit_id] = [Action.SAP, dx, dy]
-                else:
-                    # 敵ユニットの隣接セルがポイント位置であればそこに移動すると考える。
-                    nearby_point_positions = get_nearby_point_positions(sap_pos, point_map)
-                    if len(nearby_point_positions) > 0:
-                        sap_pos = nearby_point_positions[np.random.choice(len(nearby_point_positions))]
-                        dx, dy = calc_relative_pos(unit_pos, sap_pos)
-                        actions[unit_id] = [Action.SAP, dx, dy]
-        else:
-            actions[unit_id] = [action, 0, 0]
-
-    return actions, opp_unit_positions
 
 
 def env_creator(config: dict[str, Any]) -> MultiAgentEnv:
@@ -202,6 +167,9 @@ class RLLibLuxEnv(MultiAgentEnv):
         super().__init__()
         self.env = LuxAIS3Env()
         self.n_stack = config["n_stack"]
+        self.overlap_penalty = config["overlap_penalty"]
+        self.stochastic = config["stochastic"]
+        self.point_weight = config["point_weight"]
         # アクション・観測空間の設定
         self.action_spaces = self._create_action_space()
         self.observation_spaces = self._create_obs_space()
@@ -227,12 +195,21 @@ class RLLibLuxEnv(MultiAgentEnv):
         (24*24)の形状
         本来のpolicyは(num_actions, height, width)の形状だが行動空間は実際に取る行動を扱うため(height, width)の形状で扱う(rllibの仕様上)
         加えて2次元マップ(height, width)ではなく1次元マップ(height * width)のMultiDiscreteを使用(rllibの仕様上)
+
+        sapアクションは0から1の連続値を持つ(h*w)の行動空間を追加
         """
         num_actions = len(Action)
+        # 離散的な行動空間
         action_space = gym.spaces.MultiDiscrete([num_actions] * EnvParams.map_width * EnvParams.map_height)
+        # sapアクション用の連続値行動空間
+        sap_action_space = gym.spaces.Box(
+            low=0.0, high=1.0, shape=(EnvParams.map_width * EnvParams.map_height,), dtype=np.float32
+        )
+        # 複合的な行動空間
+        combined_action_space = gym.spaces.Dict({"action": action_space, "sap": sap_action_space})
         return {
-            "player_0": action_space,
-            "player_1": action_space,
+            "player_0": combined_action_space,
+            "player_1": combined_action_space,
         }
 
     def _create_obs_space(self) -> gym.spaces.Dict:
@@ -257,6 +234,12 @@ class RLLibLuxEnv(MultiAgentEnv):
                     dtype=np.float32,
                 ),
                 "player_id": gym.spaces.Discrete(2),
+                "opp_unit_map": gym.spaces.Box(
+                    low=0,
+                    high=1,
+                    shape=(EnvParams.map_height, EnvParams.map_width),
+                    dtype=np.float32,
+                ),
             }
         )
         return {"player_0": observation_space, "player_1": observation_space}
@@ -274,10 +257,6 @@ class RLLibLuxEnv(MultiAgentEnv):
         self.obs, self.state = self.env.reset(reset_key, params=self.env_params)
         self.obs = to_numpy(flax.serialization.to_state_dict(self.obs))
         infos = {player_id: {} for player_id in self.obs.keys()}
-        self.prev_opp_unit_positions = {
-            "player_0": [],
-            "player_1": [],
-        }
         self.prev_actions = {
             "player_0": np.zeros((EnvParams.max_units, 3), dtype=np.int32),
             "player_1": np.zeros((EnvParams.max_units, 3), dtype=np.int32),
@@ -329,6 +308,32 @@ class RLLibLuxEnv(MultiAgentEnv):
         agent0_legal_action_mask = get_valid_policy_map(obs["player_0"], 0, self.episode_store1)
         agent1_legal_action_mask = get_valid_policy_map(obs["player_1"], 1, self.episode_store2)
 
+        # 敵の観測データを使うことで完全な敵ユニット位置を推定できる
+        player0_opp_unit_count = agent1_state[State.OWN_UNIT_COUNT] * EnvParams.max_units
+        player1_opp_unit_count = agent0_state[State.OWN_UNIT_COUNT] * EnvParams.max_units
+        # 1の周囲8マスに0.5を割り振るためのカーネル
+        kernel = np.array([[0.3, 0.3, 0.3], [0.3, 1.0, 0.3], [0.3, 0.3, 0.3]])
+
+        # 畳み込みを実行（mode='same'で元の行列と同じサイズに）
+        player0_opp_unit_map = convolve2d(player0_opp_unit_count, kernel, mode="same").astype(np.float32)
+        player1_opp_unit_map = convolve2d(player1_opp_unit_count, kernel, mode="same").astype(np.float32)
+        # 最大1になるように正規化 clipのほうがいいかもしれない
+        # player0_opp_unit_map = np.clip(player0_opp_unit_map, 0, 1)
+        # player1_opp_unit_map = np.clip(player1_opp_unit_map, 0, 1)
+        if np.max(player0_opp_unit_map) > 1:
+            player0_opp_unit_map = player0_opp_unit_map / np.max(player0_opp_unit_map)
+        if np.max(player1_opp_unit_map) > 1:
+            player1_opp_unit_map = player1_opp_unit_map / np.max(player1_opp_unit_map)
+
+        assert player0_opp_unit_map.shape == (EnvParams.map_height, EnvParams.map_width)
+        assert player1_opp_unit_map.shape == (EnvParams.map_height, EnvParams.map_width)
+        assert player0_opp_unit_map.dtype == np.float32
+        assert player1_opp_unit_map.dtype == np.float32
+        assert player0_opp_unit_map.min() >= 0
+        assert player1_opp_unit_map.min() >= 0
+        assert player0_opp_unit_map.max() <= 1
+        assert player1_opp_unit_map.max() <= 1
+
         self.agent0_states.append(agent0_state)
         self.agent1_states.append(agent1_state)
         self.agent0_global_states.append(agent0_global_state)
@@ -339,12 +344,14 @@ class RLLibLuxEnv(MultiAgentEnv):
                 "global_state": np.stack(list(self.agent0_global_states), axis=0),
                 "legal_action_mask": agent0_legal_action_mask,
                 "player_id": 0,
+                "opp_unit_map": player0_opp_unit_map,
             },
             "player_1": {
                 "state": np.stack(list(self.agent1_states), axis=0),
                 "global_state": np.stack(list(self.agent1_global_states), axis=0),
                 "legal_action_mask": agent1_legal_action_mask,
                 "player_id": 1,
+                "opp_unit_map": player1_opp_unit_map,
             },
         }
 
@@ -352,16 +359,32 @@ class RLLibLuxEnv(MultiAgentEnv):
         actions = {agent_id: np.zeros((EnvParams.max_units, 3), dtype=np.int32) for agent_id in self.agents}
 
         # 1次元マップの行動空間で渡ってくるので2次元マップに変換
-        action_map1 = action_dict["player_0"].reshape(EnvParams.map_height, EnvParams.map_width)
-        action_map2 = action_dict["player_1"].reshape(EnvParams.map_height, EnvParams.map_width)
+        action_map1 = action_dict["player_0"]["action"].reshape(EnvParams.map_height, EnvParams.map_width)
+        action_map2 = action_dict["player_1"]["action"].reshape(EnvParams.map_height, EnvParams.map_width)
 
-        point_map1 = self.agent0_states[-1][State.POINTS]
-        point_map2 = self.agent1_states[-1][State.POINTS]
-        actions["player_0"], self.prev_opp_unit_positions["player_0"] = to_action(
-            action_map1, point_map1, self.obs["player_0"], self.prev_opp_unit_positions["player_0"], 0, self.env_params
+        # sapアクションも2次元マップに変換
+        sap_map1 = action_dict["player_0"]["sap"].reshape(EnvParams.map_height, EnvParams.map_width)
+        sap_map2 = action_dict["player_1"]["sap"].reshape(EnvParams.map_height, EnvParams.map_width)
+
+        actions["player_0"] = action_map_to_action(
+            action_map1,
+            sap_map1,
+            self.obs["player_0"],
+            0,
+            self.env_params,
+            self.stochastic,
+            self.overlap_penalty,
+            self.episode_store1,
         )
-        actions["player_1"], self.prev_opp_unit_positions["player_1"] = to_action(
-            action_map2, point_map2, self.obs["player_1"], self.prev_opp_unit_positions["player_1"], 1, self.env_params
+        actions["player_1"] = action_map_to_action(
+            action_map2,
+            sap_map2,
+            self.obs["player_1"],
+            1,
+            self.env_params,
+            self.stochastic,
+            self.overlap_penalty,
+            self.episode_store2,
         )
         return actions
 
@@ -374,17 +397,21 @@ class RLLibLuxEnv(MultiAgentEnv):
         )
         self.obs = to_numpy(flax.serialization.to_state_dict(self.obs))
         state = self._create_state(self.obs)
-        steps = self.obs["player_0"]["steps"].item()
+        # steps = self.obs["player_0"]["steps"].item()
+        player0_point = self.episode_store1.point
+        player1_point = self.episode_store2.point
 
         terminated = {agent_id: done.item() for agent_id, done in _terminated.items()}
         truncated = {agent_id: done.item() for agent_id, done in _truncated.items()}
         # "__all__" (required) is used to indicate env termination.
         terminated["__all__"] = np.all(list(truncated.values()))  # luxaiはtruncatedがTrueになる
         info = {agent_id: {} for agent_id in self.agents}
-        reward = self.reward_fn(_reward, steps=steps)
+        reward = self.reward_fn(_reward, player0_point, player1_point, self.point_weight)
         return state, reward, terminated, truncated, info
 
-    def reward_fn(self, raw_reward: jnp.ndarray, steps: int) -> dict[str, int]:
+    def reward_fn(
+        self, raw_reward: jnp.ndarray, player0_point: int, player1_point: int, point_weight: float = 0
+    ) -> dict[str, int]:
         """
         raw_rewardは累積値なので、前回との差分を取って現在のステップでの報酬を計算する
         マッチごとに勝利したら1、敗北したら-1、引き分けは0
@@ -403,10 +430,35 @@ class RLLibLuxEnv(MultiAgentEnv):
                 opp_agent_id = self.agents[1 - self.agents.index(agent_id)]
                 step_rewards[opp_agent_id] = -reward
 
+        # 即時報酬としてstepの獲得ポイントを加算
+        step_rewards["player_0"] += (player0_point - player1_point) * point_weight
+        step_rewards["player_1"] += (player1_point - player0_point) * point_weight
         # 現在の累積報酬を保存
         self.prev_raw_reward = current_rewards
 
         return step_rewards
+
+
+def freeze(model: nn.Module):
+    # 全てFalseにする
+    for param in model.parameters():
+        param.requires_grad = False
+
+    # UNet後のpolicyネットワークのパラメータをTrueにする
+    for param in model.sap_net1.parameters():
+        param.requires_grad = True
+    for param in model.sap_net2.parameters():
+        param.requires_grad = True
+    for param in model.sap_net3.parameters():
+        param.requires_grad = True
+    for param in model.policy_net1_from_sap.parameters():
+        param.requires_grad = True
+    for param in model.policy_net2.parameters():
+        param.requires_grad = True
+    for param in model.policy_net3.parameters():
+        param.requires_grad = True
+    for param in model.policy_net4.parameters():
+        param.requires_grad = True
 
 
 class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
@@ -417,10 +469,11 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
             state_space_size=len(State),
             global_state_space_size=len(GlobalState),
             action_space_size=len(Action),
-            hidden_state_space_size=len(HiddenState),
             n_stack=self.model_config["n_stack"],
             res=True,
         )
+        if self.model_config["freeze"]:
+            freeze(self.policy_model)
 
         self.value_model = LuxValueConvModel(
             state_space_size=len(State),
@@ -442,6 +495,9 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
         batch_size = batch[Columns.OBS]["state"].shape[0]
         outputs = self.policy_model(batch[Columns.OBS])
         policy_logits = outputs["policy"]
+        sap_logits = outputs["sap"]
+        opp_unit_map = batch[Columns.OBS]["opp_unit_map"]  # 反転処理は元々していないためここでも反転はしない
+        sap_available_area = batch[Columns.OBS]["state"][:, -1:, State.SAP_AVAILABLE_AREA]
         player_id = batch[Columns.OBS]["player_id"]
 
         # player_id1のポリシーを反転して自陣を復元する(自陣固定の後処理)
@@ -456,6 +512,18 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
             flipped_policy_logits[:, Action.RIGHT, :, :].clone(),
         )
         policy_logits = torch.where(player_1_mask, flipped_policy_logits, policy_logits)
+        # sapも復元
+        flipped_sap_logits = torch.flip(sap_logits, [2, 3]).clone()
+        flipped_sap_available_area = torch.flip(sap_available_area, [2, 3]).clone()
+        sap_logits = torch.where(player_1_mask, flipped_sap_logits, sap_logits)
+        sap_available_area = torch.where(player_1_mask, flipped_sap_available_area, sap_available_area)
+        sap_logits = sap_logits - (1 - sap_available_area) * 1e32
+        sap_logits = sap_logits.reshape(batch_size, -1)  # (batch, height * width)
+        opp_unit_map = opp_unit_map.reshape(batch_size, -1)  # (batch, height * width)
+        # batch方向に1つ手前にずらすことで次のstepの敵ユニット位置をtargetとする (sap_targets[0, :] == opp_unit_map[1, :]という関係)
+        # rollout_fragment_lengthが101なので連続してる想定だが101stepは連続している。
+        # rolloutの境界ではtargetがズレるのでloss計算から除外する処理を後段で行う
+        sap_targets = torch.roll(opp_unit_map, shifts=-1, dims=0)
 
         num_actions = policy_logits.shape[1]
         # stateは(batch, stack, ch, height, width)なので最新のunit位置を以下のように取得(batch, height, width)
@@ -469,7 +537,13 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
         return {
             Columns.ACTION_DIST_INPUTS: masked_policy_logits,
             # unit位置のみpolicyを学習する
-            Columns.LOSS_MASK: unit_mask,
+            "unit_mask": unit_mask,
+            # 行動に利用されるsapの確率
+            "sap": torch.sigmoid(sap_logits),
+            # 以下はsapの学習に利用する.
+            "sap_logits": sap_logits,
+            "sap_targets": sap_targets,
+            "sap_available_area": sap_available_area.reshape(batch_size, -1),
         }
 
     @override(TorchRLModule)
@@ -640,7 +714,7 @@ class WandbLoggerCallback(RLlibCallback):
         # 1回の学習で学習したデータ数
         time_this_iter_s = result["time_this_iter_s"]
         time_total_s = result["time_total_s"]
-        num_training_step_calls_per_iteration = result["num_training_step_calls_per_iteration"]  # 累積値
+        num_training_step_calls_per_iteration = result["num_training_step_calls_per_iteration"]
         # sample_size = result["num_env_steps_sampled_lifetime"]
 
         # 学習状況をwandbに流す用
@@ -648,7 +722,7 @@ class WandbLoggerCallback(RLlibCallback):
             {
                 "train/training_iteration": result["timers"]["training_iteration"],  # 何回めの学習か
                 "train/time_this_iter_s": time_this_iter_s,  # 1回の学習時間
-                "train/time_total_s": time_total_s,  # 学習総時間
+                # "train/time_total_s": time_total_s,  # 学習総時間
                 "train/num_training_step_calls_per_iteration": num_training_step_calls_per_iteration,  # 1回の学習で何回training_stepが呼ばれたか
             }
         )
@@ -680,6 +754,7 @@ class WandbLoggerCallback(RLlibCallback):
             # "curr_entropy_coeff",  # 一定
             # "vf_loss",  # mean_vf_lossと同じ
             "entropy",
+            "sap_loss",
         ]
         for key in learner_metrics:
             wandb.log(
@@ -773,17 +848,18 @@ class WandbLoggerCallback(RLlibCallback):
         episode_rewards = episode.get_rewards()
         episode_total_reward = {k: sum(v) for k, v in episode_rewards.items()}
         is_win = (episode_total_reward["player_0"] > episode_total_reward["player_1"]) * 1
-
+        # duration = episode.get_duration()
+        episode_duration_s = episode.get_duration_s()
         if in_evaluation:
             ray.get(self._stats_collector.record_evaluation_result.remote(is_win))
             stats = ray.get(self._stats_collector.get_speed_stats.remote(in_evaluation))
             self.logger.info(
-                f"Evaluation Episode {stats['total_episodes']} finished. {is_win=} {episode_total_reward=} Collection speed: {stats['episode_per_minute']:.2f} eps/min"
+                f"Evaluation Episode {stats['total_episodes']} finished. {is_win=} {episode_total_reward=} Episode duration: {episode_duration_s:.2f} sec"
             )
         else:
             stats = ray.get(self._stats_collector.get_speed_stats.remote(in_evaluation))
             self.logger.info(
-                f"Episode {stats['total_episodes']} finished. {is_win=} {episode_total_reward=} Collection speed: {stats['episode_per_minute']:.2f} eps/min"
+                f"Env Runner Episode {stats['total_episodes']} finished. {is_win=} {episode_total_reward=} Truncated Episode duration: {episode_duration_s:.2f} sec"
             )
 
 
@@ -801,9 +877,6 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
     ) -> TensorType:
         module = self.module[module_id].unwrapped()
 
-        # 最初にmap情報をbatch方向に展開する処理を入れる
-        # これにより通常の実装と同じように計算できる
-
         # TODO (sven): Now that we do the +1ts trick to be less vulnerable about
         #  bootstrap values at the end of rollouts in the new stack, we might make
         #  this a more flexible, configurable parameter for users, e.g.
@@ -812,14 +885,13 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
         rollout_frag_or_episode_len = config.get_rollout_fragment_length()
         recurrent_seq_len = batch.get("seq_lens")
 
-        loss_mask = fwd_out[Columns.LOSS_MASK].float()
+        loss_mask = fwd_out["unit_mask"].float()
         size_loss_mask = torch.sum(loss_mask)
 
         # Behavior actions logp and target actions logp.
         behaviour_actions_logp = batch[Columns.ACTION_LOGP]
         target_policy_dist = module.get_train_action_dist_cls().from_logits(fwd_out[Columns.ACTION_DIST_INPUTS])
-        target_actions_logp = target_policy_dist.logp(batch[Columns.ACTIONS])
-
+        target_actions_logp = target_policy_dist.logp(batch[Columns.ACTIONS]["action"])
         # loss_maskを適用した上でマップの次元を潰す
         # (batch_size, 24*24)のマップ状態をもつデータをunit位置のmaskを適用した上で(batch_size, 1)に潰す
         behaviour_actions_logp = (behaviour_actions_logp * loss_mask).sum(dim=1)
@@ -903,11 +975,31 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
         entropy_loss = -torch.sum(target_policy_dist.entropy() * loss_mask)
         mean_entropy_loss = entropy_loss / size_loss_mask
 
+        # SAPの教師あり学習
+        sap_loss = torch.nn.functional.binary_cross_entropy_with_logits(
+            fwd_out["sap_logits"], fwd_out["sap_targets"], reduction="none"
+        )
+        sap_available_area = fwd_out["sap_available_area"]
+        # sap範囲外は学習しない
+        sap_loss[sap_available_area == 0] = 0
+        sap_loss = sap_loss.sum(dim=1)
+
+        # 同じ時系列で扱うべきなのでtime_majorをする
+        sap_loss_time_major = make_time_major(
+            sap_loss,
+            trajectory_len=rollout_frag_or_episode_len,
+            recurrent_seq_len=recurrent_seq_len,
+        )
+        # 時系列方向の最後のステップはtargetがおかしくなるので学習しない
+        sap_loss_time_major[-1, :] = 0
+        mean_sap_loss = sap_loss_time_major.sum() / sap_available_area.sum()
+
         # The summed weighted loss.
         total_loss = (
             mean_pi_loss
             + mean_vf_loss * config.vf_loss_coeff
             + (mean_entropy_loss * self.entropy_coeff_schedulers_per_module[module_id].get_current_value())
+            + mean_sap_loss * config.sap_loss_coeff
         )
 
         # Log important loss stats.
@@ -918,6 +1010,7 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
                 "vf_loss": vf_loss,
                 "mean_vf_loss": mean_vf_loss,
                 ENTROPY_KEY: -mean_entropy_loss,
+                "sap_loss": mean_sap_loss,
             },
             key=module_id,
             window=1,  # <- single items (should not be mean/ema-reduced over time).
@@ -926,8 +1019,80 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
         return total_loss
 
 
+class CustomGetActions(ConnectorV2):
+    @override(ConnectorV2)
+    def __call__(
+        self,
+        *,
+        rl_module: RLModule,
+        batch: dict[str, Any],
+        episodes: list[EpisodeType],
+        explore: bool | None = None,
+        shared_data: dict | None = None,
+        **kwargs,
+    ) -> Any:
+        is_multi_agent = isinstance(episodes[0], MultiAgentEpisode)
+
+        if is_multi_agent:
+            for module_id, module_data in batch.copy().items():
+                self._get_actions(module_data, rl_module[module_id], explore)
+        else:
+            self._get_actions(batch, rl_module, explore)
+
+        return batch
+
+    def _get_actions(self, batch, sa_rl_module, explore):
+        # Action have already been sampled -> Early out.
+        if Columns.ACTIONS in batch:
+            return
+
+        # ACTION_DIST_INPUTS field returned by `forward_exploration|inference()` ->
+        # Create a new action distribution object.
+        if Columns.ACTION_DIST_INPUTS in batch:
+            if explore:
+                action_dist_class = sa_rl_module.get_exploration_action_dist_cls()
+            else:
+                action_dist_class = sa_rl_module.get_inference_action_dist_cls()
+            action_dist = action_dist_class.from_logits(
+                batch[Columns.ACTION_DIST_INPUTS],
+            )
+            if not explore:
+                action_dist = action_dist.to_deterministic()
+
+            # Sample actions from the distribution.
+            actions = action_dist.sample()
+            batch[Columns.ACTIONS] = {
+                "action": actions,
+                "sap": batch["sap"],
+            }
+
+            # For convenience and if possible, compute action logp from distribution
+            # and add to output.
+            if Columns.ACTION_LOGP not in batch:
+                batch[Columns.ACTION_LOGP] = action_dist.logp(actions)
+
+
+def custom_module_to_env_connector(env: MultiAgentEnv) -> list[ConnectorV2]:
+    return [
+        # GetActions(),
+        CustomGetActions(),
+        TensorToNumpy(),
+        UnBatchToIndividualItems(),
+        ModuleToAgentUnmapping(),
+        RemoveSingleTsTimeRankFromBatch(),
+        # NormalizeAndClipActions(),
+        ListifyDataForVectorEnv(),
+    ]
+
+
 def create_rl_config(cfg: Config) -> AlgorithmConfig:
-    tmp_env = env_creator({"n_stack": cfg.n_stack})
+    env_config = {
+        "n_stack": cfg.n_stack,
+        "stochastic": cfg.stochastic,
+        "overlap_penalty": cfg.overlap_penalty,
+        "point_weight": cfg.point_weight,
+    }
+    tmp_env = env_creator(env_config)
     observation_space = tmp_env.get_observation_space("player_0")
     action_space = tmp_env.get_action_space("player_0")
     best_rl_module_spec = RLModuleSpec(
@@ -938,6 +1103,7 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
         model_config={
             "n_stack": cfg.n_stack,
             "pretrained_path": cfg.best_pretrained_path,
+            "freeze": cfg.freeze,
         },
     )
     config = (
@@ -947,7 +1113,7 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
             enable_env_runner_and_connector_v2=True,
         )
         # 環境設定
-        .environment(env=cfg.env_name, env_config={"n_stack": cfg.n_stack})
+        .environment(env=cfg.env_name, env_config=env_config)
         # ゲームをしてデータを生成するrunnerの数. cpuの数と合わせる
         .env_runners(
             num_env_runners=cfg.num_env_runners,
@@ -955,9 +1121,14 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
             num_cpus_per_env_runner=cfg.num_cpus_per_env_runner,
             num_gpus_per_env_runner=cfg.num_gpus_per_env_runner,
             sample_timeout_s=60 * 5,
+            # デフォルト値。101step（truncated=True)のタイミングでデータを収集する.
+            batch_mode="truncate_episodes",
             # batch_sizeから自動で適切な値を計算してくれるためこの設定が推奨されている
             # rollout_fragment_length = "auto",
             rollout_fragment_length=cfg.rollout_fragment_length,
+            # module -> envの操作をカスタム実装したいためdefaultはoffにしている
+            add_default_connectors_to_module_to_env_pipeline=False,
+            module_to_env_connector=custom_module_to_env_connector,
         )
         # モデルを学習するlearnerの数。gpuの数と合わせる
         # Can't set both `num_cpus_per_learner` > 1 and  `num_gpus_per_learner` > 0! Either set `num_cpus_per_learner` > 1 (and `num_gpus_per_learner`=0)
@@ -1040,7 +1211,7 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
             evaluation_duration_unit="episodes",
             evaluation_sample_timeout_s=60 * 20,
             evaluation_force_reset_envs_before_iteration=True,  # 各評価の前に環境をリセット
-            evaluation_parallel_to_training=cfg.evaluation_parallel_to_training,  # 評価と学習を並列に実行
+            evaluation_parallel_to_training=True,  # 評価と学習を並列に実行
             # 評価用の上書き設定.これにより評価時はlb_bestポリシーと自身の対戦になる
             # evaluation_config={
             #     "multi_agent": {
@@ -1055,6 +1226,8 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
         #     export_native_model_files=True,
         # )
     )
+    # あまり良くなさそうだが参照しやすいようにここに係数を追加しておく
+    config.sap_loss_coeff = cfg.sap_loss_coeff
     return config
 
 
