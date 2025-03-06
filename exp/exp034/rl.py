@@ -110,7 +110,7 @@ class Config:
     lb_best_pretrained_path: Path | None = root_dir / "exp/lb_best/output/best_model.ckpt"
 
     num_cpus_per_learner: int = 1
-    num_gpus_per_learner: int = 0
+    num_gpus_per_learner: int = 1
     num_cpus_per_env_runner: int = 1
     num_gpus_per_env_runner: int = 0
 
