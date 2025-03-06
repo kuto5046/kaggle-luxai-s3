@@ -115,13 +115,14 @@ class Config:
     num_gpus_per_env_runner: int = 0
 
     # 以下の3つのrunnerにcpuとgpuを割り振る。cpuの合計値がcpu数を超えないように注意
-    # 学習用　　IMPALAの場合gpuが1つならlearners=0が推奨される。multi-gpuの場合はgpu数=learner数なのだが動作確認できていない
-    # cpu only環境だとnum_learners>=1が推奨される
+    # 学習用
+    # 　IMPALAの場合gpuが1つならlocal workerとして動かすためlearners=0が推奨される。
+    # multi-gpuの場合はgpu数=learner数が本来は良いのだが動作確認できていない
     num_learners: int = 0
     # 評価用
-    evaluation_num_env_runners: int = 10
+    evaluation_num_env_runners: int = 5
     # データ収集用
-    num_env_runners: int = 85
+    num_env_runners: int = 18
 
     # 学習設定
     training_minutes: int = 60 * 24  # 1日
@@ -151,13 +152,14 @@ class Config:
 
     def __post_init__(self):
         if self.debug:
-            self.num_env_runners = 1
+            self.num_env_runners = 10
             self.num_cpus_per_env_runner = 1
             self.evaluation_num_env_runners = 1
-            self.evaluation_interval = 1
+            self.evaluation_interval = 100
             self.evaluation_duration = 1
             self.training_minutes = 10
-            self.learner_queue_size = 1
+            self.train_batch_size_per_learner = 128
+            self.learner_queue_size = 20
             self.num_epochs = 1
 
 
@@ -395,7 +397,6 @@ class RLLibLuxEnv(MultiAgentEnv):
         )
         self.obs = to_numpy(flax.serialization.to_state_dict(self.obs))
         state = self._create_state(self.obs)
-        # steps = self.obs["player_0"]["steps"].item()
         player0_point = self.episode_store1.point
         player1_point = self.episode_store2.point
 
@@ -898,6 +899,7 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
         fwd_out: dict[str, TensorType],
     ) -> TensorType:
         module = self.module[module_id].unwrapped()
+        start_time = time()
 
         # TODO (sven): Now that we do the +1ts trick to be less vulnerable about
         #  bootstrap values at the end of rollouts in the new stack, we might make
@@ -1038,6 +1040,9 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
             window=1,  # <- single items (should not be mean/ema-reduced over time).
         )
         # Return the total loss.
+        device = fwd_out["unit_mask"].device
+        batch_size = fwd_out["unit_mask"].shape[0]
+        print(f"time: {time() - start_time:.2f} sec {batch_size=} {device=} {module_id=}")
         return total_loss
 
 
@@ -1159,7 +1164,6 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
             # num_envs_per_env_runner=cfg.num_envs_per_env_runner,  # multi agentはenv vectorizationが未対応
             num_cpus_per_env_runner=cfg.num_cpus_per_env_runner,
             num_gpus_per_env_runner=cfg.num_gpus_per_env_runner,
-            sample_timeout_s=60 * 5,
             # デフォルト値。101step（truncated=True)のタイミングでデータを収集する.
             batch_mode="truncate_episodes",
             # batch_sizeから自動で適切な値を計算してくれるためこの設定が推奨されている
@@ -1168,6 +1172,8 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
             # module -> envの操作をカスタム実装したいためdefaultはoffにしている
             add_default_connectors_to_module_to_env_pipeline=False,
             module_to_env_connector=custom_module_to_env_connector,
+            # 環境を作成した後に環境を検証する
+            # validate_env_runners_after_construction=True,
         )
         # モデルを学習するlearnerの数。gpuの数と合わせる
         # Can't set both `num_cpus_per_learner` > 1 and  `num_gpus_per_learner` > 0! Either set `num_cpus_per_learner` > 1 (and `num_gpus_per_learner`=0)
@@ -1312,6 +1318,7 @@ def main() -> None:
         train_start_time = time()
         # データが溜まっていない場合処理は完了するが学習は未実施となる
         result = trainer.train()
+        # logger.info(f"train result: {result}")
         train_count += 1
         spend_minutes = (time() - train_start_time) / 60
         total_spend_minutes = (time() - total_train_start_time) / 60
