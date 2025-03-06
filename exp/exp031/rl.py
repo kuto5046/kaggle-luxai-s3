@@ -14,22 +14,6 @@ import torch
 import gymnasium as gym
 import jax.numpy as jnp
 import flax.serialization
-from lux.utils import (
-    State,
-    Action,
-    GlobalState,
-    HiddenState,
-    EpisodeStore,
-    to_np,
-    extract_state,
-    calc_relative_pos,
-    extract_global_state,
-    get_valid_policy_map,
-    get_nearby_enemy_unit_ids,
-    get_nearby_point_positions,
-)
-from lux.models import LuxUNetModel, LuxValueConvModel
-from lux.params import EnvParams
 from luxai_s3.env import LuxAIS3Env
 from luxai_s3.utils import to_numpy
 from luxai_s3.params import env_params_ranges
@@ -58,6 +42,22 @@ from ray.rllib.algorithms.impala.torch.vtrace_torch_v2 import (
 )
 
 import wandb
+from lux.utils import (
+    State,
+    Action,
+    GlobalState,
+    HiddenState,
+    EpisodeStore,
+    to_np,
+    extract_state,
+    calc_relative_pos,
+    extract_global_state,
+    get_valid_policy_map,
+    get_nearby_enemy_unit_ids,
+    get_nearby_point_positions,
+)
+from lux.models import LuxUNetModel, LuxValueConvModel
+from lux.params import EnvParams
 
 # policy名
 OWN_POLICY = "p0"
@@ -77,7 +77,7 @@ class Config:
     env_name: str = "lux-s3-v0"
     n_stack: int = 4
     root_dir: Path = Path(f"/home/user/work/exp/{exp_name}")
-    best_pretrained_path: Path | None = Path("/home/user/work/exp/best/output/best_model.ckpt")
+    best_pretrained_path: Path | None = Path(f"/home/user/work/exp/{exp_name}/output/best_model.ckpt")
     lb_best_pretrained_path: Path | None = Path("/home/user/work/exp/best/output/best_model.ckpt")
     # lb_best_pretrained_path: Path | None = Path(f"/home/user/work/exp/lb_best/output/best_model.ckpt")
     debug: bool = False
