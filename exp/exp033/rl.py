@@ -106,7 +106,7 @@ class Config:
     freeze: bool = True
     overlap_penalty: float = 2.0
     stochastic: bool = True
-    best_pretrained_path: Path | None = root_dir / "exp/best/output/best_model.ckpt"
+    best_pretrained_path: Path | None = root_dir / "exp/rl_best/output/best_model.ckpt"
     lb_best_pretrained_path: Path | None = root_dir / "exp/lb_best/output/best_model.ckpt"
 
     # 以下の3つのrunnerにcpuとgpuを割り振る。cpuの合計値がcpu数を超えないように注意(現在は24をactor: 21,learner: 1,evaluator:2に割り振る)
@@ -115,7 +115,7 @@ class Config:
         0  # IMPALAの場合gpuが1つならlearners=0に設定してlocal worker(gpuを利用しない)としての利用が推奨される
     )
     num_cpus_per_learner: int = 1
-    num_gpus_per_learner: int = 1
+    num_gpus_per_learner: int = 0
 
     # 評価用
     evaluation_num_env_runners: int = CPU_COUNT // 4  # 評価用のenv runnerの数 cpuの1/4を評価に使う
