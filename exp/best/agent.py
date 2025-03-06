@@ -1,3 +1,4 @@
+import sys
 import time
 from heapq import heappop, heappush  # for dijkstra in MinimumCostFlow
 from typing import Any
@@ -6,7 +7,6 @@ from collections import deque
 
 import numpy as np
 import torch
-from lightning import seed_everything
 from lux.utils import (
     State,
     Action,
@@ -18,8 +18,8 @@ from lux.utils import (
     calc_relative_pos,
     get_valid_sap_map,
     extract_global_state,
-    get_valid_policy_map,
     get_nearby_enemy_unit_ids,
+    get_valid_policy_per_unit,
     get_nearby_point_positions,
 )
 from lux.models import LuxUNetModel
@@ -53,8 +53,10 @@ class MinimumCostFlow:
     def __init__(self, n):
         self.n = n
         self.edges = [[] for i in range(n)]
+        print(f"{n=}", file=sys.stderr)
 
     def add_edge(self, f, t, capacity, cost, action):
+        print(f"{f=} {t=} {capacity=} {cost=} {action=}", file=sys.stderr)
         self.edges[f].append([t, capacity, cost, len(self.edges[t]), action])
         self.edges[t].append([f, 0, -cost, len(self.edges[f]) - 1, -1])  # reverse edge
 
@@ -207,21 +209,39 @@ class ILAgent:
                 policy_map[Action.LEFT].copy(),
             )
 
-        policy_map = get_legal_policy(obs, policy_map, team_id, episode_store)
+        policy_per_unit, policy_mask = get_legal_policy_per_unit(obs, policy_map, team_id, episode_store)
         point_map = state[State.POINTS]
 
-        return policy_map, point_map, sap
+        return policy_per_unit, policy_mask, point_map, sap
 
 
-def get_legal_policy(
+# def get_legal_policy(
+#     obs: dict[str, Any], policy_map: np.ndarray, team_id: int, episode_store: EpisodeStore
+# ) -> np.ndarray:
+#     legal_action_per_unit = get_valid_policy_per_unit(obs, team_id, episode_store)
+#     action_mask_map = np.ones_like(policy_map) * 1e32
+#     action_mask_map[legal_action_map > 0] = 0  # legal actionは0でそれ以外は1e32
+#     # 無効な行動は負の大きな値になるためsoftmax後は0になる。その上で再度無効な行動を0にする
+#     policy_map = softmax(policy_map - action_mask_map, axis=0) * (action_mask_map == 0) * 1
+#     return policy_map
+
+
+def get_legal_policy_per_unit(
     obs: dict[str, Any], policy_map: np.ndarray, team_id: int, episode_store: EpisodeStore
 ) -> np.ndarray:
-    legal_action_map = get_valid_policy_map(obs, team_id, episode_store)
-    action_mask_map = np.ones_like(policy_map) * 1e32
-    action_mask_map[legal_action_map > 0] = 0  # legal actionは0でそれ以外は1e32
-    # 無効な行動は負の大きな値になるためsoftmax後は0になる。その上で再度無効な行動を0にする
-    policy_map = softmax(policy_map - action_mask_map, axis=0) * (action_mask_map == 0) * 1
-    return policy_map
+    # shape (EnvParams.max_units, len(Action)) 無効な行動は0その他は1のマスク
+    legal_action_per_unit = get_valid_policy_per_unit(obs, team_id, episode_store)
+    policy_per_unit = np.zeros_like(legal_action_per_unit, dtype=float)
+    unit_positions = np.array(obs["units"]["position"][team_id])
+    for unit_id in range(EnvParams.max_units):
+        for action_id in range(len(Action)):
+            if legal_action_per_unit[unit_id, action_id] > 0:
+                x, y = unit_positions[unit_id]
+                policy_per_unit[unit_id, action_id] = policy_map[action_id, y, x]
+            else:
+                policy_per_unit[unit_id, action_id] = -1e32
+        policy_per_unit[unit_id] = softmax(policy_per_unit[unit_id])
+    return policy_per_unit, legal_action_per_unit
 
 
 def get_legal_sap_policy(
@@ -252,12 +272,12 @@ class SingleSapInfo:
 
 
 cfg = Config()
-seed_everything(cfg.seed, workers=True)
+# seed_everything(cfg.seed, workers=True)
 imitation_model = ILAgent(EnvParams, cfg.checkpoint_path, cfg.n_stack, cfg.res)
 
 
 class Agent:
-    def __init__(self, player: str, env_cfg: EnvParams) -> None:
+    def __init__(self, player: str, env_cfg: dict | EnvParams) -> None:
         torch.set_num_threads(1)
         self.cfg = Config()
         self.player = player
@@ -271,12 +291,15 @@ class Agent:
         self.prev_actions = None
 
     def act(self, step: int, obs, remainingOverageTime: int = 60):
+        print(f"Step: {step}, Remaining Overage Time: {remainingOverageTime}", file=sys.stderr)
         # マッチごとにリセットされる要素をリセット
         if obs["match_steps"] == 0:
             self.episode_store.reset()
         else:
             self.episode_store.update(obs, self.prev_actions)
-        policy_map, _point_map, sap_map = imitation_model.predict(obs, self.team_id, self.episode_store, self.cfg)
+        policy_per_unit, policy_mask, _point_map, sap_map = imitation_model.predict(
+            obs, self.team_id, self.episode_store, self.cfg
+        )
 
         unit_mask = np.array(obs["units_mask"][self.team_id])  # shape (max_units, )
         unit_positions = np.array(obs["units"]["position"][self.team_id])  # shape (max_units, 2)
@@ -286,7 +309,7 @@ class Agent:
 
         # sapの位置を決定 -> 残りの行動をフローで決定
         actions = np.zeros((self.env_cfg["max_units"], 3), dtype=int)
-        self._assign_greedy_actions_sap(actions, available_unit_ids, unit_positions, policy_map, sap_map)
+        self._assign_greedy_actions_sap(actions, available_unit_ids, unit_positions, policy_per_unit, sap_map)
         sapped_unit_next_pos_set = set()
         for unit_id in available_unit_ids:
             action = actions[unit_id]
@@ -298,7 +321,7 @@ class Agent:
         next_available_unit_ids = [unit_id for unit_id in available_unit_ids if actions[unit_id][0] != Action.SAP]
 
         self._assign_actions_with_flow(
-            actions, next_available_unit_ids, unit_positions, policy_map, sapped_unit_next_pos_set
+            actions, next_available_unit_ids, unit_positions, policy_per_unit, policy_mask, sapped_unit_next_pos_set
         )
 
         self.prev_opp_unit_positions = opp_unit_positions
@@ -306,7 +329,7 @@ class Agent:
         return actions
 
     def _assign_actions_with_flow(
-        self, actions, available_unit_ids, unit_positions, policy_map, sapped_unit_next_pos_set
+        self, actions, available_unit_ids, unit_positions, policy_per_unit, policy_masks, sapped_unit_next_pos_set
     ):
         """最小費用流問題としてグリッドへの割り当てを解く"""
         # self._assign_greedy_actions(
@@ -323,7 +346,8 @@ class Agent:
             current_pos = unit_positions[unit_id]
             unit_pos = (int(current_pos[0]), int(current_pos[1]))  # numpy配列をintのtupleに確実に変換
             x, y = unit_pos
-            policy = policy_map[:, y, x].copy()
+            policy = policy_per_unit[unit_id, :].copy()
+            policy_mask = policy_masks[unit_id, :].copy()
             if policy.sum() > 0:  # policyの合計が0の場合はスキップ
                 policy /= policy.sum()
             else:
@@ -337,7 +361,7 @@ class Agent:
                 if action == Action.SAP:
                     continue
                 next_pos = calc_next_pos(unit_pos, action)
-                if not in_map(next_pos):
+                if not policy_mask[action]:
                     continue
 
                 # score = -np.log(policy[action] + 1e-10)
@@ -427,6 +451,7 @@ class Agent:
             unit_pos = unit_positions[unit_id]
             x, y = unit_pos
             policy = policy_map[:, y, x]
+            # print(f"{x=} {y=} {policy=}", file=sys.stderr)
 
             while True:
                 if cfg.stochastic:
@@ -466,13 +491,13 @@ class Agent:
                     actions[unit_id] = [action, 0, 0]
                     break
 
-    def _assign_greedy_actions_sap(self, actions, available_unit_ids, unit_positions, policy_map, sap_map):
+    def _assign_greedy_actions_sap(self, actions, available_unit_ids, unit_positions, policy_per_unit, sap_map):
         sap_infos: list[SingleSapInfo] = []
 
         for unit_id in available_unit_ids:
             unit_pos = unit_positions[unit_id]
             x, y = unit_pos
-            policy = policy_map[:, y, x].copy()
+            policy = policy_per_unit[unit_id, :].copy()
             # print(f"{x=} {y=} {policy=}", file=sys.stderr)
 
             if self.cfg.stochastic:

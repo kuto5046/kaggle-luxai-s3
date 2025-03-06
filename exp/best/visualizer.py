@@ -8,7 +8,7 @@ import numpy as np
 import polars as pl
 import streamlit as st
 import plotly.graph_objects as go
-from agent import ILAgent
+from agent import Agent, ILAgent
 from lightning import seed_everything
 from lux.utils import (
     State,
@@ -32,9 +32,10 @@ st.set_page_config(layout="wide")
 class Config:
     seed: int = 2025
     n_stack: int = 4
-    team_name: str = "kuto & okumura"
+    team_name: str = "team-k"
     exp_name: str = Path(__file__).parent.name
-    checkpoint_path: Path = Path(f"/home/user/work/exp/{exp_name}/output/best_model.ckpt")
+    checkpoint_path: Path = Path(f"./exp/{exp_name}/output/best_model.ckpt")
+    tta: bool = False
 
 
 def sigmoid(x):
@@ -81,6 +82,14 @@ def extract_results(
     json_load: dict[str, Any], target_team_id: int, env_params: EnvParams, episode_id: str, cfg: Config
 ) -> dict[str, list[np.ndarray]]:
     model = ILAgent(env_params, cfg.checkpoint_path, cfg.n_stack)
+    player_name = "player_0" if target_team_id == 0 else "player_1"
+    import flax
+
+    env_cfg_st = flax.serialization.to_state_dict(env_params)
+    # # err
+    # import sys
+    # print(env_cfg_st["unit_move_cost"], file=sys.stderr)
+    model2 = Agent(player_name, env_cfg_st)
     # データを全step取得
     episode_store = EpisodeStore(target_team_id, env_params, False, episode_id)
     steps = json_load["steps"]
@@ -110,14 +119,16 @@ def extract_results(
         state = extract_state(obs, target_team_id, episode_store)
         global_state = extract_global_state(obs, target_team_id, env_params, episode_store)
         gt_state = extract_gt_state(gt_obs, target_team_id)
-        policy_map, _ = model.predict(obs, target_team_id, episode_store)
+        policy_per_unit, policy_mask, _, sap_map = model.predict(obs, target_team_id, episode_store, cfg)
+        action_by_model = model2.act(step_idx, obs)
 
         results["obs"].append(obs)
         results["state"].append(state)
         results["gt_state"].append(gt_state)
         results["global_state"].append(global_state)
-        results["policy_map"].append(policy_map)
+        results["policy_per_unit"].append(policy_per_unit)
         results["action"].append(next_actions)  # その状態からどう行動したかを知りたいのnext_actions
+        results["action_by_model"].append(action_by_model)
     return results
 
 
@@ -167,8 +178,9 @@ def visualize_unit_positions(unit_positions: list[tuple[int, int]], target_team_
 
 
 def visualize_policy(
-    policy_map: np.ndarray,
+    policy_per_unit: np.ndarray,
     real_actions: np.ndarray,
+    action_by_model: np.ndarray,
     unit_positions: list[tuple[int, int]],
     title="Policy",
     n_cols: int = 8,
@@ -183,7 +195,7 @@ def visualize_policy(
         rows=n_rows,
         cols=n_cols,
         subplot_titles=[
-            f"{unit_id=} \n real action={Action(real_actions[unit_id][0]).name}"
+            f"{unit_id=} \n real action={Action(real_actions[unit_id][0]).name} \n final model action={Action(action_by_model[unit_id]).name}"
             for unit_id, (x, y) in enumerate(unit_positions)
         ],
     )
@@ -191,7 +203,7 @@ def visualize_policy(
     for unit_id, (x, y) in enumerate(unit_positions):
         row = unit_id // n_cols + 1
         col = unit_id % n_cols + 1
-        policy = policy_map[:, y, x]
+        policy = policy_per_unit[unit_id, :]
 
         fig.add_trace(go.Bar(x=ACTION_NAMES, y=policy, showlegend=False), row=row, col=col)
         fig.update_yaxes(range=[0, 1], row=row, col=col)
@@ -286,14 +298,15 @@ def main():
         # ポリシーマップの可視化
         ############################################################
         unit_positions = obs["units"]["position"][target_team_id]
-        policy_map = results["policy_map"][step_idx]
+        policy_per_unit = results["policy_per_unit"][step_idx]
         real_actions = results["action"][step_idx]
+        action_by_model = results["action_by_model"][step_idx]
         st.subheader("Policy")
         cols = st.columns([1, 2])
         with cols[0]:
             visualize_unit_positions(unit_positions, target_team_id, title="Unit Positions")
         with cols[1]:
-            visualize_policy(policy_map, real_actions, unit_positions, title="Policy", n_cols=8)
+            visualize_policy(policy_per_unit, real_actions, action_by_model, unit_positions, title="Policy", n_cols=8)
 
 
 if __name__ == "__main__":
