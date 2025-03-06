@@ -90,7 +90,7 @@ class Config:
     # common
     exp_name: str = Path(__file__).parent.name
     debug: bool = False
-    notes: str = "複数の敵と対戦を可能にした"
+    notes: str = "GCPで動かす"
     env_name: str = "lux-s3-v0"
     root_dir: Path = Path("/home/user/work")
     exp_dir: Path = root_dir / f"exp/{exp_name}"
@@ -120,14 +120,14 @@ class Config:
     # multi-gpuの場合はgpu数=learner数が本来は良いのだが動作確認できていない
     num_learners: int = 0
     # 評価用
-    evaluation_num_env_runners: int = 5
+    evaluation_num_env_runners: int = 10
     # データ収集用
-    num_env_runners: int = 18
+    num_env_runners: int = 80
 
     # 学習設定
     training_minutes: int = 60 * 24  # 1日
     # workerからLearnerに送られるバッチのキューの最大サイズ. env_runner数と同じくらいが良いのではと思っている
-    learner_queue_size: int = num_env_runners
+    learner_queue_size: int = 100
     # 学習時に同じ時系列として扱いたいstep数を設定してやる。報酬が含まれるように1マッチ分の長さにする
     # batch_mode="truncate_episodes"の場合はmin(rollout_fragment_length, 101)stepごとにデータが送信される
     rollout_fragment_length: int | str | None = 101
