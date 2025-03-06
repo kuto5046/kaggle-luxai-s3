@@ -109,24 +109,20 @@ class Config:
     best_pretrained_path: Path | None = root_dir / "exp/rl_best/output/best_model.ckpt"
     lb_best_pretrained_path: Path | None = root_dir / "exp/lb_best/output/best_model.ckpt"
 
-    # 以下の3つのrunnerにcpuとgpuを割り振る。cpuの合計値がcpu数を超えないように注意(現在は24をactor: 21,learner: 1,evaluator:2に割り振る)
-    # 学習用(GPUの数=learnerと考えて良い)
-    num_learners: int = (
-        0  # IMPALAの場合gpuが1つならlearners=0に設定してlocal worker(gpuを利用しない)としての利用が推奨される
-    )
     num_cpus_per_learner: int = 1
     num_gpus_per_learner: int = 0
-
-    # 評価用
-    evaluation_num_env_runners: int = CPU_COUNT // 4  # 評価用のenv runnerの数 cpuの1/4を評価に使う
-    evaluation_interval: int = 50  # 何回trainをしたら評価を実施するか　１回が30secくらいなので50回で1500sec=25分くらい
-    evaluation_duration: int = 50  # 1回の評価で何エピソード分評価するか
-
-    # データ収集用
-    num_env_runners: int = CPU_COUNT - evaluation_num_env_runners - 1  # -1はlearner用
-    # num_env_runners: int = CPU_COUNT - evaluation_num_env_runners - num_learners
     num_cpus_per_env_runner: int = 1
-    num_gpus_per_env_runner: int = 0
+    num_gpus_per_env_runner: int = 0  
+
+
+    # 以下の3つのrunnerにcpuとgpuを割り振る。cpuの合計値がcpu数を超えないように注意
+    # 学習用　　IMPALAの場合gpuが1つならlearners=0が推奨される。multi-gpuの場合はgpu数=learner数なのだが動作確認できていない
+    # cpu only環境だとnum_learners>=1が推奨される
+    num_learners: int = 1
+    # 評価用
+    evaluation_num_env_runners: int = 10
+    # データ収集用
+    num_env_runners: int = 100
 
     # 学習設定
     training_minutes: int = 60 * 24  # 1日
@@ -136,6 +132,9 @@ class Config:
     # batch_mode="truncate_episodes"の場合はmin(rollout_fragment_length, 101)stepごとにデータが送信される
     rollout_fragment_length: int | str | None = 101
 
+    # 評価
+    evaluation_interval: int = 50  # 何回trainをしたら評価を実施するか　１回が30secくらいなので50回で1500sec=25分くらい
+    evaluation_duration: int = 50  # 1回の評価で何エピソード分評価するか
     # learner
     gamma: float = 0.9995
     lr: float = 1e-5
@@ -737,25 +736,15 @@ class WandbLoggerCallback(RLlibCallback):
                 You can mutate this object to add additional metrics.
             kwargs: Forward compatibility placeholder.
         """
-        # learnersがない場合はskip(並列で実行しているため最初はないはず)
-        if "learners" not in result:
-            return
-
-        # 1回の学習で学習したデータ数
-        time_this_iter_s = result["time_this_iter_s"]
-        time_total_s = result["time_total_s"]
-        num_training_step_calls_per_iteration = result["num_training_step_calls_per_iteration"]
-        # sample_size = result["num_env_steps_sampled_lifetime"]
 
         # 学習状況をwandbに流す用
-        wandb.log(
-            {
-                "train/training_iteration": result["timers"]["training_iteration"],  # 何回めの学習か
-                "train/time_this_iter_s": time_this_iter_s,  # 1回の学習時間
-                # "train/time_total_s": time_total_s,  # 学習総時間
-                "train/num_training_step_calls_per_iteration": num_training_step_calls_per_iteration,  # 1回の学習で何回training_stepが呼ばれたか
-            }
-        )
+        time_metrics = [
+            "time_this_iter_s",  # 1回の学習時間
+            # 1回の学習イテレーションで
+            'mean_num_episode_lists_received',
+        ]
+        for key in time_metrics:
+            wandb.log({f"train/{key}": result[key]})
 
         # 学習データのサンプリング時間
         if result.get("env_runners"):
@@ -766,44 +755,46 @@ class WandbLoggerCallback(RLlibCallback):
                     }
                 )
 
-        # learner_metrics = result["learners"][OWN_POLICY].keys()
-        learner_metrics = [
-            # "num_non_trainable_parameters",  # 一定
-            "gradients_default_optimizer_global_norm",
-            "diff_num_grad_updates_vs_sampler_policy",
-            # "module_train_batch_size_mean",  # 一定
-            # "pi_loss",  # mean_pi_lossと同じ
-            "num_module_steps_trained_lifetime",  # これが学習したstep数
-            # "weights_seq_no",  # 一定
-            "total_loss",
-            # "default_optimizer_learning_rate",  # 一定
-            "mean_pi_loss",
-            "num_module_steps_trained",
-            "mean_vf_loss",
-            # "num_trainable_parameters",  # 一定
-            # "curr_entropy_coeff",  # 一定
-            # "vf_loss",  # mean_vf_lossと同じ
-            "entropy",
-            "sap_loss",
-        ]
-        for key in learner_metrics:
+        # learnersがない場合はskip(並列で実行しているため最初はないはず)
+        if result.get("learners"):
+            # learner_metrics = result["learners"][OWN_POLICY].keys()
+            learner_metrics = [
+                # "num_non_trainable_parameters",  # 一定
+                "gradients_default_optimizer_global_norm",
+                "diff_num_grad_updates_vs_sampler_policy",
+                # "module_train_batch_size_mean",  # 一定
+                # "pi_loss",  # mean_pi_lossと同じ
+                "num_module_steps_trained_lifetime",  # これが学習したstep数
+                # "weights_seq_no",  # 一定
+                "total_loss",
+                # "default_optimizer_learning_rate",  # 一定
+                "mean_pi_loss",
+                "num_module_steps_trained",
+                "mean_vf_loss",
+                # "num_trainable_parameters",  # 一定
+                # "curr_entropy_coeff",  # 一定
+                # "vf_loss",  # mean_vf_lossと同じ
+                "entropy",
+                "sap_loss",
+            ]
+            for key in learner_metrics:
+                wandb.log(
+                    {
+                        f"train/{key}": result["learners"][OWN_POLICY][key],
+                    }
+                )
+
+            # 学習した総エピソード数
+            trained_episodes_lifetime = result["learners"][OWN_POLICY]["num_module_steps_trained_lifetime"] // 505
+            # 1分あたりの学習エピソード数
+            trained_episodes_per_minute = (trained_episodes_lifetime / result["time_total_s"]) * 60
+
             wandb.log(
                 {
-                    f"train/{key}": result["learners"][OWN_POLICY][key],
+                    "train/trained_episode_lifetime": trained_episodes_lifetime,
+                    "train/trained_episodes_per_minute": trained_episodes_per_minute,
                 }
             )
-
-        # 学習した総エピソード数
-        trained_episodes_lifetime = result["learners"][OWN_POLICY]["num_module_steps_trained_lifetime"] // 505
-        # 1分あたりの学習エピソード数
-        trained_episodes_per_minute = (trained_episodes_lifetime / time_total_s) * 60
-
-        wandb.log(
-            {
-                "train/trained_episode_lifetime": trained_episodes_lifetime,
-                "train/trained_episodes_per_minute": trained_episodes_per_minute,
-            }
-        )
 
     # 学習したモデルの性能評価をwandbに流す用
     def on_evaluate_start(
@@ -1231,7 +1222,10 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
                 )
             ),
             # 学習は自身のpolicyとself-playのpolicyを学習
-            policies_to_train=[OWN_POLICY, SELF_PLAY_POLICY],
+            policies_to_train=[
+                OWN_POLICY, 
+                SELF_PLAY_POLICY
+                ],
         )
         # https://docs.ray.io/en/latest/rllib/rllib-rlmodule.html#construction-through-rlmodulespecs
         .rl_module(
