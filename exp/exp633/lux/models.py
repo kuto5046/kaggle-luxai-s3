@@ -301,6 +301,7 @@ class LaxLitModel(LightningModule):
             on_epoch=True,
             prog_bar=False,
             logger=True,
+            sync_dist=True,
         )
         self.log(
             f"SapLoss/{mode}",
@@ -309,6 +310,7 @@ class LaxLitModel(LightningModule):
             on_epoch=True,
             prog_bar=False,
             logger=True,
+            sync_dist=True,
         )
         # self.log(
         #     f"ValueLoss/{mode}",
@@ -342,6 +344,7 @@ class LaxLitModel(LightningModule):
             on_epoch=True,
             prog_bar=False,
             logger=True,
+            sync_dist=True,
         )
 
         preds = torch.softmax(outputs["policy"], dim=1).argmax(dim=1).flatten()
@@ -375,17 +378,19 @@ class LaxLitModel(LightningModule):
             "best_valid_loss", float("inf")
         ):
             # save_model(self.model, self.output_dir)
-            self.trainer.callback_metrics["best_valid_loss"] = self.trainer.callback_metrics["Loss/valid"]
-            wandb.log(
-                {
-                    "confusion_matrix": wandb.plot.confusion_matrix(
-                        probs=None,
-                        y_true=np.concatenate(self.valid_outputs["ground_truth"]),
-                        preds=np.concatenate(self.valid_outputs["predictions"]),
-                        class_names=[action.name for action in Action],
-                    )
-                }
-            )
+            # self.trainer.callback_metrics["best_valid_loss"] = self.trainer.callback_metrics["Loss/valid"]
+            # wandb.log(
+            #     {
+            #         "confusion_matrix": wandb.plot.confusion_matrix(
+            #             probs=None,
+            #             y_true=np.concatenate(self.valid_outputs["ground_truth"]),
+            #             preds=np.concatenate(self.valid_outputs["predictions"]),
+            #             class_names=[action.name for action in Action],
+            #         )
+            #     }, 
+            # sync_dist=True,
+            # )
+            pass
         self.valid_outputs = {"ground_truth": [], "predictions": []}
         # メトリクスのリセット
         self.valid_metrics.reset()

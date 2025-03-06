@@ -37,8 +37,8 @@ class Config:
     epoch: int = 20
     limit_train_batches: float = 1.0
     limit_val_batches: float = 1.0
-    use_amp: bool = True
-    batch_size: int = 512
+    use_amp: bool = False
+    batch_size: int = 384
     num_workers: int = 24
     ckpt_path: str = "agents/exp622_epoch21/output/best_model.ckpt"
     lr: float = 5e-4
@@ -149,7 +149,9 @@ class TrainPipeline:
             sync_batchnorm=True,
             limit_train_batches=self.cfg.limit_train_batches,
             limit_val_batches=self.cfg.limit_val_batches,
-            deterministic=True,  # for reproducibility
+            deterministic=True,  # for reproducibility, 
+            devices=2, 
+            strategy="ddp_find_unused_parameters_true"
         )
         self.trainer.fit(self.model, datamodule=self.datamodule)
 
