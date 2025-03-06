@@ -829,6 +829,142 @@ class LuxValueConvModel(nn.Module):
         }
 
 
+class ConvLSTMCell(nn.Module):
+    def __init__(self, input_dim, hidden_dim, kernel_size, bias):
+        super().__init__()
+
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+
+        self.kernel_size = kernel_size
+        self.padding = kernel_size[0] // 2, kernel_size[1] // 2
+        self.bias = bias
+
+        self.conv = nn.Conv2d(
+            in_channels=self.input_dim + self.hidden_dim,
+            out_channels=4 * self.hidden_dim,
+            kernel_size=self.kernel_size,
+            padding=self.padding,
+            bias=self.bias,
+        )
+
+    def init_hidden(self, input_size, batch_size):
+        return (
+            torch.zeros(*batch_size, self.hidden_dim, *input_size),
+            torch.zeros(*batch_size, self.hidden_dim, *input_size),
+        )
+
+    def forward(self, input_tensor, cur_state):
+        h_cur, c_cur = cur_state
+        combined = torch.cat([input_tensor, h_cur], dim=-3)  # (B, C_in + C_hidden, H, W)
+        combined_conv = self.conv(combined)
+        cc_i, cc_f, cc_o, cc_g = torch.split(combined_conv, self.hidden_dim, dim=-3)
+
+        i = torch.sigmoid(cc_i)
+        f = torch.sigmoid(cc_f)
+        o = torch.sigmoid(cc_o)
+        g = torch.tanh(cc_g)
+
+        c_next = f * c_cur + i * g
+        h_next = o * torch.tanh(c_next)
+        return h_next, c_next
+
+
+class DRC(nn.Module):
+    def __init__(self, num_layers, input_dim, hidden_dim, kernel_size=3, bias=True):
+        super().__init__()
+        self.num_layers = num_layers
+
+        blocks = []
+        for _ in range(self.num_layers):
+            blocks.append(
+                ConvLSTMCell(
+                    input_dim=input_dim, hidden_dim=hidden_dim, kernel_size=(kernel_size, kernel_size), bias=bias
+                )
+            )
+        self.blocks = nn.ModuleList(blocks)
+
+    def init_hidden(self, input_size, batch_size, device):
+        hs, cs = [], []
+        for block in self.blocks:
+            h, c = block.init_hidden(input_size, batch_size)
+            h = h.to(device)
+            c = c.to(device)
+            hs.append(h)
+            cs.append(c)
+        return hs, cs
+
+    def forward(self, x, hidden, num_repeats):
+        if hidden is None:
+            hidden = self.init_hidden(x.shape[-2:], x.shape[:-3], device=x.device)
+
+        hs, cs = hidden
+        for _ in range(num_repeats):
+            for i, block in enumerate(self.blocks):
+                input_i = hs[i - 1] if i > 0 else x
+                hs[i], cs[i] = block(input_i, (hs[i], cs[i]))
+
+        return hs[-1], (hs, cs)
+
+
+class LuxConvLSTMModel(nn.Module):
+    def __init__(
+        self,
+        state_space_size: int,
+        global_state_space_size: int,
+        action_space_size: int,
+        num_layers: int,
+        hidden_dim: int,
+        kernel_size: int = 3,
+        num_repeats: int = 1,
+    ) -> None:
+        super().__init__()
+
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+        self.num_repeats = num_repeats
+
+        self.inc = DoubleConv(state_space_size + global_state_space_size, self.hidden_dim, res=False)
+
+        self.drc = DRC(
+            num_layers=self.num_layers,
+            input_dim=self.hidden_dim,
+            hidden_dim=self.hidden_dim,
+            kernel_size=kernel_size,
+            bias=True,
+        )
+
+        self.policy_net = OutConv(self.hidden_dim, action_space_size)
+        self.sap_net = nn.Sequential(
+            ResidualBlock(
+                self.hidden_dim, self.hidden_dim, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False
+            ),
+            ResidualBlock(
+                self.hidden_dim, self.hidden_dim, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False
+            ),
+            OutConvWithNorm(self.hidden_dim, 1),
+        )
+
+    def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        state = batch["state"]
+        global_state = batch["global_state"]
+        _n, T, _c, _x, _y = state.shape
+        _ng, _tg, _cg = global_state.shape
+        gx = global_state.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, _x, _y)
+        x = torch.cat([state, gx], dim=2)
+
+        hidden = None
+        for t in range(T):
+            xt = x[:, t]
+            xt = self.inc(xt)
+            xt, hidden = self.drc(xt, hidden, num_repeats=self.num_repeats)
+
+        policy_logits = self.policy_net(xt)
+        sap_logits = self.sap_net(xt)
+
+        return {"policy": policy_logits, "sap": sap_logits}
+
+
 def save_model(model, output_dir: Path, latest: bool = False):
     if latest:
         torch.save(model.state_dict(), output_dir / "latest_model.pth")
