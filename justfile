@@ -31,7 +31,7 @@ sub exp_name:
     uv run kaggle competitions submit -c lux-ai-season-3 -f /home/user/work/exp/{{exp_name}}/submission.tar.gz -m "{{exp_name}}"
 
 game exp_name1 exp_name2:
-    uv run luxai-s3 /home/user/work/exp/{{exp_name1}}/main.py /home/user/work/exp/{{exp_name2}}/main.py --output replay.json
+    uv run luxai-s3 ./exp/{{exp_name1}}/main.py ./exp/{{exp_name2}}/main.py --output replay.json
 
 game2 exp_name1 exp_name2:
-    uv run luxai-s3-fast /home/user/work/exp/{{exp_name1}}/main.py /home/user/work/exp/{{exp_name2}}/main.py --tournament --tournament-cfg-concurrent 4 --tournament-cfg-ranking-system wins
+    uv run luxai-s3-fast ./exp/{{exp_name1}}/main.py ./exp/{{exp_name2}}/main.py --tournament --tournament-cfg-concurrent 4 --tournament-cfg-ranking-system wins
