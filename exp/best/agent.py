@@ -8,6 +8,7 @@ import numpy as np
 import torch
 from lightning import seed_everything
 from lux.utils import (
+    is_kaggle_environment,
     State,
     Action,
     GlobalState,
@@ -245,11 +246,11 @@ def get_legal_sap_policy(
 def use_cpp_flow():
     # 提出環境ではpythonのflow計算を使う想定. kaggle環境でpybind周りをなんとかすれば使えるはずだが未整備
     # debugモードではpythonのflow計算との比較を行うため使用している
-    return torch.cuda.is_available() or Config().debug
+    return not is_kaggle_environment() or Config().debug
 
 
 def use_py_flow():
-    return not torch.cuda.is_available() or Config().debug
+    return is_kaggle_environment() or Config().debug
 
 
 class SingleSapInfo:
