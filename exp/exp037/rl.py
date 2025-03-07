@@ -89,8 +89,8 @@ class Model(IntEnum):
 class Config:
     # common
     exp_name: str = Path(__file__).parent.name
-    debug: bool = True
-    notes: str = "GCPで動かす"
+    debug: bool = False
+    notes: str = "unet cacheとflowの高速化を実施"
     env_name: str = "lux-s3-v0"
     root_dir: Path = Path("/home/kyohei.uto/kaggle-luxai-s3")
     # root_dir: Path = Path("/home/user/work")
@@ -127,7 +127,7 @@ class Config:
     # 学習設定
     training_minutes: int = 60 * 24  # 1日
     # workerからLearnerに送られるバッチのキューの最大サイズ. env_runner数と同じくらいが良いのではと思っている
-    learner_queue_size: int = 200
+    learner_queue_size: int = 100
     # 学習時に同じ時系列として扱いたいstep数を設定してやる。報酬が含まれるように1マッチ分の長さにする
     # batch_mode="truncate_episodes"の場合はmin(rollout_fragment_length, 101)stepごとにデータが送信される
     rollout_fragment_length: int | str | None = 101
