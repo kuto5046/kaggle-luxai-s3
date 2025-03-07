@@ -67,7 +67,7 @@ from lux.utils import (
     extract_global_state,
     get_valid_policy_map,
 )
-from lux.models import LuxUNetModel, LuxConvLSTMModel, LuxValueConvModel
+from lux.models import LuxUNetModel, LuxConvLSTMModel, LuxValueConvModel, LuxUNetModelInferenceWrapper
 from lux.params import EnvParams
 from lux.imitation_agent import action_map_to_action
 
@@ -89,7 +89,7 @@ class Model(IntEnum):
 class Config:
     # common
     exp_name: str = Path(__file__).parent.name
-    debug: bool = False
+    debug: bool = True
     notes: str = "GCPで動かす"
     env_name: str = "lux-s3-v0"
     root_dir: Path = Path("/home/kyohei.uto/kaggle-luxai-s3")
@@ -110,7 +110,7 @@ class Config:
 
     num_cpus_per_learner: int = 1  # 私の環境だと1ではflowのtimeoutになる
     num_gpus_per_learner: int = 1
-    num_cpus_per_env_runner: int = 2
+    num_cpus_per_env_runner: int = 1
     num_gpus_per_env_runner: int = 0
 
     # 以下の3つのrunnerにcpuとgpuを割り振る。cpuの合計値がcpu数を超えないように注意
@@ -119,14 +119,14 @@ class Config:
     # multi-gpuの場合はgpu数=learner数が本来は良いのだが動作確認できていない
     num_learners: int = 4
     # 評価用
-    evaluation_num_env_runners: int = 5
+    evaluation_num_env_runners: int = 10
     # データ収集用
-    num_env_runners: int = 40
+    num_env_runners: int = 80
 
     # 学習設定
     training_minutes: int = 60 * 24  # 1日
     # workerからLearnerに送られるバッチのキューの最大サイズ. env_runner数と同じくらいが良いのではと思っている
-    learner_queue_size: int = 50
+    learner_queue_size: int = 200
     # 学習時に同じ時系列として扱いたいstep数を設定してやる。報酬が含まれるように1マッチ分の長さにする
     # batch_mode="truncate_episodes"の場合はmin(rollout_fragment_length, 101)stepごとにデータが送信される
     rollout_fragment_length: int | str | None = 101
@@ -151,11 +151,11 @@ class Config:
 
     def __post_init__(self):
         if self.debug:
-            self.num_env_runners = 10
+            self.num_env_runners = 1
             self.num_cpus_per_env_runner = 1
             self.evaluation_num_env_runners = 1
-            self.evaluation_interval = 100
-            self.evaluation_duration = 1
+            self.evaluation_interval = 1
+            self.evaluation_duration = 2
             self.training_minutes = 10
             self.train_batch_size_per_learner = 128
             self.learner_queue_size = 20
@@ -577,6 +577,11 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
     @override(TorchRLModule)
     def _forward_train(self, batch, **kwargs):
         return self._forward(batch, **kwargs)
+
+    @override(TorchRLModule)
+    def _inference_forward(self, batch, **kwargs):
+        pass
+
 
     @override(ValueFunctionAPI)
     def compute_values(self, batch: dict[str, Any], embeddings: Any | None = None) -> torch.Tensor:

@@ -622,6 +622,103 @@ class LuxUNetModel(nn.Module):
             # "value": value_logits,
         }
 
+class LuxUNetModelInferenceWrapper:
+    """
+    LuxUNetModelの推論時間を短縮するためのラッパークラス。
+    過去のステップの計算結果をキャッシュして再利用することで、計算量を削減します。
+    特に、UNetのエンコーダー・デコーダー部分の出力をキャッシュします。
+    """
+    def __init__(self, model: LuxUNetModel, n_stack: int):
+        self.model = model
+        self.n_stack = n_stack
+        # up3の出力をキャッシュ
+        self.cached_features = None
+    
+    def reset(self):
+        """キャッシュをリセットします。エピソードの開始時に呼び出してください。"""
+        self.cached_features = None
+    
+    def _unet_forward(self, state: torch.Tensor, global_state: torch.Tensor) -> dict[str, torch.Tensor]:
+        # モデルの内部状態にアクセスして特徴量を取得
+        _n, _t, _c, _x, _y = state.shape
+        x = state.view(-1, _c, _x, _y)
+        x1 = self.model.inc(x)
+        x2 = self.model.down1(x1)
+        x3 = self.model.down2(x2)
+        x4 = self.model.down3(x3)
+        
+        # グローバル状態の処理
+        sx, sy = x4.shape[2:]
+        _n_t, _c = global_state.view(-1, global_state.size(-1)).shape
+        gx = global_state.view(-1, _c, 1, 1)
+        gx = gx.repeat(1, 1, sx, sy)
+        
+        x4 = torch.cat([x4, gx], dim=1)
+        
+        x = self.model.up1(x4, x3)
+        x = self.model.up2(x, x2)
+        x = self.model.up3(x, x1)
+        
+        return x
+
+    def _forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        sap_logits1 = self.model.sap_net1(x)
+        sap_logits2 = self.model.sap_net2(sap_logits1)
+        sap_logits = self.model.sap_net3(sap_logits2)
+
+        policy_logits1 = self.model.policy_net1_from_sap(sap_logits)
+        policy_features = torch.cat([x, policy_logits1], dim=1)
+        policy_features = self.model.concat_norm(policy_features)
+        policy_logits = self.model.policy_net2(policy_features)
+        policy_logits = self.model.policy_net3(policy_logits)
+        policy_logits = self.model.policy_net4(policy_logits)
+        return policy_logits, sap_logits
+
+
+    def __call__(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        """
+        モデルの推論を行います。過去のステップの計算結果を再利用します。
+        Args:
+            batch: 入力データ。通常のモデルと同じ形式。
+        Returns:
+            dict[str, torch.Tensor]: モデルの出力。
+        """
+        state = batch["state"]
+        global_state = batch["global_state"]
+        _n, _t, _c, _x, _y = state.shape
+        
+        # 初回実行時またはn_stackが変わった場合は全て計算
+        if self.cached_states is None:
+            result = self.model(batch)
+            
+            # 特徴量をキャッシュ
+            with torch.no_grad():
+                x = self._unet_forward(state, global_state)
+                x = x.view(_n, -1, _x, _y)
+                self.cached_features = x.clone()
+            return result
+    
+        # 最新ステップの特徴量を計算
+        latest_state = batch['state'][:, -1:, :, :, :]
+        latest_global_state = batch['global_state'][:, -1:, :]
+        with torch.no_grad():
+            # 最新のstateのみunetで特徴量抽出
+            x = self._unet_forward(latest_state, latest_global_state)
+            latest_features = x.view(_n, 1, -1, _x, _y)  # (n, 1, c, x, y)
+        
+            # 古い特徴量を削除し、最新の特徴量を追加
+            self.cached_features = torch.cat([
+                self.cached_features[:, 1:], 
+                latest_features
+            ], dim=1)
+            # キャッシュされた特徴量を使って残りの処理を実行
+            policy_logits, sap_logits = self._forward(self.cached_features)
+        
+        return {
+            "policy": policy_logits,
+            "sap": sap_logits,
+        }
+
 
 class MaskedFocalTverskyLoss(nn.Module):
     def __init__(

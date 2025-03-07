@@ -221,7 +221,7 @@ class MinimumCostFlow:
         self.edges[f].append([t, capacity, cost, len(self.edges[t]), action])
         self.edges[t].append([f, 0, -cost, len(self.edges[f]) - 1, -1])  # reverse edge
 
-    def flow(self, s, t, flow, timeout=1.0):
+    def flow(self, s, t, flow, timeout=5.0):
         n = self.n
         g = self.edges
         inf = MinimumCostFlow.inf

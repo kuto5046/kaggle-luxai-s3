@@ -30,6 +30,7 @@ dependencies = [
   "markupsafe==3", # 3.0.2だとpytorchのエラーが出る
   "mypy>=1.11.2",
   "nbformat>=5.10.4",
+  "onnxruntime>=1.20.1",
   "optuna>=4",
   "pandas>=2.2.2",
   "peft>=0.13.2",
