@@ -92,10 +92,9 @@ class Config:
     debug: bool = False
     notes: str = "GCPで動かす"
     env_name: str = "lux-s3-v0"
-    root_dir: Path = Path("/home/user/work")
+    root_dir: Path = Path("/home/kyohei.uto/kaggle-luxai-s3")
     exp_dir: Path = root_dir / f"exp/{exp_name}"
     output_dir: Path = root_dir / f"output/{exp_name}"
-
     # pretrained model
     unet_n_stack: int = 4
     lstm_n_stack: int = 8
@@ -109,25 +108,25 @@ class Config:
     best_pretrained_path: Path | None = root_dir / "exp/rl_best/output/best_model.ckpt"
     lb_best_pretrained_path: Path | None = root_dir / "exp/lb_best/output/best_model.ckpt"
 
-    num_cpus_per_learner: int = 1
+    num_cpus_per_learner: int = 1  # 私の環境だと1ではflowのtimeoutになる
     num_gpus_per_learner: int = 1
-    num_cpus_per_env_runner: int = 1
+    num_cpus_per_env_runner: int = 2
     num_gpus_per_env_runner: int = 0
 
     # 以下の3つのrunnerにcpuとgpuを割り振る。cpuの合計値がcpu数を超えないように注意
     # 学習用
     # 　IMPALAの場合gpuが1つならlocal workerとして動かすためlearners=0が推奨される。
     # multi-gpuの場合はgpu数=learner数が本来は良いのだが動作確認できていない
-    num_learners: int = 0
+    num_learners: int = 4
     # 評価用
-    evaluation_num_env_runners: int = 10
+    evaluation_num_env_runners: int = 5
     # データ収集用
-    num_env_runners: int = 80
+    num_env_runners: int = 40
 
     # 学習設定
     training_minutes: int = 60 * 24  # 1日
     # workerからLearnerに送られるバッチのキューの最大サイズ. env_runner数と同じくらいが良いのではと思っている
-    learner_queue_size: int = 100
+    learner_queue_size: int = 50
     # 学習時に同じ時系列として扱いたいstep数を設定してやる。報酬が含まれるように1マッチ分の長さにする
     # batch_mode="truncate_episodes"の場合はmin(rollout_fragment_length, 101)stepごとにデータが送信される
     rollout_fragment_length: int | str | None = 101
@@ -138,7 +137,7 @@ class Config:
     # learner
     gamma: float = 0.9995
     lr: float = 1e-5
-    train_batch_size_per_learner: int = 512
+    train_batch_size_per_learner: int = 256
     num_epochs: int = 1  # 1回の学習のepoch数。新しいデータがどんどん追加されてくるためepoch数は1にしている
     replay_proportion: float = 0.0  # リプレイバッファの割合
     # loss
