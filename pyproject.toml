@@ -37,6 +37,7 @@ dependencies = [
   "polars>=1.7.1",
   "pre-commit>=3.8",
   "pyarrow>=17",
+  "pybind11>=2.13.6",
   "pydantic>=2.7.4",
   "pytest>=8.3.3",
   "ray[default,rllib]>=2.41",

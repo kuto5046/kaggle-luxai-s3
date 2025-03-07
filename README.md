@@ -29,7 +29,7 @@ wandb login
 authorizeすることでwandbが利用可能になる
 
 ## kaggleからepisodeデータを取得する
-①以下のnotebookで対象のsubmissionのepisode情報をcsvで取得してローカルにダウンロード  
+①以下のnotebookで対象のsubmissionのepisode情報をcsvで取得してローカルにダウンロード
 https://www.kaggle.com/code/kuto0633/fork-of-lux-ai-s3-download-episodes-from-meta-kagg
 
 ②以下を実行してepisodeのjsonファイルをローカルに取得する(3000件が2時間くらい)
@@ -52,14 +52,21 @@ exp/exp017/
 ├── data_processor.py    # 模倣学習用の特徴量生成を行う
 ├── train.py             # 模倣学習
 ├── rl.py                # 強化学習(Rllib)
+├── setup.py             # cppでの最小費用流をつかうのに必要なsetupを行う
 ├── visualizer.py        # 実験結果を視覚化する Streamlit アプリ
-└── lux/                 # ここに必要なモジュールやクラスを格納している 
+└── lux/                 # ここに必要なモジュールやクラスを格納している
 ```
 以下のように実行する。必要に応じて設定ファイルを変更する。
 ```sh
 uv run python exp/exp017/data_processor.py
 uv run python exp/exp017/train.py
 ```
+cppでのflowを用いて対戦を行うためには以下のコマンドでセットアップする必要がある
+```sh
+uv run python exp/best/setup.py build
+uv run python exp/best/setup.py install
+```
+
 
 ## 強化学習の実行
 はじめにrayを起動する必要があります
@@ -75,7 +82,7 @@ uv run python exp/best/rl.py
 ```
 
 ## その他便利タスク
-justをタスクランナーとして使用しています  
+justをタスクランナーとして使用しています
 justをインストールするとjustfileにあるタスクを簡単に実行できます
 
 ### 提出
