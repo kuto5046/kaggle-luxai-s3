@@ -37,7 +37,7 @@ class Config:
     overlap_penalty: float = 2.0
 
     tta: bool = False
-    debug: bool = True
+    debug: bool = False
 
     checkpoint_path: Path = Path(__file__).parent / "output/best_model.ckpt"
 
