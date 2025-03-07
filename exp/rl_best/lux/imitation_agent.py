@@ -20,8 +20,24 @@ from .utils import (
     get_legal_policy,
     calc_relative_pos,
     extract_global_state,
+    is_kaggle_environment,
 )
 from .params import EnvParams
+
+
+class Config:
+    seed: int = 2025
+    # 確率的な行動を取るかどうか
+    stochastic: bool = True  # Falseにするとargmaxで行動を選択する
+    res: bool = True
+    n_stack: int = 4
+    # 同じマスに複数のユニットが移動する場合のペナルティ、0=重複を許可(greedy)、1=重複を禁止
+    overlap_penalty: float = 2.0
+
+    tta: bool = False
+    debug: bool = False
+
+    checkpoint_path: Path = Path(__file__).parent.parent / "output/best_model.ckpt"
 
 
 def load_model(model: nn.Module, checkpoint_path: Path) -> nn.Module:
@@ -186,6 +202,20 @@ class ILAgent:
         return policy_map, point_map, sap
 
 
+def use_cpp_flow():
+    # 提出環境ではpythonのflow計算を使う想定. kaggle環境でpybind周りをなんとかすれば使えるはずだが未整備
+    # debugモードではpythonのflow計算との比較を行うため使用している
+    return not is_kaggle_environment() or Config().debug
+
+
+def use_py_flow():
+    return is_kaggle_environment() or Config().debug
+
+
+if use_cpp_flow():
+    import min_cost_flow
+
+
 class SingleSapInfo:
     def __init__(
         self,
@@ -211,7 +241,7 @@ class SingleSapInfo:
 
 # verified http://judge.u-aizu.ac.jp/onlinejudge/review.jsp?rid=4675288#1
 class MinimumCostFlow:
-    inf = 1000000000000000000
+    inf = 10**18  # 十分大きな値
 
     def __init__(self, n):
         self.n = n
@@ -233,8 +263,9 @@ class MinimumCostFlow:
 
         res = 0
         start_time = time.time()
+        eps = 1e-9  # 浮動小数点誤差対策用の許容値
 
-        while flow != 0:
+        while flow > 0:
             if time.time() - start_time > timeout:
                 return -2
 
@@ -247,24 +278,29 @@ class MinimumCostFlow:
                     return -2
 
                 c, v = heappop(que)
-                if dist[v] < c:
+                if dist[v] < c - eps:
                     continue
-                r0 = dist[v] + h[v]
+                # 隣接する各辺を緩和
                 for i, e in enumerate(g[v]):
                     w, cap, cost, _, _ = e
-                    if cap > 0 and r0 + cost - h[w] < dist[w]:
-                        r = r0 + cost - h[w]
-                        dist[w] = r
-                        prevv[w] = v
-                        preve[w] = i
-                        heappush(que, (r, w))
+                    if cap > 0:
+                        r = dist[v] + cost + h[v] - h[w]
+                        if r < dist[w] - eps:
+                            dist[w] = r
+                            prevv[w] = v
+                            preve[w] = i
+                            heappush(que, (r, w))
 
+            # t への到達がなければ経路が存在しない
             if dist[t] == inf:
                 return -1
 
+            # 到達可能なノードのみ h を更新する
             for i in range(n):
-                h[i] += dist[i]
+                if dist[i] < inf:
+                    h[i] += dist[i]
 
+            # この経路で流せる最大の流量 d を求める
             d = flow
             v = t
             while v != s:
@@ -272,6 +308,8 @@ class MinimumCostFlow:
                 v = prevv[v]
             flow -= d
             res += d * h[t]
+
+            # 経路に沿って辺の容量を更新
             v = t
             while v != s:
                 e = g[prevv[v]][preve[v]]
@@ -328,7 +366,10 @@ def assign_actions_with_flow(
     # フローネットワークの構築
     n_units = len(available_unit_ids)
     n_cells = len(all_next_positions)
-    flow = MinimumCostFlow(2 + n_units + 2 * n_cells)
+    if use_py_flow():
+        flow = MinimumCostFlow(2 + n_units + 2 * n_cells)
+    if use_cpp_flow():
+        mcf = min_cost_flow.MinimumCostFlow(2 + n_units + 2 * n_cells)
     nodes = {}
     nodes["source"] = 0
     nodes["sink"] = 1
@@ -339,22 +380,37 @@ def assign_actions_with_flow(
         nodes[f"pos_{x}_{y}_additional"] = 2 + n_units + n_cells + i
 
     for i, unit_id in enumerate(available_unit_ids):
-        flow.add_edge(nodes["source"], nodes[f"unit_{i}"], capacity=1, cost=0, action=-1)
+        if use_py_flow():
+            flow.add_edge(nodes["source"], nodes[f"unit_{i}"], capacity=1, cost=0, action=-1)
+        if use_cpp_flow():
+            mcf.add_edge(nodes["source"], nodes[f"unit_{i}"], 1, 0, -1)
     for pos in all_next_positions:
         pos_node = nodes[f"pos_{pos[0]}_{pos[1]}"]
         pos_node_additional = nodes[f"pos_{pos[0]}_{pos[1]}_additional"]
         dec = 0
         if pos not in sapped_unit_next_pos_set:
-            flow.add_edge(pos_node, nodes["sink"], capacity=1, cost=0, action=-1)
+            if use_py_flow():
+                flow.add_edge(pos_node, nodes["sink"], capacity=1, cost=0, action=-1)
+            if use_cpp_flow():
+                mcf.add_edge(pos_node, nodes["sink"], 1, 0, -1)
             dec = 1
         additional_capacity = max(len(available_unit_ids) - dec, 1)  # 最低でも1の容量を確保
-        flow.add_edge(
-            pos_node_additional,
-            nodes["sink"],
-            capacity=additional_capacity,
-            cost=overlap_penalty,
-            action=-1,
-        )
+        if use_py_flow():
+            flow.add_edge(
+                pos_node_additional,
+                nodes["sink"],
+                capacity=additional_capacity,
+                cost=overlap_penalty,
+                action=-1,
+            )
+        if use_cpp_flow():
+            mcf.add_edge(
+                pos_node_additional,
+                nodes["sink"],
+                additional_capacity,
+                overlap_penalty,
+                -1,
+            )
 
     for i, unit_actions_list in enumerate(unit_actions):
         unit_node = nodes[f"unit_{i}"]
@@ -363,12 +419,24 @@ def assign_actions_with_flow(
             base_cost = action["score"]
             pos_node = nodes[f"pos_{pos[0]}_{pos[1]}"]
             pos_node_additional = nodes[f"pos_{pos[0]}_{pos[1]}_additional"]
-            flow.add_edge(unit_node, pos_node, capacity=1, cost=base_cost, action=action)
-            flow.add_edge(unit_node, pos_node_additional, capacity=1, cost=base_cost, action=action)
+            if use_py_flow():
+                flow.add_edge(unit_node, pos_node, capacity=1, cost=base_cost, action=action)
+                flow.add_edge(unit_node, pos_node_additional, capacity=1, cost=base_cost, action=action)
+            if use_cpp_flow():
+                mcf.add_edge(unit_node, pos_node, 1, base_cost, action)
+                mcf.add_edge(unit_node, pos_node_additional, 1, base_cost, action)
     # try:
-    flow_result = flow.flow(nodes["source"], nodes["sink"], len(available_unit_ids))
+    if use_py_flow():
+        flow_result = flow.flow(nodes["source"], nodes["sink"], len(available_unit_ids))
+    if use_cpp_flow():
+        flow_result = mcf.flow(nodes["source"], nodes["sink"], len(available_unit_ids))
     assert flow_result != -1, "Flow calculation failed"
     assert flow_result != -2, "Flow calculation timeout"
+    if use_py_flow() and use_cpp_flow():
+        for i, unit_id in enumerate(available_unit_ids):
+            for original_edge, edge in zip(flow.edges[unit_id], mcf.edges[unit_id]):
+                assert original_edge[1] == edge.cap
+                assert original_edge[4] == edge.action
     # except Exception as e:
     #     print(f"フロー計算エラー: {e}")
     #     self._assign_greedy_actions(actions, available_unit_ids, unit_positions, policy_map, point_map, obs, opp_unit_positions)
@@ -385,10 +453,16 @@ def assign_actions_with_flow(
         unit_node = nodes[f"unit_{i}"]
         unit_pos = unit_positions[unit_id]
         selected_action = None
-        for edge in flow.edges[unit_node]:
-            if edge[1] == 0 and edge[4] != -1:
-                selected_action = edge[4]
-                break
+        if use_py_flow():
+            for edge in flow.edges[unit_node]:
+                if edge[1] == 0 and edge[4] != -1:
+                    selected_action = edge[4]
+                    break
+        elif use_cpp_flow():
+            for edge in mcf.edges[unit_node]:
+                if edge.cap == 0 and edge.action != -1:
+                    selected_action = edge.action
+                    break
         if selected_action is None:
             actions[unit_id] = [Action.CENTER, 0, 0]
         else:
