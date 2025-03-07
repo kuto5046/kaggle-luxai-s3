@@ -9,7 +9,7 @@ from lux.utils import (
     GlobalState,
     EpisodeStore,
 )
-from lux.models import LuxUNetModel
+from lux.models import LuxUNetModel, LuxUNetModelInferenceWrapper
 from lux.params import EnvParams
 from lux.imitation_agent import ILAgent, load_model, policy_map_to_action
 
@@ -39,6 +39,7 @@ model = LuxUNetModel(
     res=cfg.res,
 )
 model = load_model(model, cfg.checkpoint_path)
+model = LuxUNetModelInferenceWrapper(model, cfg.n_stack)
 imitation_model = ILAgent(model, cfg)
 
 
