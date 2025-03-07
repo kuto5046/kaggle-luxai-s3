@@ -1,8 +1,5 @@
-from pathlib import Path
-
 import torch
 from lightning import seed_everything
-
 from lux.utils import (
     State,
     Action,
@@ -11,22 +8,7 @@ from lux.utils import (
 )
 from lux.models import LuxUNetModel
 from lux.params import EnvParams
-from lux.imitation_agent import ILAgent, load_model, policy_map_to_action
-
-
-class Config:
-    seed: int = 2025
-    # 確率的な行動を取るかどうか
-    stochastic: bool = True  # Falseにするとargmaxで行動を選択する
-    res: bool = True
-    n_stack: int = 4
-    # 同じマスに複数のユニットが移動する場合のペナルティ、0=重複を許可(greedy)、1=重複を禁止
-    overlap_penalty: float = 2.0
-
-    tta: bool = False
-
-    checkpoint_path: Path = Path(__file__).parent / "output/best_model.ckpt"
-
+from lux.imitation_agent import Config, ILAgent, load_model, policy_map_to_action
 
 cfg = Config()
 seed_everything(cfg.seed, workers=True)
