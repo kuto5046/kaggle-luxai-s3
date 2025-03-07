@@ -93,6 +93,7 @@ class Config:
     notes: str = "GCPで動かす"
     env_name: str = "lux-s3-v0"
     root_dir: Path = Path("/home/kyohei.uto/kaggle-luxai-s3")
+    # root_dir: Path = Path("/home/user/work")
     exp_dir: Path = root_dir / f"exp/{exp_name}"
     output_dir: Path = root_dir / f"output/{exp_name}"
     # pretrained model
@@ -470,6 +471,14 @@ def freeze(model: nn.Module, model_name: Model):
         raise ValueError(f"Invalid model name: {model_name}")
 
 
+def load_pretrained_model(model: nn.Module, model_name: Model, pretrained_path: Path):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    ckpt = torch.load(pretrained_path, weights_only=False, map_location=device)
+    state_dict = {k.replace("model.", ""): v for k, v in ckpt["state_dict"].items()}
+    model.load_state_dict(state_dict)
+    print(f"Loaded model from {pretrained_path} {device=}")
+
+
 class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
     @override(TorchRLModule)
     def setup(self):
@@ -477,7 +486,7 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
         model_name = self.model_config["model_name"]
         self.n_stack = self.model_config["n_stack"]
         if model_name == Model.UNet:
-            self.policy_model = LuxUNetModel(
+            base_policy_model = LuxUNetModel(
                 state_space_size=len(State),
                 global_state_space_size=len(GlobalState),
                 action_space_size=len(Action),
@@ -485,7 +494,7 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
                 res=True,
             )
         elif model_name == Model.ConvLSTM:
-            self.policy_model = LuxConvLSTMModel(
+            base_policy_model = LuxConvLSTMModel(
                 state_space_size=len(State),
                 global_state_space_size=len(GlobalState),
                 action_space_size=len(Action),
@@ -496,32 +505,30 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
             )
         else:
             raise ValueError(f"Invalid model name: {model_name}")
-        if self.model_config["freeze"]:
-            freeze(self.policy_model, model_name)
 
+        if self.model_config["pretrained_path"]:
+            load_pretrained_model(base_policy_model, model_name, self.model_config["pretrained_path"])
+
+        if self.model_config["freeze"]:
+            freeze(base_policy_model, model_name)
+
+        self.policy_model = LuxUNetModelInferenceWrapper(base_policy_model, self.n_stack)
         self.value_model = LuxValueConvModel(
             state_space_size=len(State),
             global_state_space_size=len(GlobalState),
             n_stack=self.n_stack,
         )
 
-        if self.model_config["pretrained_path"]:
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            ckpt = torch.load(self.model_config["pretrained_path"], weights_only=False, map_location=device)
-            state_dict = {k.replace("model.", ""): v for k, v in ckpt["state_dict"].items()}
-            self.policy_model.load_state_dict(state_dict)
-            print(f"Loaded model from {self.model_config['pretrained_path']} {device=}")
-
         self._values = None
 
     @override(TorchRLModule)
-    def _forward(self, batch, **kwargs):
+    def _forward(self, batch, is_train: bool = False, **kwargs):
         # (batch, stack, ch, height, width)であり,stackはモデルによって異なる。大きめのstackで渡ってくるためモデルに合わせて変形する
         batch[Columns.OBS]["state"] = batch[Columns.OBS]["state"][:, -self.n_stack :, :, :, :].clone()
         batch[Columns.OBS]["global_state"] = batch[Columns.OBS]["global_state"][:, -self.n_stack :].clone()
 
         batch_size = batch[Columns.OBS]["state"].shape[0]
-        outputs = self.policy_model(batch[Columns.OBS])
+        outputs = self.policy_model(batch[Columns.OBS], is_train)
         policy_logits = outputs["policy"]
         sap_logits = outputs["sap"]
         opp_unit_map = batch[Columns.OBS]["opp_unit_map"]  # 反転処理は元々していないためここでも反転はしない
@@ -576,12 +583,14 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
 
     @override(TorchRLModule)
     def _forward_train(self, batch, **kwargs):
-        return self._forward(batch, **kwargs)
+        return self._forward(batch, is_train=True, **kwargs)
 
     @override(TorchRLModule)
-    def _inference_forward(self, batch, **kwargs):
-        pass
-
+    def _forward_inference(self, batch, **kwargs):
+        # 各試合の1step目の場合cacheをreset
+        if batch[Columns.OBS]["global_state"][GlobalState.MATCH_STEPS] == 0:
+            self.policy_model.reset()
+        return self._forward(batch, is_train=False, **kwargs)
 
     @override(ValueFunctionAPI)
     def compute_values(self, batch: dict[str, Any], embeddings: Any | None = None) -> torch.Tensor:

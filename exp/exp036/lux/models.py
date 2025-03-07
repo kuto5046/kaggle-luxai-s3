@@ -622,22 +622,24 @@ class LuxUNetModel(nn.Module):
             # "value": value_logits,
         }
 
+
 class LuxUNetModelInferenceWrapper:
     """
     LuxUNetModelの推論時間を短縮するためのラッパークラス。
     過去のステップの計算結果をキャッシュして再利用することで、計算量を削減します。
     特に、UNetのエンコーダー・デコーダー部分の出力をキャッシュします。
     """
+
     def __init__(self, model: LuxUNetModel, n_stack: int):
         self.model = model
         self.n_stack = n_stack
         # up3の出力をキャッシュ
-        self.cached_features = None
-    
+        self.cached_features = None  # (1, t, c, x, y)
+
     def reset(self):
         """キャッシュをリセットします。エピソードの開始時に呼び出してください。"""
         self.cached_features = None
-    
+
     def _unet_forward(self, state: torch.Tensor, global_state: torch.Tensor) -> dict[str, torch.Tensor]:
         # モデルの内部状態にアクセスして特徴量を取得
         _n, _t, _c, _x, _y = state.shape
@@ -646,22 +648,22 @@ class LuxUNetModelInferenceWrapper:
         x2 = self.model.down1(x1)
         x3 = self.model.down2(x2)
         x4 = self.model.down3(x3)
-        
+
         # グローバル状態の処理
         sx, sy = x4.shape[2:]
         _n_t, _c = global_state.view(-1, global_state.size(-1)).shape
         gx = global_state.view(-1, _c, 1, 1)
         gx = gx.repeat(1, 1, sx, sy)
-        
+
         x4 = torch.cat([x4, gx], dim=1)
-        
+
         x = self.model.up1(x4, x3)
         x = self.model.up2(x, x2)
         x = self.model.up3(x, x1)
-        
+        x = x.view(_n, _t, -1, _x, _y)
         return x
 
-    def _forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def _policy_forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         sap_logits1 = self.model.sap_net1(x)
         sap_logits2 = self.model.sap_net2(sap_logits1)
         sap_logits = self.model.sap_net3(sap_logits2)
@@ -672,10 +674,43 @@ class LuxUNetModelInferenceWrapper:
         policy_logits = self.model.policy_net2(policy_features)
         policy_logits = self.model.policy_net3(policy_logits)
         policy_logits = self.model.policy_net4(policy_logits)
-        return policy_logits, sap_logits
+        return {"policy": policy_logits, "sap": sap_logits}
 
+    def _forward_train(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        return self.model(batch)
 
-    def __call__(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    def _forward_inference(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        state = batch["state"]
+        global_state = batch["global_state"]
+        _n, _t, _c, _x, _y = state.shape
+
+        # 初回実行時またはn_stackが変わった場合は全て計算
+        if self.cached_features is None:
+            # 特徴量をキャッシュ
+            with torch.no_grad():
+                self.cached_features = self._unet_forward(state, global_state)
+            return self._policy_forward(self.cached_features.view(_n, -1, _x, _y))
+
+        # 最新ステップのstackのみ取り出して計算
+        latest_state = batch["state"][:, -1:, :, :, :]
+        latest_global_state = batch["global_state"][:, -1:, :]
+        with torch.no_grad():
+            # 最新のstateのみunetで特徴量抽出
+            x = self._unet_forward(latest_state, latest_global_state)
+            latest_features = x.view(_n, 1, -1, _x, _y)  # (n, 1, c, x, y)
+
+        # 古い特徴量を削除し、最新の特徴量を追加
+        self.cached_features = torch.cat(
+            [
+                self.cached_features[:, 1:],  # (1, n_stack-1, c, x, y)
+                latest_features,  # (1, 1, c, x, y)
+            ],
+            dim=1,
+        )
+        # キャッシュされた特徴量を使って残りの処理を実行
+        return self._policy_forward(self.cached_features.view(_n, -1, _x, _y))
+
+    def __call__(self, batch: dict[str, torch.Tensor], is_train: bool = False) -> dict[str, torch.Tensor]:
         """
         モデルの推論を行います。過去のステップの計算結果を再利用します。
         Args:
@@ -683,41 +718,10 @@ class LuxUNetModelInferenceWrapper:
         Returns:
             dict[str, torch.Tensor]: モデルの出力。
         """
-        state = batch["state"]
-        global_state = batch["global_state"]
-        _n, _t, _c, _x, _y = state.shape
-        
-        # 初回実行時またはn_stackが変わった場合は全て計算
-        if self.cached_states is None:
-            result = self.model(batch)
-            
-            # 特徴量をキャッシュ
-            with torch.no_grad():
-                x = self._unet_forward(state, global_state)
-                x = x.view(_n, -1, _x, _y)
-                self.cached_features = x.clone()
-            return result
-    
-        # 最新ステップの特徴量を計算
-        latest_state = batch['state'][:, -1:, :, :, :]
-        latest_global_state = batch['global_state'][:, -1:, :]
-        with torch.no_grad():
-            # 最新のstateのみunetで特徴量抽出
-            x = self._unet_forward(latest_state, latest_global_state)
-            latest_features = x.view(_n, 1, -1, _x, _y)  # (n, 1, c, x, y)
-        
-            # 古い特徴量を削除し、最新の特徴量を追加
-            self.cached_features = torch.cat([
-                self.cached_features[:, 1:], 
-                latest_features
-            ], dim=1)
-            # キャッシュされた特徴量を使って残りの処理を実行
-            policy_logits, sap_logits = self._forward(self.cached_features)
-        
-        return {
-            "policy": policy_logits,
-            "sap": sap_logits,
-        }
+        if is_train:
+            return self._forward_train(batch)
+        else:
+            return self._forward_inference(batch)
 
 
 class MaskedFocalTverskyLoss(nn.Module):
