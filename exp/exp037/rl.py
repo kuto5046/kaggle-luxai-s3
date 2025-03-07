@@ -506,18 +506,31 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
         else:
             raise ValueError(f"Invalid model name: {model_name}")
 
+        # 現在のデバイスを取得
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # デバイスインデックスを取得（複数GPUの場合に重要）
+        if torch.cuda.is_available():
+            # 現在のプロセスに割り当てられているGPUを使用
+            device = torch.device(f"cuda:{torch.cuda.current_device()}")
+
         if self.model_config["pretrained_path"]:
-            load_pretrained_model(base_policy_model, model_name, self.model_config["pretrained_path"])
+            # デバイスを明示的に指定してモデルをロード
+            ckpt = torch.load(self.model_config["pretrained_path"], weights_only=False, map_location=device)
+            state_dict = {k.replace("model.", ""): v for k, v in ckpt["state_dict"].items()}
+            base_policy_model.load_state_dict(state_dict)
+            base_policy_model.to(device)
+            print(f"Loaded model from {self.model_config['pretrained_path']} on {device}")
 
         if self.model_config["freeze"]:
             freeze(base_policy_model, model_name)
 
+        # モデルを明示的に同じデバイスに配置
         self.policy_model = LuxUNetModelInferenceWrapper(base_policy_model, self.n_stack)
         self.value_model = LuxValueConvModel(
             state_space_size=len(State),
             global_state_space_size=len(GlobalState),
             n_stack=self.n_stack,
-        )
+        ).to(device)
 
         self._values = None
 
