@@ -1,3 +1,4 @@
+import os
 from enum import IntEnum, auto
 from typing import Any
 
@@ -6,6 +7,10 @@ import torch
 from scipy.special import softmax
 
 from .params import EnvParams, env_params_ranges
+
+
+def is_kaggle_environment() -> bool:
+    return os.path.exists("/kaggle_simulations/agent")
 
 
 class State(IntEnum):
