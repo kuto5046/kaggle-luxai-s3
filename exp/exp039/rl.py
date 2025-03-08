@@ -79,7 +79,6 @@ CPU_COUNT = os.cpu_count()
 OWN_POLICY = "p0"
 BEST_POLICY = "best"
 LB_BEST_POLICY = "lb_best"
-SELF_PLAY_POLICY = "self-play"
 
 
 class Model(IntEnum):
@@ -92,7 +91,7 @@ class Config:
     # common
     exp_name: str = Path(__file__).parent.name
     debug: bool = False
-    notes: str = "unet cacheとflowの高速化を実施"
+    notes: str = "self-play修正"
     env_name: str = "lux-s3-v0"
     root_dir: Path = Path("/home/user/work")
     exp_dir: Path = root_dir / f"exp/{exp_name}"
@@ -123,9 +122,9 @@ class Config:
     # そこで0を指定しlocal learnerとして動かし直接コードで学習時にcudaを指定するようにしている
     num_learners: int = 0
     # 評価用
-    evaluation_num_env_runners: int = 25
+    evaluation_num_env_runners: int = 5
     # データ収集用
-    num_env_runners: int = 70
+    num_env_runners: int = 18
 
     # 学習設定
     training_minutes: int = 60 * 24  # 1日
@@ -141,7 +140,7 @@ class Config:
     # learner
     gamma: float = 0.9995
     lr: float = 1e-5
-    train_batch_size_per_learner: int = 256
+    train_batch_size_per_learner: int = 512
     num_epochs: int = 1  # 1回の学習のepoch数。新しいデータがどんどん追加されてくるためepoch数は1にしている
     replay_proportion: float = 0.0  # リプレイバッファの割合
     # loss
@@ -151,14 +150,14 @@ class Config:
     entropy_coeff: float = 1e-5  # エントロピーのlossの係数(大きくすると探索が活発になる)
     sap_loss_coeff: float = 1e-3  # sapのlossの係数
     # reward
-    point_weight: float = 0  # マッチの報酬を超えないようにすべきなので適用する場合1e-3程度
+    point_weight: float = 1e-3  # マッチの報酬を超えないようにすべきなので適用する場合1e-3程度
 
     def __post_init__(self):
         if self.debug:
             self.num_env_runners = 1
             self.num_cpus_per_env_runner = 1
             self.evaluation_num_env_runners = 1
-            self.evaluation_interval = 100
+            self.evaluation_interval = 1
             self.evaluation_duration = 1
             self.training_minutes = 10
             self.train_batch_size_per_learner = 128
@@ -268,7 +267,11 @@ class RLLibLuxEnv(MultiAgentEnv):
         self.env_params = params
         self.obs, self.state = self.env.reset(reset_key, params=self.env_params)
         self.obs = to_numpy(flax.serialization.to_state_dict(self.obs))
-        infos = {player_id: {} for player_id in self.obs.keys()}
+        # infos = {player_id: {} for player_id in self.obs.keys()}
+        infos = {
+            f"{self.agents[0]}": {"point": 0},
+            f"{self.agents[1]}": {"point": 0},
+        }
         self.prev_actions = {
             "player_0": np.zeros((EnvParams.max_units, 3), dtype=np.int32),
             "player_1": np.zeros((EnvParams.max_units, 3), dtype=np.int32),
@@ -407,9 +410,12 @@ class RLLibLuxEnv(MultiAgentEnv):
         truncated = {agent_id: done.item() for agent_id, done in _truncated.items()}
         # "__all__" (required) is used to indicate env termination.
         terminated["__all__"] = np.all(list(truncated.values()))  # luxaiはtruncatedがTrueになる
-        info = {agent_id: {} for agent_id in self.agents}
+        infos = {
+            f"{self.agents[0]}": {"point": player0_point},
+            f"{self.agents[1]}": {"point": player1_point},
+        }
         reward = self.reward_fn(_reward, player0_point, player1_point, self.point_weight)
-        return state, reward, terminated, truncated, info
+        return state, reward, terminated, truncated, infos
 
     def reward_fn(
         self, raw_reward: jnp.ndarray, player0_point: int, player1_point: int, point_weight: float = 0
@@ -616,6 +622,8 @@ class EpisodeStatsCollector:
     def __init__(self):
         self.runner_episode_end_times = deque(maxlen=100)  # 直近100エピソードの終了時間を保存して速度を計測する
         self.eval_episode_end_times = deque(maxlen=100)  # 直近100エピソードの終了時間を保存して速度を計測する
+        self.eval_player0_points = deque(maxlen=100)
+        self.eval_player1_points = deque(maxlen=100)
         self.runner_total_episodes = 0
         self.eval_total_episodes = 0
         self.last_log_time = time()
@@ -625,10 +633,12 @@ class EpisodeStatsCollector:
         self.is_evaluation_active = False
         self.best_win_rate = 0
 
-    def add_episode(self, in_evaluation: bool):
+    def add_episode(self, in_evaluation: bool, player0_point: int, player1_point: int):
         if in_evaluation:
             self.eval_episode_end_times.append(time())
             self.eval_total_episodes += 1
+            self.eval_player0_points.append(player0_point)
+            self.eval_player1_points.append(player1_point)
         else:
             self.runner_episode_end_times.append(time())
             self.runner_total_episodes += 1
@@ -638,6 +648,8 @@ class EpisodeStatsCollector:
         self.current_evaluation_id += 1
         self.evaluation_wins = []
         self.eval_total_episodes = 0
+        self.eval_player0_points = deque(maxlen=100)
+        self.eval_player1_points = deque(maxlen=100)
         return self.current_evaluation_id
 
     def record_evaluation_result(self, is_win):
@@ -649,10 +661,14 @@ class EpisodeStatsCollector:
         wins = sum(self.evaluation_wins) if self.evaluation_wins else 0
         total = len(self.evaluation_wins)
         win_rate = wins / total if total > 0 else 0
+        player0_point = np.mean(self.eval_player0_points)
+        player1_point = np.mean(self.eval_player1_points)
         return {
             "wins": wins,
             "total": total,
             "win_rate": win_rate,
+            "player0_point": player0_point,
+            "player1_point": player1_point,
         }
 
     def get_best_win_rate(self):
@@ -860,6 +876,8 @@ class WandbLoggerCallback(RLlibCallback):
                 "evaluate/evaluation_minutes": evaluation_minutes,
                 "evaluate/win_rate": current_win_rate,
                 "evaluate/num_episodes": eval_stats["total"],
+                "evaluate/player0_point": eval_stats["player0_point"],
+                "evaluate/player1_point": eval_stats["player1_point"],
             }
         )
 
@@ -884,10 +902,13 @@ class WandbLoggerCallback(RLlibCallback):
         metrics_logger: MetricsLogger | None = None,
         **kwargs,
     ) -> None:
+        all_infos = episode.get_infos()
+        player0_point = np.sum([info["point"] for info in all_infos["player_0"]])
+        player1_point = np.sum([info["point"] for info in all_infos["player_1"]])
         # rolloutのepisodeがちゃんと集計されているか怪しい
         in_evaluation = env_runner.config.in_evaluation
         # エピソード完了を記録
-        ray.get(self._stats_collector.add_episode.remote(in_evaluation))
+        ray.get(self._stats_collector.add_episode.remote(in_evaluation, player0_point, player1_point))
 
         episode_rewards = episode.get_rewards()
         episode_total_reward = {k: sum(v) for k, v in episode_rewards.items()}
@@ -898,12 +919,12 @@ class WandbLoggerCallback(RLlibCallback):
             ray.get(self._stats_collector.record_evaluation_result.remote(is_win))
             stats = ray.get(self._stats_collector.get_speed_stats.remote(in_evaluation))
             self.logger.info(
-                f"Evaluation Episode {stats['total_episodes']} finished. {is_win=} {episode_total_reward=} Episode duration: {episode_duration_s:.2f} sec"
+                f"Evaluation Episode {stats['total_episodes']} finished. {is_win=} {episode_total_reward=} {player0_point=} {player1_point=} Episode duration: {episode_duration_s:.2f} sec"
             )
         else:
             stats = ray.get(self._stats_collector.get_speed_stats.remote(in_evaluation))
             self.logger.info(
-                f"Env Runner Episode {stats['total_episodes']} finished. {is_win=} {episode_total_reward=} Truncated Episode duration: {episode_duration_s:.2f} sec"
+                f"Env Runner Episode {stats['total_episodes']} finished. {is_win=} {episode_total_reward=} {player0_point=} {player1_point=} Episode duration: {episode_duration_s:.2f} sec"
             )
 
 
@@ -1248,7 +1269,6 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
             # RLで扱うagent(policy)の名前
             policies={
                 OWN_POLICY,
-                SELF_PLAY_POLICY,
                 BEST_POLICY,
                 # LB_BEST_POLICY,  # cpuで動かすと遅すぎるので現在は使用していない TODO: onnx変換試す
             },
@@ -1258,14 +1278,14 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
                 if aid == "player_0"
                 else random.choice(
                     [
-                        SELF_PLAY_POLICY,
+                        OWN_POLICY,  # self-play
                         BEST_POLICY,
                         # LB_BEST_POLICY,
                     ]
                 )
             ),
-            # 学習は自身のpolicyとself-playのpolicyを学習
-            policies_to_train=[OWN_POLICY, SELF_PLAY_POLICY],
+            # 学習は自身のpolicyのみ学習
+            policies_to_train=[OWN_POLICY],
         )
         # https://docs.ray.io/en/latest/rllib/rllib-rlmodule.html#construction-through-rlmodulespecs
         .rl_module(
@@ -1273,7 +1293,6 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
                 # policy名とモデルの紐づけ
                 rl_module_specs={
                     OWN_POLICY: best_rl_module_spec,
-                    SELF_PLAY_POLICY: best_rl_module_spec,
                     BEST_POLICY: best_rl_module_spec,
                     # LB_BEST_POLICY: lb_best_rl_module_spec,
                 }
@@ -1282,6 +1301,10 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
         .framework(
             framework="torch",
             eager_tracing=True,
+            # モデルのコンパイルを行う設定。3090環境では速度改善効果はなかった.
+            # torch_compile_worker=True,
+            # torch_compile_worker_dynamo_backend="onnxrt",
+            # torch_compile_worker_dynamo_mode="default",
         )
         .callbacks(WandbLoggerCallback)
         .evaluation(
