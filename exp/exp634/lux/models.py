@@ -299,6 +299,7 @@ class LaxLitModel(LightningModule):
             on_epoch=True,
             prog_bar=False,
             logger=True,
+            sync_dist=True,
         )
         self.log(
             f"SapLoss/{mode}",
@@ -307,32 +308,8 @@ class LaxLitModel(LightningModule):
             on_epoch=True,
             prog_bar=False,
             logger=True,
+            sync_dist=True,
         )
-        # self.log(
-        #     f"ValueLoss/{mode}",
-        #     value_loss,
-        #     on_step=False,
-        #     on_epoch=True,
-        #     prog_bar=False,
-        #     logger=True,
-        # )
-        # self.log(
-        #     f"StateLoss/{mode}",
-        #     state_loss,
-        #     on_step=False,
-        #     on_epoch=True,
-        #     prog_bar=False,
-        #     logger=True,
-        # )
-
-        # self.log(
-        #     f"GlobalStateLoss/{mode}",
-        #     global_state_loss,
-        #     on_step=False,
-        #     on_epoch=True,
-        #     prog_bar=False,
-        #     logger=True,
-        # )
         self.log(
             f"Loss/{mode}",
             loss,
@@ -340,6 +317,7 @@ class LaxLitModel(LightningModule):
             on_epoch=True,
             prog_bar=False,
             logger=True,
+            sync_dist=True,
         )
 
         preds = torch.softmax(outputs["policy"], dim=1).argmax(dim=1).flatten()
@@ -360,30 +338,30 @@ class LaxLitModel(LightningModule):
     def on_train_epoch_end(self) -> None:
         # スコア評価
         output = self.train_metrics.compute()
-        self.log_dict(output, on_step=False, on_epoch=True, prog_bar=False, logger=True)
+        self.log_dict(output, on_step=False, on_epoch=True, prog_bar=False, logger=True, sync_dist=True)
         # メトリクスのリセット
         self.train_metrics.reset()
 
     def on_validation_epoch_end(self) -> None:
         # スコア評価
         output = self.valid_metrics.compute()
-        self.log_dict(output, on_step=False, on_epoch=True, prog_bar=False, logger=True)
+        self.log_dict(output, on_step=False, on_epoch=True, prog_bar=False, logger=True, sync_dist=True)
         # best_valid_lossを更新した場合のみconfusion matrixをlogする
         if self.trainer.callback_metrics["Loss/valid"] < self.trainer.callback_metrics.get(
             "best_valid_loss", float("inf")
         ):
             # save_model(self.model, self.output_dir)
             self.trainer.callback_metrics["best_valid_loss"] = self.trainer.callback_metrics["Loss/valid"]
-            wandb.log(
-                {
-                    "confusion_matrix": wandb.plot.confusion_matrix(
-                        probs=None,
-                        y_true=np.concatenate(self.valid_outputs["ground_truth"]),
-                        preds=np.concatenate(self.valid_outputs["predictions"]),
-                        class_names=[action.name for action in Action],
-                    )
-                }
-            )
+            # wandb.log(
+            #     {
+            #         "confusion_matrix": wandb.plot.confusion_matrix(
+            #             probs=None,
+            #             y_true=np.concatenate(self.valid_outputs["ground_truth"]),
+            #             preds=np.concatenate(self.valid_outputs["predictions"]),
+            #             class_names=[action.name for action in Action],
+            #         )
+            #     }
+            # )
         self.valid_outputs = {"ground_truth": [], "predictions": []}
         # メトリクスのリセット
         self.valid_metrics.reset()

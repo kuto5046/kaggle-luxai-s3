@@ -39,7 +39,7 @@ class Config:
     limit_val_batches: float = 1.0
     use_amp: bool = True
     batch_size: int = 1024
-    num_workers: int = 24
+    num_workers: int = 64
     ckpt_path: str = None
     lr: float = 0.001
     weight_decay: float = 0.01
@@ -138,7 +138,7 @@ class TrainPipeline:
         self.trainer = Trainer(
             # default_root_dir=Path.cwd(),
             accelerator="auto",
-            precision="16-mixed" if self.cfg.use_amp else 32,
+            precision="bf16" if self.cfg.use_amp else 32,
             max_epochs=self.cfg.epoch,
             callbacks=self.callbacks,
             logger=self.pl_logger,
@@ -147,6 +147,8 @@ class TrainPipeline:
             limit_train_batches=self.cfg.limit_train_batches,
             limit_val_batches=self.cfg.limit_val_batches,
             deterministic=True,  # for reproducibility
+            devices=2,
+            strategy="ddp_find_unused_parameters_true"
         )
         self.trainer.fit(self.model, datamodule=self.datamodule)
 
