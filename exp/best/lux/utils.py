@@ -1317,7 +1317,7 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
 
         # available_unit_ids = np.where(unit_masks)[0]
         opponent_available_area = episode_store.opponent_tracker.get_opponent_available_positions()
-        # state_map[State.OPP_UNIT_COUNT, :, :] = opponent_available_area / EnvParams.max_units
+        state_map[State.OPP_UNIT_COUNT, :, :] = opponent_available_area / EnvParams.max_units
         for unit_id in range(EnvParams.max_units):
             unit_energy = unit_energies[unit_id]
             x, y = unit_positions[unit_id]
@@ -1339,7 +1339,7 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
                             state_map[State.SAP_AVAILABLE_AREA, ny, nx] = 1
                 # state_map[State.OWN_UNIT_MASK, y, x] = unit_mask
             else:
-                state_map[State.OPP_UNIT_COUNT, y, x] += 1 / EnvParams.max_units
+                # state_map[State.OPP_UNIT_COUNT, y, x] += 1 / EnvParams.max_units
                 state_map[State.OPP_UNIT_ENERGY, y, x] += unit_energy / EnvParams.init_unit_energy
                 opp_unit_position_set.add((x, y))
                 # state_map[State.OPP_UNIT_MASK, y, x] = unit_mask
