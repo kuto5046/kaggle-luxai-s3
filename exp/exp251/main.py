@@ -32,7 +32,11 @@ def agent_fn(observation, configurations):
     sys.path.append(os.path.abspath(dirname))
 
     agent = agent_dict[player]
-    actions = agent.act(step, from_json(obs), remainingOverageTime)
+    try:
+        actions = agent.act(step, from_json(obs), remainingOverageTime)
+    except Exception as e:
+        print("Error in agent.act", e, file=sys.stderr)
+
     return dict(action=actions.tolist())
 
 

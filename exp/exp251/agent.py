@@ -23,7 +23,7 @@ from lux.utils import (
     get_nearby_enemy_unit_ids,
     get_nearby_point_positions,
 )
-from lux.models import LuxUNetModel
+from lux.models import LuxUNetModel, LuxConvLSTMModel, LuxUNetModel309
 from lux.params import EnvParams
 from scipy.special import softmax
 
@@ -41,6 +41,37 @@ class Config:
     debug: bool = False
 
     checkpoint_path: Path = Path(__file__).parent / "output/best_model_exp629.ckpt"
+
+    # exp309 model
+    use_exp309: bool = True
+    n_stack_exp309: int = 8
+    checkpoint_path_exp309: Path = Path(__file__).parent / "output/best_model_exp309.ckpt"
+    params_exp309 = {  # noqa: RUF012
+        "state_space_size": len(State),
+        "global_state_space_size": len(GlobalState),
+        "action_space_size": len(Action),
+        "n_stack": 8,
+        "res": True,
+    }
+    weight_exp309: float = 1.0
+
+    # exp627 model
+    use_exp627: bool = False
+    n_stack_exp627: int = 8
+    checkpoint_path_exp627: Path = Path(__file__).parent / "output/best_model_exp627.ckpt"
+    params_exp627 = {  # noqa: RUF012
+        "state_space_size": len(State),
+        "global_state_space_size": len(GlobalState),
+        "action_space_size": len(Action),
+        "num_layers": 3,
+        "hidden_dim": 64,
+        "kernel_size": 5,
+        "num_repeats": 3,
+    }
+    weight_exp627: float = 1.0
+
+    n_stack_max: int = max([n_stack, n_stack_exp309, n_stack_exp627])
+    weight_total = 1.0 + weight_exp309 * use_exp309 + weight_exp627 * use_exp627
 
 
 ###########################################################################
@@ -143,12 +174,33 @@ class ILAgent:
         self.model.eval()
         if torch.cuda.is_available():
             self.model.cuda()
+
+        # exp309 model
+        if Config.use_exp309:
+            self.model_exp309 = LuxUNetModel309(**Config.params_exp309)
+            ckpt_exp309 = torch.load(Config.checkpoint_path_exp309, weights_only=True, map_location="cpu")
+            state_dict_exp309 = {k.replace("model.", ""): v for k, v in ckpt_exp309["state_dict"].items()}
+            self.model_exp309.load_state_dict(state_dict_exp309)
+            self.model_exp309.eval()
+            if torch.cuda.is_available():
+                self.model_exp309.cuda()
+
+        # exp627 model
+        if Config.use_exp627:
+            self.model_exp627 = LuxConvLSTMModel(**Config.params_exp627)
+            ckpt_exp627 = torch.load(Config.checkpoint_path_exp627, weights_only=True, map_location="cpu")
+            state_dict_exp627 = {k.replace("model.", ""): v for k, v in ckpt_exp627["state_dict"].items()}
+            self.model_exp627.load_state_dict(state_dict_exp627)
+            self.model_exp627.eval()
+            if torch.cuda.is_available():
+                self.model_exp627.cuda()
+
         self.player = None
         self.env_cfg = env_cfg
         # n_stack分のstateを保持するqueue
-        self.stack_states = deque(maxlen=n_stack)
-        self.stack_global_states = deque(maxlen=n_stack)
-        for i in range(n_stack):
+        self.stack_states = deque(maxlen=Config.n_stack_max)
+        self.stack_global_states = deque(maxlen=Config.n_stack_max)
+        for i in range(Config.n_stack_max):
             self.stack_states.append(np.zeros((len(State), 24, 24)))
             self.stack_global_states.append(np.zeros(len(GlobalState)))
 
@@ -198,14 +250,43 @@ class ILAgent:
                 )
             if torch.cuda.is_available():
                 states = {k: v.cuda() for k, v in states.items()}
-            output = self.model(states)
+            output = self.model({k: v[:, -Config.n_stack :].clone() for k, v in states.items()})
+            if Config.use_exp309:
+                output_exp309 = self.model_exp309(
+                    {k: v[:, -Config.n_stack_exp309 :].clone() for k, v in states.items()}
+                )
+            if Config.use_exp627:
+                output_exp627 = self.model_exp627(
+                    {k: v[:1, -Config.n_stack_exp627 :].clone() for k, v in states.items()}
+                )
             if torch.cuda.is_available():
                 output = {k: v.cpu() for k, v in output.items()}
+                if Config.use_exp309:
+                    output_exp309 = {k: v.cpu() for k, v in output_exp309.items()}
+                if Config.use_exp627:
+                    output_exp627 = {k: v.cpu() for k, v in output_exp627.items()}
             if cfg.tta:
                 assert output["policy"].shape[0] == 2
                 assert output["sap"].shape[0] == 2
                 output["policy"] = (output["policy"][:1] + self.transpose_policy(output["policy"][1:2])) / 2
                 output["sap"] = (output["sap"][:1] + self.transpose_sap(output["sap"][1:2])) / 2
+                if Config.use_exp309:
+                    assert output_exp309["policy"].shape[0] == 2
+                    assert output_exp309["sap"].shape[0] == 2
+                    output_exp309["policy"] = (
+                        output_exp309["policy"][:1] + self.transpose_policy(output_exp309["policy"][1:2])
+                    ) / 2
+                    output_exp309["sap"] = (
+                        output_exp309["sap"][:1] + self.transpose_sap(output_exp309["sap"][1:2])
+                    ) / 2
+            if Config.use_exp309:
+                output["policy"] += output_exp309["policy"] * cfg.weight_exp309
+                output["sap"] += output_exp309["sap"] * cfg.weight_exp309
+            if Config.use_exp627:
+                output["policy"] += output_exp627["policy"] * cfg.weight_exp627
+                output["sap"] += output_exp627["sap"] * cfg.weight_exp627
+            output["policy"] /= cfg.weight_total
+            output["sap"] /= cfg.weight_total
             if do_flip:
                 output["sap"] = torch.flip(output["sap"], [-2, -1])
             policy_map = output["policy"].squeeze().numpy()
