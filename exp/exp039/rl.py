@@ -597,7 +597,10 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
     @override(TorchRLModule)
     def _forward_inference(self, batch, **kwargs):
         # 各試合の1step目の場合cacheをreset
-        if batch[Columns.OBS]["global_state"][GlobalState.MATCH_STEPS] == 0:
+        # 通常batch_size=1だがself-playの場合2になる。切り替わり時にcacheをresetする
+        batch_size = batch[Columns.OBS]["global_state"].shape[0]
+        cache_batch_size = self.policy_model.cached_features.shape[0]
+        if batch[Columns.OBS]["global_state"][0, GlobalState.MATCH_STEPS].item() == 0 or cache_batch_size != batch_size:
             self.policy_model.reset()
         return self._forward(batch, is_train=False, **kwargs)
 
