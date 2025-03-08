@@ -123,9 +123,9 @@ class Config:
     # そこで0を指定しlocal learnerとして動かし直接コードで学習時にcudaを指定するようにしている
     num_learners: int = 0
     # 評価用
-    evaluation_num_env_runners: int = 10
+    evaluation_num_env_runners: int = 25
     # データ収集用
-    num_env_runners: int = 80
+    num_env_runners: int = 70
 
     # 学習設定
     training_minutes: int = 60 * 24  # 1日
@@ -136,7 +136,7 @@ class Config:
     rollout_fragment_length: int | str | None = 101
 
     # 評価
-    evaluation_interval: int = 50  # 何回trainをしたら評価を実施するか　１回が30secくらいなので50回で1500sec=25分くらい
+    evaluation_interval: int = 30  # 何回trainをしたら評価を実施するか　１回が30secくらいなので50回で1500sec=25分くらい
     evaluation_duration: int = 50  # 1回の評価で何エピソード分評価するか
     # learner
     gamma: float = 0.9995
@@ -911,8 +911,6 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
     """Implements the IMPALA loss function in torch."""
 
     def apply_device(self, batch: dict, fwd_out: dict, device: str):
-        print(f"apply device: {device}")
-
         # すべての入力テンソルを同じデバイスに移動
         for key, value in batch.items():
             if isinstance(value, dict):
@@ -1327,8 +1325,15 @@ def save_model(trainer: Algorithm, output_dir: Path, suffix: str = "model"):
     rllibのapiを使わず直接モデルを保存する
     モデルの名前はrlmoduleで定義した名前を使う
     """
-    policy_state_dict = trainer.get_module(OWN_POLICY).policy_model
-    value_state_dict = trainer.get_module(OWN_POLICY).value_model
+    rl_module = trainer.get_module(OWN_POLICY)
+
+    # wrapしている場合はmodelを取り出す
+    if hasattr(rl_module.policy_model, "model"):
+        policy_state_dict = rl_module.policy_model.model
+    else:
+        policy_state_dict = rl_module.policy_model
+
+    value_state_dict = rl_module.value_model
 
     torch.save(policy_state_dict, output_dir / f"policy_{suffix}.pth")
     torch.save(value_state_dict, output_dir / f"value_{suffix}.pth")
