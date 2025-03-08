@@ -699,6 +699,10 @@ class LuxUNetModelInferenceWrapper:
             x = self._unet_forward(latest_state, latest_global_state)
             latest_features = x.view(_n, 1, -1, _x, _y)  # (n, 1, c, x, y)
 
+        # Ensure cached features are on the correct device
+        if self.cached_features.device != latest_features.device:
+            self.cached_features = self.cached_features.to(latest_features.device)
+
         # 古い特徴量を削除し、最新の特徴量を追加
         self.cached_features = torch.cat(
             [
@@ -718,10 +722,27 @@ class LuxUNetModelInferenceWrapper:
         Returns:
             dict[str, torch.Tensor]: モデルの出力。
         """
+
+        # deviceの割り当てがうまくいかないためあまり良くないがここで直接モデルとデータのdeviceを指定する
         if is_train:
+            self.model.to("cuda")
+            batch = self.apply_device(batch, "cuda")
             return self._forward_train(batch)
         else:
+            self.model.to("cpu")
+            batch = self.apply_device(batch, "cpu")
             return self._forward_inference(batch)
+
+    def apply_device(self, batch: dict, device: str) -> dict:
+        # すべての入力テンソルを同じデバイスに移動
+        for key, value in batch.items():
+            if isinstance(value, dict):
+                for sub_key, sub_value in value.items():
+                    if isinstance(sub_value, torch.Tensor):
+                        batch[key][sub_key] = sub_value.to(device)
+            elif isinstance(value, torch.Tensor):
+                batch[key] = value.to(device)
+        return batch
 
 
 class MaskedFocalTverskyLoss(nn.Module):

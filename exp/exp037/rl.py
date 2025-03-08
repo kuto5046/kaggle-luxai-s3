@@ -71,6 +71,8 @@ from ray.rllib.algorithms.impala.torch.vtrace_torch_v2 import (
 
 import wandb
 
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # multi-gpuでうまく動作できないためGPU0のみ利用可能に制限している
+
 CPU_COUNT = os.cpu_count()
 
 # policy名
@@ -109,7 +111,7 @@ class Config:
     best_pretrained_path: Path | None = root_dir / "exp/rl_best/output/best_model.ckpt"
     lb_best_pretrained_path: Path | None = root_dir / "exp/lb_best/output/best_model.ckpt"
 
-    num_cpus_per_learner: int = 1  # 私の環境だと1ではflowのtimeoutになる
+    num_cpus_per_learner: int = 1
     num_gpus_per_learner: int = 1
     num_cpus_per_env_runner: int = 1
     num_gpus_per_env_runner: int = 0
@@ -117,8 +119,9 @@ class Config:
     # 以下の3つのrunnerにcpuとgpuを割り振る。cpuの合計値がcpu数を超えないように注意
     # 学習用
     # 　IMPALAの場合gpuが1つならlocal workerとして動かすためlearners=0が推奨される。
-    # multi-gpuの場合はgpu数=learner数が本来は良いのだが動作確認できていない
-    num_learners: int = 4
+    # multi-gpuの場合はgpu数=learner数が本来は良いのだがうまく動作しない
+    # そこで0を指定しlocal learnerとして動かし直接コードで学習時にcudaを指定するようにしている
+    num_learners: int = 0
     # 評価用
     evaluation_num_env_runners: int = 10
     # データ収集用
@@ -155,11 +158,11 @@ class Config:
             self.num_env_runners = 1
             self.num_cpus_per_env_runner = 1
             self.evaluation_num_env_runners = 1
-            self.evaluation_interval = 1
-            self.evaluation_duration = 2
+            self.evaluation_interval = 100
+            self.evaluation_duration = 1
             self.training_minutes = 10
             self.train_batch_size_per_learner = 128
-            self.learner_queue_size = 20
+            self.learner_queue_size = 1
             self.num_epochs = 1
 
 
@@ -471,14 +474,6 @@ def freeze(model: nn.Module, model_name: Model):
         raise ValueError(f"Invalid model name: {model_name}")
 
 
-def load_pretrained_model(model: nn.Module, model_name: Model, pretrained_path: Path):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    ckpt = torch.load(pretrained_path, weights_only=False, map_location=device)
-    state_dict = {k.replace("model.", ""): v for k, v in ckpt["state_dict"].items()}
-    model.load_state_dict(state_dict)
-    print(f"Loaded model from {pretrained_path} {device=}")
-
-
 class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
     @override(TorchRLModule)
     def setup(self):
@@ -494,6 +489,7 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
                 res=True,
             )
         elif model_name == Model.ConvLSTM:
+            assert False, "ConvLSTMはcache未対応"
             base_policy_model = LuxConvLSTMModel(
                 state_space_size=len(State),
                 global_state_space_size=len(GlobalState),
@@ -507,19 +503,13 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
             raise ValueError(f"Invalid model name: {model_name}")
 
         # 現在のデバイスを取得
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        # デバイスインデックスを取得（複数GPUの場合に重要）
-        if torch.cuda.is_available():
-            # 現在のプロセスに割り当てられているGPUを使用
-            device = torch.device(f"cuda:{torch.cuda.current_device()}")
-
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         if self.model_config["pretrained_path"]:
             # デバイスを明示的に指定してモデルをロード
-            ckpt = torch.load(self.model_config["pretrained_path"], weights_only=False, map_location=device)
+            ckpt = torch.load(self.model_config["pretrained_path"], weights_only=False, map_location=self.device)
             state_dict = {k.replace("model.", ""): v for k, v in ckpt["state_dict"].items()}
             base_policy_model.load_state_dict(state_dict)
-            base_policy_model.to(device)
-            print(f"Loaded model from {self.model_config['pretrained_path']} on {device}")
+            print(f"Loaded model from {self.model_config['pretrained_path']} on {self.device}")
 
         if self.model_config["freeze"]:
             freeze(base_policy_model, model_name)
@@ -530,12 +520,12 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
             state_space_size=len(State),
             global_state_space_size=len(GlobalState),
             n_stack=self.n_stack,
-        ).to(device)
-
+        )
+        self.value_model.to(self.device)
         self._values = None
 
     @override(TorchRLModule)
-    def _forward(self, batch, is_train: bool = False, **kwargs):
+    def _forward(self, batch, is_train=False, **kwargs):
         # (batch, stack, ch, height, width)であり,stackはモデルによって異なる。大きめのstackで渡ってくるためモデルに合わせて変形する
         batch[Columns.OBS]["state"] = batch[Columns.OBS]["state"][:, -self.n_stack :, :, :, :].clone()
         batch[Columns.OBS]["global_state"] = batch[Columns.OBS]["global_state"][:, -self.n_stack :].clone()
@@ -607,6 +597,11 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
 
     @override(ValueFunctionAPI)
     def compute_values(self, batch: dict[str, Any], embeddings: Any | None = None) -> torch.Tensor:
+        self.value_model.to("cuda")
+        for key in batch[Columns.OBS]:
+            if isinstance(batch[Columns.OBS][key], torch.Tensor):
+                batch[Columns.OBS][key] = batch[Columns.OBS][key].to("cuda")
+
         outputs = self.value_model(batch[Columns.OBS])
         self._values = outputs["value"].squeeze(dim=1)
         return self._values
@@ -915,6 +910,23 @@ class WandbLoggerCallback(RLlibCallback):
 class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
     """Implements the IMPALA loss function in torch."""
 
+    def apply_device(self, batch: dict, fwd_out: dict, device: str):
+        print(f"apply device: {device}")
+
+        # すべての入力テンソルを同じデバイスに移動
+        for key, value in batch.items():
+            if isinstance(value, dict):
+                for sub_key, sub_value in value.items():
+                    if isinstance(sub_value, torch.Tensor):
+                        batch[key][sub_key] = sub_value.to(device)
+            elif isinstance(value, torch.Tensor):
+                batch[key] = value.to(device)
+
+        # fwd_outのテンソルも同じデバイスに移動
+        for key, value in fwd_out.items():
+            if isinstance(value, torch.Tensor):
+                fwd_out[key] = value.to(device)
+
     @override(TorchLearner)
     def compute_loss_for_module(
         self,
@@ -925,8 +937,10 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
         fwd_out: dict[str, TensorType],
     ) -> TensorType:
         module = self.module[module_id].unwrapped()
-        start_time = time()
+        # start_time = time()
 
+        # multi-gpuだと異なるgpuのデータが混ざる？のでデバイスを揃える
+        self.apply_device(batch, fwd_out, "cuda")
         # TODO (sven): Now that we do the +1ts trick to be less vulnerable about
         #  bootstrap values at the end of rollouts in the new stack, we might make
         #  this a more flexible, configurable parameter for users, e.g.
@@ -1042,14 +1056,14 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
         )
         # 時系列方向の最後のステップはtargetがおかしくなるので学習しない
         sap_loss_time_major[-1, :] = 0
-        mean_sap_loss = sap_loss_time_major.sum() / sap_available_area.sum()
+        mean_sap_loss = sap_loss_time_major.sum() / sap_available_area.sum() * config.sap_loss_coeff
 
         # The summed weighted loss.
         total_loss = (
             mean_pi_loss
             + mean_vf_loss * config.vf_loss_coeff
             + (mean_entropy_loss * self.entropy_coeff_schedulers_per_module[module_id].get_current_value())
-            + mean_sap_loss * config.sap_loss_coeff
+            + mean_sap_loss
         )
 
         # Log important loss stats.
@@ -1066,9 +1080,9 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
             window=1,  # <- single items (should not be mean/ema-reduced over time).
         )
         # Return the total loss.
-        device = fwd_out["unit_mask"].device
-        batch_size = fwd_out["unit_mask"].shape[0]
-        print(f"time: {time() - start_time:.2f} sec {batch_size=} {device=} {module_id=}")
+        # device = fwd_out["unit_mask"].device
+        # batch_size = fwd_out["unit_mask"].shape[0]
+        # print(f"time: {time() - start_time:.2f} sec {batch_size=} {device=} {module_id=}")
         return total_loss
 
 
@@ -1238,7 +1252,7 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
                 OWN_POLICY,
                 SELF_PLAY_POLICY,
                 BEST_POLICY,
-                LB_BEST_POLICY,  # cpuで動かすと遅すぎるので現在は使用していない TODO: onnx変換試す
+                # LB_BEST_POLICY,  # cpuで動かすと遅すぎるので現在は使用していない TODO: onnx変換試す
             },
             # 各agentのポリシーを決める関数
             policy_mapping_fn=lambda aid, episode, **kwargs: (
@@ -1263,7 +1277,7 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
                     OWN_POLICY: best_rl_module_spec,
                     SELF_PLAY_POLICY: best_rl_module_spec,
                     BEST_POLICY: best_rl_module_spec,
-                    LB_BEST_POLICY: lb_best_rl_module_spec,
+                    # LB_BEST_POLICY: lb_best_rl_module_spec,
                 }
             )
         )
