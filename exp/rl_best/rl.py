@@ -17,11 +17,23 @@ import gymnasium as gym
 import jax.numpy as jnp
 import flax.serialization
 from torch import nn
+from lux.utils import (
+    State,
+    Action,
+    GlobalState,
+    EpisodeStore,
+    extract_state,
+    extract_global_state,
+    get_valid_policy_map,
+)
+from lux.models import LuxUNetModel, LuxConvLSTMModel, LuxValueConvModel, LuxUNetModelInferenceWrapper
+from lux.params import EnvParams
 from luxai_s3.env import LuxAIS3Env
 from scipy.signal import convolve2d
 from luxai_s3.utils import to_numpy
 from luxai_s3.params import env_params_ranges
 from ray.tune.registry import register_env
+from lux.imitation_agent import action_map_to_action
 from ray.rllib.core.columns import Columns
 from ray.rllib.utils.typing import ModuleID, TensorType, EpisodeType
 from ray.rllib.env.env_runner import EnvRunner
@@ -58,18 +70,8 @@ from ray.rllib.algorithms.impala.torch.vtrace_torch_v2 import (
 )
 
 import wandb
-from lux.utils import (
-    State,
-    Action,
-    GlobalState,
-    EpisodeStore,
-    extract_state,
-    extract_global_state,
-    get_valid_policy_map,
-)
-from lux.models import LuxUNetModel, LuxConvLSTMModel, LuxValueConvModel
-from lux.params import EnvParams
-from lux.imitation_agent import action_map_to_action
+
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # multi-gpuでうまく動作できないためGPU0のみ利用可能に制限している
 
 CPU_COUNT = os.cpu_count()
 
@@ -90,7 +92,7 @@ class Config:
     # common
     exp_name: str = Path(__file__).parent.name
     debug: bool = False
-    notes: str = "GCPで動かす"
+    notes: str = "unet cacheとflowの高速化を実施"
     env_name: str = "lux-s3-v0"
     root_dir: Path = Path("/home/user/work")
     exp_dir: Path = root_dir / f"exp/{exp_name}"
@@ -117,12 +119,13 @@ class Config:
     # 以下の3つのrunnerにcpuとgpuを割り振る。cpuの合計値がcpu数を超えないように注意
     # 学習用
     # 　IMPALAの場合gpuが1つならlocal workerとして動かすためlearners=0が推奨される。
-    # multi-gpuの場合はgpu数=learner数が本来は良いのだが動作確認できていない
+    # multi-gpuの場合はgpu数=learner数が本来は良いのだがうまく動作しない
+    # そこで0を指定しlocal learnerとして動かし直接コードで学習時にcudaを指定するようにしている
     num_learners: int = 0
     # 評価用
-    evaluation_num_env_runners: int = 10
+    evaluation_num_env_runners: int = 25
     # データ収集用
-    num_env_runners: int = 80
+    num_env_runners: int = 70
 
     # 学習設定
     training_minutes: int = 60 * 24  # 1日
@@ -133,12 +136,12 @@ class Config:
     rollout_fragment_length: int | str | None = 101
 
     # 評価
-    evaluation_interval: int = 50  # 何回trainをしたら評価を実施するか　１回が30secくらいなので50回で1500sec=25分くらい
+    evaluation_interval: int = 30  # 何回trainをしたら評価を実施するか　１回が30secくらいなので50回で1500sec=25分くらい
     evaluation_duration: int = 50  # 1回の評価で何エピソード分評価するか
     # learner
     gamma: float = 0.9995
     lr: float = 1e-5
-    train_batch_size_per_learner: int = 512
+    train_batch_size_per_learner: int = 256
     num_epochs: int = 1  # 1回の学習のepoch数。新しいデータがどんどん追加されてくるためepoch数は1にしている
     replay_proportion: float = 0.0  # リプレイバッファの割合
     # loss
@@ -152,14 +155,14 @@ class Config:
 
     def __post_init__(self):
         if self.debug:
-            self.num_env_runners = 10
+            self.num_env_runners = 1
             self.num_cpus_per_env_runner = 1
             self.evaluation_num_env_runners = 1
             self.evaluation_interval = 100
             self.evaluation_duration = 1
             self.training_minutes = 10
             self.train_batch_size_per_learner = 128
-            self.learner_queue_size = 20
+            self.learner_queue_size = 1
             self.num_epochs = 1
 
 
@@ -478,7 +481,7 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
         model_name = self.model_config["model_name"]
         self.n_stack = self.model_config["n_stack"]
         if model_name == Model.UNet:
-            self.policy_model = LuxUNetModel(
+            base_policy_model = LuxUNetModel(
                 state_space_size=len(State),
                 global_state_space_size=len(GlobalState),
                 action_space_size=len(Action),
@@ -486,7 +489,8 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
                 res=True,
             )
         elif model_name == Model.ConvLSTM:
-            self.policy_model = LuxConvLSTMModel(
+            assert False, "ConvLSTMはcache未対応"
+            base_policy_model = LuxConvLSTMModel(
                 state_space_size=len(State),
                 global_state_space_size=len(GlobalState),
                 action_space_size=len(Action),
@@ -497,32 +501,37 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
             )
         else:
             raise ValueError(f"Invalid model name: {model_name}")
-        if self.model_config["freeze"]:
-            freeze(self.policy_model, model_name)
 
+        # 現在のデバイスを取得
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if self.model_config["pretrained_path"]:
+            # デバイスを明示的に指定してモデルをロード
+            ckpt = torch.load(self.model_config["pretrained_path"], weights_only=False, map_location=self.device)
+            state_dict = {k.replace("model.", ""): v for k, v in ckpt["state_dict"].items()}
+            base_policy_model.load_state_dict(state_dict)
+            print(f"Loaded model from {self.model_config['pretrained_path']} on {self.device}")
+
+        if self.model_config["freeze"]:
+            freeze(base_policy_model, model_name)
+
+        # モデルを明示的に同じデバイスに配置
+        self.policy_model = LuxUNetModelInferenceWrapper(base_policy_model, self.n_stack)
         self.value_model = LuxValueConvModel(
             state_space_size=len(State),
             global_state_space_size=len(GlobalState),
             n_stack=self.n_stack,
         )
-
-        if self.model_config["pretrained_path"]:
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            ckpt = torch.load(self.model_config["pretrained_path"], weights_only=False, map_location=device)
-            state_dict = {k.replace("model.", ""): v for k, v in ckpt["state_dict"].items()}
-            self.policy_model.load_state_dict(state_dict)
-            print(f"Loaded model from {self.model_config['pretrained_path']} {device=}")
-
+        self.value_model.to(self.device)
         self._values = None
 
     @override(TorchRLModule)
-    def _forward(self, batch, **kwargs):
+    def _forward(self, batch, is_train=False, **kwargs):
         # (batch, stack, ch, height, width)であり,stackはモデルによって異なる。大きめのstackで渡ってくるためモデルに合わせて変形する
         batch[Columns.OBS]["state"] = batch[Columns.OBS]["state"][:, -self.n_stack :, :, :, :].clone()
         batch[Columns.OBS]["global_state"] = batch[Columns.OBS]["global_state"][:, -self.n_stack :].clone()
 
         batch_size = batch[Columns.OBS]["state"].shape[0]
-        outputs = self.policy_model(batch[Columns.OBS])
+        outputs = self.policy_model(batch[Columns.OBS], is_train)
         policy_logits = outputs["policy"]
         sap_logits = outputs["sap"]
         opp_unit_map = batch[Columns.OBS]["opp_unit_map"]  # 反転処理は元々していないためここでも反転はしない
@@ -577,10 +586,22 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
 
     @override(TorchRLModule)
     def _forward_train(self, batch, **kwargs):
-        return self._forward(batch, **kwargs)
+        return self._forward(batch, is_train=True, **kwargs)
+
+    @override(TorchRLModule)
+    def _forward_inference(self, batch, **kwargs):
+        # 各試合の1step目の場合cacheをreset
+        if batch[Columns.OBS]["global_state"][GlobalState.MATCH_STEPS] == 0:
+            self.policy_model.reset()
+        return self._forward(batch, is_train=False, **kwargs)
 
     @override(ValueFunctionAPI)
     def compute_values(self, batch: dict[str, Any], embeddings: Any | None = None) -> torch.Tensor:
+        self.value_model.to("cuda")
+        for key in batch[Columns.OBS]:
+            if isinstance(batch[Columns.OBS][key], torch.Tensor):
+                batch[Columns.OBS][key] = batch[Columns.OBS][key].to("cuda")
+
         outputs = self.value_model(batch[Columns.OBS])
         self._values = outputs["value"].squeeze(dim=1)
         return self._values
@@ -889,6 +910,21 @@ class WandbLoggerCallback(RLlibCallback):
 class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
     """Implements the IMPALA loss function in torch."""
 
+    def apply_device(self, batch: dict, fwd_out: dict, device: str):
+        # すべての入力テンソルを同じデバイスに移動
+        for key, value in batch.items():
+            if isinstance(value, dict):
+                for sub_key, sub_value in value.items():
+                    if isinstance(sub_value, torch.Tensor):
+                        batch[key][sub_key] = sub_value.to(device)
+            elif isinstance(value, torch.Tensor):
+                batch[key] = value.to(device)
+
+        # fwd_outのテンソルも同じデバイスに移動
+        for key, value in fwd_out.items():
+            if isinstance(value, torch.Tensor):
+                fwd_out[key] = value.to(device)
+
     @override(TorchLearner)
     def compute_loss_for_module(
         self,
@@ -899,8 +935,10 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
         fwd_out: dict[str, TensorType],
     ) -> TensorType:
         module = self.module[module_id].unwrapped()
-        start_time = time()
+        # start_time = time()
 
+        # multi-gpuだと異なるgpuのデータが混ざる？のでデバイスを揃える
+        self.apply_device(batch, fwd_out, "cuda")
         # TODO (sven): Now that we do the +1ts trick to be less vulnerable about
         #  bootstrap values at the end of rollouts in the new stack, we might make
         #  this a more flexible, configurable parameter for users, e.g.
@@ -1016,14 +1054,14 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
         )
         # 時系列方向の最後のステップはtargetがおかしくなるので学習しない
         sap_loss_time_major[-1, :] = 0
-        mean_sap_loss = sap_loss_time_major.sum() / sap_available_area.sum()
+        mean_sap_loss = sap_loss_time_major.sum() / sap_available_area.sum() * config.sap_loss_coeff
 
         # The summed weighted loss.
         total_loss = (
             mean_pi_loss
             + mean_vf_loss * config.vf_loss_coeff
             + (mean_entropy_loss * self.entropy_coeff_schedulers_per_module[module_id].get_current_value())
-            + mean_sap_loss * config.sap_loss_coeff
+            + mean_sap_loss
         )
 
         # Log important loss stats.
@@ -1040,9 +1078,9 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
             window=1,  # <- single items (should not be mean/ema-reduced over time).
         )
         # Return the total loss.
-        device = fwd_out["unit_mask"].device
-        batch_size = fwd_out["unit_mask"].shape[0]
-        print(f"time: {time() - start_time:.2f} sec {batch_size=} {device=} {module_id=}")
+        # device = fwd_out["unit_mask"].device
+        # batch_size = fwd_out["unit_mask"].shape[0]
+        # print(f"time: {time() - start_time:.2f} sec {batch_size=} {device=} {module_id=}")
         return total_loss
 
 
@@ -1212,7 +1250,7 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
                 OWN_POLICY,
                 SELF_PLAY_POLICY,
                 BEST_POLICY,
-                LB_BEST_POLICY,  # cpuで動かすと遅すぎるので現在は使用していない TODO: onnx変換試す
+                # LB_BEST_POLICY,  # cpuで動かすと遅すぎるので現在は使用していない TODO: onnx変換試す
             },
             # 各agentのポリシーを決める関数
             policy_mapping_fn=lambda aid, episode, **kwargs: (
@@ -1237,7 +1275,7 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
                     OWN_POLICY: best_rl_module_spec,
                     SELF_PLAY_POLICY: best_rl_module_spec,
                     BEST_POLICY: best_rl_module_spec,
-                    LB_BEST_POLICY: lb_best_rl_module_spec,
+                    # LB_BEST_POLICY: lb_best_rl_module_spec,
                 }
             )
         )
@@ -1287,8 +1325,15 @@ def save_model(trainer: Algorithm, output_dir: Path, suffix: str = "model"):
     rllibのapiを使わず直接モデルを保存する
     モデルの名前はrlmoduleで定義した名前を使う
     """
-    policy_state_dict = trainer.get_module(OWN_POLICY).policy_model
-    value_state_dict = trainer.get_module(OWN_POLICY).value_model
+    rl_module = trainer.get_module(OWN_POLICY)
+
+    # wrapしている場合はmodelを取り出す
+    if hasattr(rl_module.policy_model, "model"):
+        policy_state_dict = rl_module.policy_model.model
+    else:
+        policy_state_dict = rl_module.policy_model
+
+    value_state_dict = rl_module.value_model
 
     torch.save(policy_state_dict, output_dir / f"policy_{suffix}.pth")
     torch.save(value_state_dict, output_dir / f"value_{suffix}.pth")

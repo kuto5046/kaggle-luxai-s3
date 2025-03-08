@@ -38,12 +38,18 @@ class Config:
     debug: bool = False
 
     checkpoint_path: Path = Path(__file__).parent.parent / "output/best_model.ckpt"
+    # checkpoint_path: Path = Path(__file__).parent.parent / "output/policy_latest_model.pth"
 
 
 def load_model(model: nn.Module, checkpoint_path: Path) -> nn.Module:
-    ckpt = torch.load(checkpoint_path, weights_only=True, map_location="cpu")
-    state_dict = {k.replace("model.", ""): v for k, v in ckpt["state_dict"].items()}
-    model.load_state_dict(state_dict)
+    # ckptの場合
+    if checkpoint_path.suffix == ".ckpt":
+        ckpt = torch.load(checkpoint_path, weights_only=True, map_location="cpu")
+        state_dict = {k.replace("model.", ""): v for k, v in ckpt["state_dict"].items()}
+        model.load_state_dict(state_dict)
+    else:
+        model.load_state_dict(torch.load(checkpoint_path, weights_only=False, map_location="cpu").state_dict())
+
     model.eval()
     if torch.cuda.is_available():
         model.cuda()
