@@ -37,11 +37,11 @@ class Config:
     stratify: bool = False
     root_dir: Path = Path("/kaggle")
     input_dir: Path = root_dir / "input"
-    episode_dir: Path = root_dir / "episodes"
-    episode_path: Path = root_dir / "episodes/episodes.csv"
+    episode_dir: Path = root_dir / "data/42704976_latest/episodes"
+    episode_path: Path = root_dir / "data/42704976_latest/episodes.csv"
     feature_dir: Path = root_dir / f"output/feature_store/{exp_name}"
     target_team_name: str = "Frog Parade"
-    target_sub_ids: list[int] = field(default_factory=lambda: [42704976, 43152191, 43155694, 43212163, 43212846, 43276830])
+    target_sub_ids: list[int] = field(default_factory=lambda: [42704976])
     validation: bool = False
 
     use_only_win_data: bool = True
