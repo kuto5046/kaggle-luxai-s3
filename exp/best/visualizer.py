@@ -32,9 +32,10 @@ st.set_page_config(layout="wide")
 class Config:
     seed: int = 2025
     n_stack: int = 4
-    team_name: str = "kuto & okumura"
+    team_name: str = "team-k"
     exp_name: str = Path(__file__).parent.name
-    checkpoint_path: Path = Path(f"/home/user/work/exp/{exp_name}/output/best_model.ckpt")
+    checkpoint_path: Path = Path(f"./exp/{exp_name}/output/best_model.ckpt")
+    tta: bool = False
 
 
 def sigmoid(x):
@@ -110,7 +111,7 @@ def extract_results(
         state = extract_state(obs, target_team_id, episode_store)
         global_state = extract_global_state(obs, target_team_id, env_params, episode_store)
         gt_state = extract_gt_state(gt_obs, target_team_id)
-        policy_map, _ = model.predict(obs, target_team_id, episode_store)
+        policy_map, _, sap_map = model.predict(obs, target_team_id, episode_store, cfg)
 
         results["obs"].append(obs)
         results["state"].append(state)
