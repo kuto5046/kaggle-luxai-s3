@@ -157,7 +157,7 @@ class Config:
             self.num_env_runners = 1
             self.num_cpus_per_env_runner = 1
             self.evaluation_num_env_runners = 1
-            self.evaluation_interval = 1
+            self.evaluation_interval = 100
             self.evaluation_duration = 1
             self.training_minutes = 10
             self.train_batch_size_per_learner = 128
@@ -597,10 +597,20 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
     @override(TorchRLModule)
     def _forward_inference(self, batch, **kwargs):
         # 各試合の1step目の場合cacheをreset
-        # 通常batch_size=1だがself-playの場合2になる。切り替わり時にcacheをresetする
-        batch_size = batch[Columns.OBS]["global_state"].shape[0]
-        cache_batch_size = self.policy_model.cached_features.shape[0]
-        if batch[Columns.OBS]["global_state"][0, GlobalState.MATCH_STEPS].item() == 0 or cache_batch_size != batch_size:
+        steps = batch[Columns.OBS]["global_state"][
+            0, -1, GlobalState.MATCH_STEPS
+        ].item()  # 正規化されてるが0は0なのでok
+        if steps == 0:
+            self.policy_model.reset()
+        return self._forward(batch, is_train=False, **kwargs)
+
+    @override(TorchRLModule)
+    def _forward_exploration(self, batch, **kwargs):
+        # 各試合の1step目の場合cacheをreset
+        steps = batch[Columns.OBS]["global_state"][
+            0, -1, GlobalState.MATCH_STEPS
+        ].item()  # 正規化されてるが0は0なのでok
+        if steps == 0:
             self.policy_model.reset()
         return self._forward(batch, is_train=False, **kwargs)
 
