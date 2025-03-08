@@ -34,7 +34,7 @@ class Config:
     n_stack: int = 4
     team_name: str = "team-k"
     exp_name: str = Path(__file__).parent.name
-    checkpoint_path: Path = Path(f"./exp/{exp_name}/output/best_model.ckpt")
+    checkpoint_path: Path = Path(f"/home/user/work/exp/{exp_name}/output/best_model.ckpt")
     tta: bool = False
 
 
