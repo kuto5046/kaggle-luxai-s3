@@ -22,23 +22,65 @@ from lux.utils import (
     get_nearby_enemy_unit_ids,
     get_nearby_point_positions,
 )
-from lux.models import LuxUNetModel
+from lux.models import LuxUNetModel, LuxUNetModel309, LuxConvLSTMModel
 from lux.params import EnvParams
-from scipy.special import softmax
+from scipy.special import expit, softmax
 
 
 class Config:
     seed: int = 2025
     # 確率的な行動を取るかどうか
     stochastic: bool = True  # Falseにするとargmaxで行動を選択する
-    res: bool = True
-    n_stack: int = 4
     # 同じマスに複数のユニットが移動する場合のペナルティ、0=重複を許可(greedy)、1=重複を禁止
     overlap_penalty: float = 2.0
 
-    tta: bool = False
-
-    checkpoint_path: Path = Path(__file__).parent / "output/best_model.ckpt"
+    # model infos
+    model_infos = [  # noqa: RUF012
+        {
+            "module": LuxConvLSTMModel,
+            "n_stack": 8,
+            "params": {
+                "state_space_size": len(State),
+                "global_state_space_size": len(GlobalState),
+                "action_space_size": len(Action),
+                "num_layers": 3,
+                "hidden_dim": 64,
+                "kernel_size": 5,
+                "num_repeats": 3,
+            },
+            "checkpoint_path": Path(__file__).parent / "output/best_model_exp627.ckpt",
+            "tta": True,
+            "weight": 1.0,
+        },
+        {
+            "module": LuxUNetModel,
+            "n_stack": 4,
+            "params": {
+                "state_space_size": len(State),
+                "global_state_space_size": len(GlobalState),
+                "action_space_size": len(Action),
+                "n_stack": 4,
+                "res": True,
+            },
+            "checkpoint_path": Path(__file__).parent / "output/best_model_exp629.ckpt",
+            "tta": True,
+            "weight": 1.0,
+        },
+        # {
+        #     "module": LuxUNetModel309,
+        #     "n_stack": 8,
+        #     "params": {
+        #         "state_space_size": len(State),
+        #         "global_state_space_size": len(GlobalState),
+        #         "action_space_size": len(Action),
+        #         "n_stack": 8,
+        #         "res": True,
+        #     },
+        #     "checkpoint_path": Path(__file__).parent / "output/best_model_exp309.ckpt",
+        #     "tta": True,
+        #     "weight": 1.0,
+        # },
+    ]
 
 
 ###########################################################################
@@ -119,28 +161,44 @@ class MinimumCostFlow:
 
 
 class ILAgent:
-    def __init__(self, env_cfg: EnvParams, checkpoint_path: Path, n_stack: int, res: bool = True) -> None:
-        self.model = LuxUNetModel(
-            state_space_size=len(State),
-            global_state_space_size=len(GlobalState),
-            action_space_size=len(Action),
-            n_stack=n_stack,
-            res=res,
-        )
-        ckpt = torch.load(checkpoint_path, weights_only=True, map_location="cpu")
-        state_dict = {k.replace("model.", ""): v for k, v in ckpt["state_dict"].items()}
-        self.model.load_state_dict(state_dict)
-        self.model.eval()
-        if torch.cuda.is_available():
-            self.model.cuda()
-        self.player = None
-        self.env_cfg = env_cfg
+    def __init__(self, env_cfg: EnvParams) -> None:
+        self.n_stacks = []
+        self.ttas = []
+        self.weights = []
+
+        for i, model_info in enumerate(cfg.model_infos):
+            model = model_info["module"](**model_info["params"])
+            ckpt = torch.load(model_info["checkpoint_path"], weights_only=True, map_location="cpu")
+            state_dict = {k.replace("model.", ""): v for k, v in ckpt["state_dict"].items()}
+            model.load_state_dict(state_dict)
+            model.eval()
+            if torch.cuda.is_available():
+                model.cuda()
+            self.n_stacks.append(model_info["n_stack"])
+            self.ttas.append(model_info["tta"])
+            self.weights.append(model_info["weight"])
+            # time.sleep(0.1)
+
+            if i == 0:
+                self.model0 = model
+            elif i == 1:
+                self.model1 = model
+
+        self.n_stack_max = max(self.n_stacks)
+        self.weight_sum = sum(self.weights)
+
         # n_stack分のstateを保持するqueue
-        self.stack_states = deque(maxlen=n_stack)
-        self.stack_global_states = deque(maxlen=n_stack)
-        for i in range(n_stack):
+        self.stack_states = deque(maxlen=self.n_stack_max)
+        self.stack_global_states = deque(maxlen=self.n_stack_max)
+        for i in range(self.n_stack_max):
             self.stack_states.append(np.zeros((len(State), 24, 24)))
             self.stack_global_states.append(np.zeros(len(GlobalState)))
+
+        self.player = None
+        self.env_cfg = env_cfg
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
 
     def transpose_state(self, state: torch.Tensor) -> torch.Tensor:
         assert state.dim() == 5
@@ -159,6 +217,10 @@ class ILAgent:
         )
         return policy
 
+    def transpose_sap(self, sap: torch.Tensor) -> torch.Tensor:
+        assert sap.dim() == 4
+        return sap.permute(0, 1, 3, 2)
+
     def predict(
         self, obs: dict[str, Any], team_id: int, episode_store: EpisodeStore, cfg: Config
     ) -> tuple[np.ndarray, np.ndarray]:
@@ -176,25 +238,76 @@ class ILAgent:
         if do_flip:
             states["state"] = torch.flip(states["state"], [3, 4])
 
+        policy_maps = []
+        saps = []
+        # policy_map_sum, sap_sum = np.zeros((6, 24, 24)), np.zeros((24, 24))
+
+        if torch.cuda.is_available():
+            states = {k: v.cuda() for k, v in states.items()}
+
         with torch.no_grad():
-            if cfg.tta:
-                states["state"] = torch.cat([states["state"], self.transpose_state(states["state"])], dim=0)
-                states["global_state"] = torch.cat(
-                    [states["global_state"], self.transpose_global_state(states["global_state"])], dim=0
-                )
-            if torch.cuda.is_available():
-                states = {k: v.cuda() for k, v in states.items()}
-            output = self.model(states)
-            if torch.cuda.is_available():
-                output = {k: v.cpu() for k, v in output.items()}
-            if cfg.tta:
-                output["policy"] = (output["policy"][:1] + self.transpose_policy(output["policy"][1:])) / 2
-            if do_flip:
-                output["sap"] = torch.flip(output["sap"], [-2, -1])
-            policy_map = output["policy"].squeeze().numpy()
-            sap = torch.sigmoid(output["sap"]).squeeze().numpy()
-            sap_available_area = state[State.SAP_AVAILABLE_AREA]
-            sap = sap * sap_available_area
+            for i, (n_stack, tta) in enumerate(zip(self.n_stacks, self.ttas)):
+                if i == 0:
+                    model = self.model0
+                elif i == 1:
+                    model = self.model1
+                states_part = {k: v[:, -n_stack:] for k, v in states.items()}
+                if tta:
+                    states_part["state"] = torch.cat(
+                        [states_part["state"], self.transpose_state(states_part["state"])], dim=0
+                    )
+                    states_part["global_state"] = torch.cat(
+                        [states_part["global_state"], self.transpose_global_state(states_part["global_state"])], dim=0
+                    )
+                output = model(states_part)
+                if torch.cuda.is_available():
+                    output = {k: v.cpu() for k, v in output.items()}
+                if tta:
+                    assert output["policy"].shape[0] == 2
+                    assert output["sap"].shape[0] == 2
+                    output["policy"] = (output["policy"][:1] + self.transpose_policy(output["policy"][1:2])) / 2
+                    output["sap"] = (output["sap"][:1] + self.transpose_sap(output["sap"][1:2])) / 2
+                if do_flip:
+                    output["sap"] = torch.flip(output["sap"], [-2, -1])
+                policy_map = output["policy"].squeeze().numpy()
+                sap = output["sap"].squeeze().numpy()
+                policy_maps.append(policy_map.copy())
+                saps.append(sap.copy())
+                # policy_map_sum += output["policy"].squeeze().numpy() * self.weight_sum
+                # sap_sum += sap * self.weight_sum
+
+            # if cfg.tta:
+            #     states["state"] = torch.cat([states["state"], self.transpose_state(states["state"])], dim=0)
+            #     states["global_state"] = torch.cat(
+            #         [states["global_state"], self.transpose_global_state(states["global_state"])], dim=0
+            #     )
+            # if torch.cuda.is_available():
+            #     states = {k: v.cuda() for k, v in states.items()}
+            # output = self.model(states)
+            # if torch.cuda.is_available():
+            #     output = {k: v.cpu() for k, v in output.items()}
+            # # if cfg.tta:
+            # #     output["policy"] = (output["policy"][:1] + self.transpose_policy(output["policy"][1:])) / 2
+            # if do_flip:
+            #     output["sap"] = torch.flip(output["sap"], [-2, -1])
+            # policy_map = output["policy"].squeeze().numpy()
+            # sap = torch.sigmoid(output["sap"]).squeeze().numpy()
+            # sap_available_area = state[State.SAP_AVAILABLE_AREA]
+            # sap = sap * sap_available_area
+
+        # calculate weighted average
+        policy_map = np.average(policy_maps, axis=0, weights=self.weights)
+        sap = np.average(saps, axis=0, weights=self.weights)
+
+        # policy_map = policy_maps[-1]
+        # sap = saps[-1]
+
+        # policy_map = policy_map_sum / self.weight_sum
+        # sap = sap_sum / self.weight_sum
+
+        sap = expit(sap)
+        sap_available_area = state[State.SAP_AVAILABLE_AREA]
+        sap = sap * sap_available_area
 
         if do_flip:
             policy_map = np.flip(policy_map, axis=(1, 2)).copy()
@@ -253,7 +366,7 @@ class SingleSapInfo:
 
 cfg = Config()
 seed_everything(cfg.seed, workers=True)
-imitation_model = ILAgent(EnvParams, cfg.checkpoint_path, cfg.n_stack, cfg.res)
+imitation_model = ILAgent(EnvParams)
 
 
 class Agent:
