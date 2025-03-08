@@ -185,7 +185,7 @@ class DataProcessor:
 
         # 一時ファイルを1つのh5ファイルにマージ
         with h5py.File(self.feature_dir / "episodes.h5", "w") as out_f:
-            for episode_id in valid_ids:
+            for episode_id in tqdm(valid_ids, total=len(valid_ids)):
                 temp_path = self.feature_dir / f"temp_{episode_id}.h5"
                 with h5py.File(temp_path, "r") as temp_f:
                     temp_f.copy(f"{episode_id}", out_f)

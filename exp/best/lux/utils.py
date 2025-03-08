@@ -1,3 +1,4 @@
+import os
 from enum import IntEnum, auto
 from typing import Any
 
@@ -6,6 +7,10 @@ import numpy as np
 import torch
 
 from .params import EnvParams, env_params_ranges
+
+
+def is_kaggle_environment() -> bool:
+    return os.path.exists("/kaggle_simulations/agent")
 
 
 class State(IntEnum):
@@ -591,6 +596,75 @@ class EnergyAttackFactorGuesser:
             return (self._sap_dropoff_factor, 0)
 
 
+class OpponetTracker:
+    def __init__(self, my_team_id: int) -> None:
+        self.my_team_id = my_team_id
+        self.reset()
+
+    def update_unit_positions(
+        self, unit_id: int, tile_type_map: np.ndarray, sensor_map: np.ndarray, position: tuple[int, int]
+    ) -> None:
+        nxt_positions = np.zeros((EnvParams.map_height, EnvParams.map_width), dtype=np.int16)
+        dx = [-1, 0, 1, 0]
+        dy = [0, -1, 0, 1]
+        if unit_id in self.non_spawned_units:
+            pass
+        # 現在位置が割れている場合は特定できる
+        elif position[0] != -1 and position[1] != -1 and sensor_map[position[1], position[0]] == 1:
+            nxt_positions[position[1], position[0]] = 1
+        else:
+            # (x,y)にいる可能性があるかを調べる
+            for y in range(EnvParams.map_height):
+                for x in range(EnvParams.map_width):
+                    if sensor_map[y, x] == 0:
+                        nxt_positions[y, x] = self.positions[unit_id, y, x]
+                        for i in range(4):
+                            nx = x + dx[i]
+                            ny = y + dy[i]
+                            if in_map((nx, ny)) and tile_type_map[y, x] != TileType.ASTEROID:
+                                if self.positions[unit_id, ny, nx] == 1:
+                                    nxt_positions[y, x] = 1
+                    else:
+                        # 今見えているところにはいないことがわかっている
+                        nxt_positions[y, x] = 0
+
+        self.positions[unit_id, :, :] = nxt_positions
+
+    def update(self, obs: dict[str, Any], tile_type_map: np.ndarray) -> None:
+        # 全てのユニットの位置を更新
+        sensor = np.array(obs["sensor_mask"]).T
+        for unit_id in range(EnvParams.max_units):
+            x, y = obs["units"]["position"][1 - self.my_team_id][unit_id]
+            self.update_unit_positions(unit_id, tile_type_map, sensor, (x, y))
+
+        # spawnする
+        step = obs["match_steps"] if isinstance(obs["match_steps"], int) else obs["match_steps"].item()
+        if (step + 2) % EnvParams.spawn_rate == 0 and len(self.non_spawned_units) > 0:
+            next_unit_id = min(self.non_spawned_units)
+            pos = (0, 0) if self.my_team_id == 1 else (EnvParams.map_width - 1, EnvParams.map_height - 1)
+            self.positions[next_unit_id, pos[1], pos[0]] = 1
+            self.non_spawned_units.remove(next_unit_id)
+
+        # 死んだユニットを探して消す
+        for unit_id in range(EnvParams.max_units):
+            x, y = obs["units"]["position"][1 - self.my_team_id][unit_id]
+            energy = obs["units"]["energy"][1 - self.my_team_id][unit_id]
+            if x != -1 and y != -1 and sensor[y, x] == 1 and energy < 0:
+                self.positions[unit_id, :, :] = 0
+                self.non_spawned_units.add(unit_id)
+
+    def reset(self) -> None:
+        self.positions = np.zeros((EnvParams.max_units, EnvParams.map_height, EnvParams.map_width), dtype=np.int16)
+        self.non_spawned_units = set(range(EnvParams.max_units))
+
+    def get_opponent_available_positions(self) -> np.ndarray:
+        # self.positions[unit]ごとにnormalization
+        norm_factor = self.positions.sum(axis=(1, 2))
+        norm_factor = np.where(norm_factor == 0, 1, norm_factor)
+        normalized_positions = self.positions / norm_factor[:, None, None]
+        return normalized_positions.sum(axis=0)
+
+
 class EpisodeStore:
     def __init__(
         self,
@@ -636,6 +710,7 @@ class EpisodeStore:
         self.energy_attack_guesser = EnergyAttackFactorGuesser(target_team_id, self.unit_sap_cost, self.unit_move_cost)
         self.max_sensor_range = env_params_ranges["unit_sensor_range"][-1]
         self.unit_sensor_range = env_cfg["unit_sensor_range"]
+        self.opponent_tracker = OpponetTracker(target_team_id)
         self.reset()
 
     def reset(self) -> None:
@@ -645,6 +720,7 @@ class EpisodeStore:
         self._is_popup_relic_in_this_match = False
         self._visit_count = np.zeros((EnvParams.map_height, EnvParams.map_width), dtype=np.float32)
         self.prev_obs = None
+        self.opponent_tracker.reset()
 
         if not self._is_finished_relic_search():
             # ないと判定されているところも発生する可能性があるため-1にする
@@ -712,6 +788,7 @@ class EpisodeStore:
         self.energy_node_guesser.update_energy(obs)
         self.nebula_tile_vision_reduction_guesser._update_nebula_tile_vision_reduction(obs)
         self.energy_attack_guesser.update(obs, self.prev_obs, actions, self.energy_node_guesser)
+        self.opponent_tracker.update(obs, self._tile_type_map)
         self.prev_obs = obs
 
     def _is_finished_relic_search(self) -> bool:
@@ -1239,6 +1316,8 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
         #     state_map[State.OPP_UNIT_ENERGY] *= 1 - (state_map[State.TILE_TYPE] == TileType.ASTEROID)
 
         # available_unit_ids = np.where(unit_masks)[0]
+        opponent_available_area = episode_store.opponent_tracker.get_opponent_available_positions()
+        state_map[State.OPP_UNIT_COUNT, :, :] = opponent_available_area / EnvParams.max_units
         for unit_id in range(EnvParams.max_units):
             unit_energy = unit_energies[unit_id]
             x, y = unit_positions[unit_id]
@@ -1260,7 +1339,7 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
                             state_map[State.SAP_AVAILABLE_AREA, ny, nx] = 1
                 # state_map[State.OWN_UNIT_MASK, y, x] = unit_mask
             else:
-                state_map[State.OPP_UNIT_COUNT, y, x] += 1 / EnvParams.max_units
+                # state_map[State.OPP_UNIT_COUNT, y, x] += 1 / EnvParams.max_units
                 state_map[State.OPP_UNIT_ENERGY, y, x] += unit_energy / EnvParams.init_unit_energy
                 opp_unit_position_set.add((x, y))
                 # state_map[State.OPP_UNIT_MASK, y, x] = unit_mask
@@ -1270,18 +1349,15 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
             for x in range(EnvParams.map_width):
                 if state_map[State.SAP_AVAILABLE_AREA, y, x] != 1:
                     continue
-                condition_ok = True
+                no_enemy_around = True
                 for dx, dy in directions:
                     nx, ny = x + dx, y + dy
                     if not in_map((nx, ny)):
                         continue
-                    if state_map[State.SENSOR_MASK, ny, nx] != 1:
-                        condition_ok = False
+                    if opponent_available_area[ny, nx] > 0:
+                        no_enemy_around = False
                         break
-                    if (nx, ny) in opp_unit_position_set:
-                        condition_ok = False
-                        break
-                if condition_ok:
+                if no_enemy_around:
                     state_map[State.SAP_AVAILABLE_AREA, y, x] = 0
 
     return state_map
