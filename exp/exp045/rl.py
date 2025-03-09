@@ -1330,6 +1330,7 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
             evaluation_duration_unit="episodes",
             evaluation_force_reset_envs_before_iteration=True,  # 各評価の前に環境をリセット
             evaluation_parallel_to_training=True,  # 評価と学習を並列に実行
+            evaluation_sample_timeout_s=60 * 20,  # 評価のタイムアウト時間
             # # 評価用の上書き設定.これにより評価時はlb_bestポリシーと自身の対戦になる
             evaluation_config={
                 "multiagent": {
