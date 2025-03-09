@@ -618,6 +618,7 @@ class OpponetTracker:
             nxt_positions[:, :-1] |= self.positions[unit_id][:, 1:]
             nxt_positions[:, 1:] |= self.positions[unit_id][:, :-1]
             nxt_positions[tile_type_map == TileType.ASTEROID] = 0  # asteroidにはいない
+            nxt_positions[:, :] |= self.positions[unit_id][:, :]  # 前のターンにいる場合はateroid上にも存在しうる
             nxt_positions[sensor_map == 1] = 0  # 今見えているところにはいないことがわかっている
 
         self.positions[unit_id, :, :] = nxt_positions
