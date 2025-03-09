@@ -23,39 +23,33 @@ LOGGER = logging.getLogger(__name__)
 @dataclass
 class Config:
     exp_name: str = Path(__file__).parent.name
-    notes: str = "Frog Parade, ConvLSTM"
+    notes: str = "exp405で更新したbest model"
     seed: int = 2025
     debug: bool = False
     n_splits: int = 5
     use_fold: int = 0
-    root_dir: Path = Path("/kaggle")
+    root_dir: Path = Path("/home/user/work")
     feature_version: str = exp_name
     feature_dir: Path = root_dir / f"output/feature_store/{feature_version}"
     output_dir = root_dir / f"exp/{exp_name}/output"
 
     # trainer
-    epoch: int = 10
+    epoch: int = 30
     limit_train_batches: float = 1.0
     limit_val_batches: float = 1.0
-    use_amp: bool = True
-    batch_size: int = 512
-    num_workers: int = 24
-    ckpt_path: str = "agents/exp622_epoch21/output/best_model.ckpt"
+    use_amp: bool = False
+    batch_size: int = 1024
+    num_workers: int = 20
+    ckpt_path: str = None
     lr: float = 0.001
     weight_decay: float = 0.01
     warmup_step_rate: float = 0.1
-    
     # model
-    num_repeats: int = 3
-    num_layers: int = 3
-    hidden_dim: int = 64
-    n_stack: int = 8
-    kernel_size: int = 5
+    res: bool = True
     aug: bool = True
-    freeze: bool = False
-    
+    n_stack: int = 4
     # loss
-    loss_weight_policy: float = 1
+    loss_weight_policy: float = 1.0
     loss_weight_state: float = 1.0
     loss_weight_global_state: float = 0.0
     # loss_weight_value: float = 0.0
@@ -119,24 +113,18 @@ class TrainPipeline:
         ]
 
     def setup_logger(self) -> None:
-        if not self.cfg.debug:
-            self.pl_logger = WandbLogger(
-                project="kaggle-luxai-s3",
-                entity="okumura",
-                # name=f"{self.cfg.exp_name}",
-                group=self.cfg.exp_name,
-                mode="disabled" if self.cfg.debug else "online",
-                notes=self.cfg.notes,
-            )
-        else:
-            self.pl_logger = None
+        self.pl_logger = WandbLogger(
+            project="kaggle-luxai-s3",
+            entity="kawattataido",
+            # name=f"{self.cfg.exp_name}",
+            group=self.cfg.exp_name,
+            mode="disabled" if self.cfg.debug else "online",
+            notes=self.cfg.notes,
+        )
 
     def setup_model(self) -> None:
-        if self.cfg.ckpt_path:
-            self.model = LaxLitModel.load_from_checkpoint(self.cfg.ckpt_path, cfg=self.cfg, strict=False)
-        else:
-            self.model = LaxLitModel(self.cfg)
-        
+        self.model = LaxLitModel(self.cfg)
+
     def train(self) -> None:
         self.trainer = Trainer(
             # default_root_dir=Path.cwd(),
@@ -151,7 +139,7 @@ class TrainPipeline:
             limit_val_batches=self.cfg.limit_val_batches,
             deterministic=True,  # for reproducibility
         )
-        self.trainer.fit(self.model, datamodule=self.datamodule)
+        self.trainer.fit(self.model, datamodule=self.datamodule, ckpt_path=self.cfg.ckpt_path)
 
     def run(self) -> None:
         self.setup_logger()

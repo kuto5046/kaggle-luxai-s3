@@ -23,7 +23,7 @@ from lux.utils import (
     get_nearby_enemy_unit_ids,
     get_nearby_point_positions,
 )
-from lux.models import LuxConvLSTMModel
+from lux.models import LuxUNetModel
 from lux.params import EnvParams
 from scipy.special import softmax
 
@@ -32,19 +32,15 @@ class Config:
     seed: int = 2025
     # 確率的な行動を取るかどうか
     stochastic: bool = True  # Falseにするとargmaxで行動を選択する
-    # model
-    n_stack: int = 8
-    num_layers: int = 3
-    hidden_dim: int = 64
-    kernel_size: int = 5
-    num_repeats: int = 3
-
+    res: bool = True
+    n_stack: int = 4
+    # 同じマスに複数のユニットが移動する場合のペナルティ、0=重複を許可(greedy)、1=重複を禁止
     overlap_penalty: float = 2.0
 
-    tta: bool = False
+    tta: bool = True
     debug: bool = False
 
-    checkpoint_path: Path = Path(__file__).parent / "output/best_model.ckpt"
+    checkpoint_path: Path = Path(__file__).parent / "output/best_model_exp629.ckpt"
 
 
 ###########################################################################
@@ -133,15 +129,13 @@ class MinimumCostFlow:
 
 
 class ILAgent:
-    def __init__(self, env_cfg: EnvParams, checkpoint_path: Path, n_stack: int) -> None:
-        self.model = LuxConvLSTMModel(
+    def __init__(self, env_cfg: EnvParams, checkpoint_path: Path, n_stack: int, res: bool = True) -> None:
+        self.model = LuxUNetModel(
             state_space_size=len(State),
             global_state_space_size=len(GlobalState),
             action_space_size=len(Action),
-            num_layers=cfg.num_layers,
-            hidden_dim=cfg.hidden_dim,
-            kernel_size=cfg.kernel_size,
-            num_repeats=cfg.num_repeats,
+            n_stack=n_stack,
+            res=res,
         )
         ckpt = torch.load(checkpoint_path, weights_only=True, map_location="cpu")
         state_dict = {k.replace("model.", ""): v for k, v in ckpt["state_dict"].items()}
@@ -175,6 +169,10 @@ class ILAgent:
         )
         return policy
 
+    def transpose_sap(self, sap: torch.Tensor) -> torch.Tensor:
+        assert sap.dim() == 4
+        return sap.permute(0, 1, 3, 2)
+
     def predict(
         self, obs: dict[str, Any], team_id: int, episode_store: EpisodeStore, cfg: Config
     ) -> tuple[np.ndarray, np.ndarray]:
@@ -204,7 +202,10 @@ class ILAgent:
             if torch.cuda.is_available():
                 output = {k: v.cpu() for k, v in output.items()}
             if cfg.tta:
-                output["policy"] = (output["policy"][:1] + self.transpose_policy(output["policy"][1:])) / 2
+                assert output["policy"].shape[0] == 2
+                assert output["sap"].shape[0] == 2
+                output["policy"] = (output["policy"][:1] + self.transpose_policy(output["policy"][1:2])) / 2
+                output["sap"] = (output["sap"][:1] + self.transpose_sap(output["sap"][1:2])) / 2
             if do_flip:
                 output["sap"] = torch.flip(output["sap"], [-2, -1])
             policy_map = output["policy"].squeeze().numpy()
@@ -279,7 +280,7 @@ class SingleSapInfo:
 
 cfg = Config()
 seed_everything(cfg.seed, workers=True)
-imitation_model = ILAgent(EnvParams, cfg.checkpoint_path, cfg.n_stack)
+imitation_model = ILAgent(EnvParams, cfg.checkpoint_path, cfg.n_stack, cfg.res)
 if use_cpp_flow():
     import min_cost_flow
 

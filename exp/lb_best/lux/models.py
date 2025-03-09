@@ -6,7 +6,6 @@ from dataclasses import dataclass
 import h5py
 import numpy as np
 import torch
-import wandb
 import polars as pl
 import torch.nn.functional as F
 from torch import nn, optim
@@ -15,6 +14,8 @@ from torchvision import transforms
 from torchmetrics import Accuracy, MetricCollection
 from transformers import get_cosine_schedule_with_warmup
 from torch.utils.data import Dataset, DataLoader
+
+import wandb
 
 from .utils import State, Action, GlobalState, to_np
 from .params import EnvParams
@@ -224,18 +225,13 @@ class LaxLitModel(LightningModule):
         super().__init__()
         self.cfg = cfg
         self.output_dir = self.cfg.output_dir
-        self.model = LuxConvLSTMModel(
+        self.model = LuxUNetModel(
             state_space_size=len(State),
             global_state_space_size=len(GlobalState),
             action_space_size=len(Action),
-            num_repeats=cfg.num_repeats,
-            num_layers=cfg.num_layers,
-            hidden_dim=cfg.hidden_dim, 
-            kernel_size=cfg.kernel_size,
+            n_stack=cfg.n_stack,
+            res=cfg.res,
         )
-        if self.cfg.freeze:
-            self.freeze()
-        
         self.criterion1 = DiceLoss(n_classes=len(Action))
         # self.criterion1 = MaskedBCEWithLogitsLoss()
         self.criterion2 = nn.BCEWithLogitsLoss()
@@ -249,14 +245,6 @@ class LaxLitModel(LightningModule):
         self.valid_metrics = metrics.clone(postfix="/valid")
         self.valid_outputs = {"ground_truth": [], "predictions": []}
 
-    def freeze(self):
-        for param in self.model.inc.parameters():
-            param.requires_grad = False
-        for param in self.model.drc.parameters():
-            param.requires_grad = False
-        for param in self.model.policy_net.parameters():
-            param.requires_grad = False
-            
     def forward(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
         return self.model(batch)
 
@@ -635,143 +623,6 @@ class LuxUNetModel(nn.Module):
         }
 
 
-class ConvLSTMCell(nn.Module):
-    def __init__(self, input_dim, hidden_dim, kernel_size, bias):
-        super().__init__()
-
-        self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
-
-        self.kernel_size = kernel_size
-        self.padding = kernel_size[0] // 2, kernel_size[1] // 2
-        self.bias = bias
-
-        self.conv = nn.Conv2d(
-            in_channels=self.input_dim + self.hidden_dim,
-            out_channels=4 * self.hidden_dim,
-            kernel_size=self.kernel_size,
-            padding=self.padding,
-            bias=self.bias
-        )
-
-    def init_hidden(self, input_size, batch_size):
-        return (
-            torch.zeros(*batch_size, self.hidden_dim, *input_size),
-            torch.zeros(*batch_size, self.hidden_dim, *input_size),
-        )
-
-    def forward(self, input_tensor, cur_state):
-        h_cur, c_cur = cur_state
-        combined = torch.cat([input_tensor, h_cur], dim=-3)  # (B, C_in + C_hidden, H, W)
-        combined_conv = self.conv(combined)
-        cc_i, cc_f, cc_o, cc_g = torch.split(combined_conv, self.hidden_dim, dim=-3)
-        
-        i = torch.sigmoid(cc_i)
-        f = torch.sigmoid(cc_f)
-        o = torch.sigmoid(cc_o)
-        g = torch.tanh(cc_g)
-
-        c_next = f * c_cur + i * g
-        h_next = o * torch.tanh(c_next)
-        return h_next, c_next
-
-
-class DRC(nn.Module):
-    def __init__(self, num_layers, input_dim, hidden_dim, kernel_size=3, bias=True):
-        super().__init__()
-        self.num_layers = num_layers
-
-        blocks = []
-        for _ in range(self.num_layers):
-            blocks.append(ConvLSTMCell(
-                input_dim=input_dim,
-                hidden_dim=hidden_dim,
-                kernel_size=(kernel_size, kernel_size),
-                bias=bias
-            ))
-        self.blocks = nn.ModuleList(blocks)
-
-    def init_hidden(self, input_size, batch_size, device):
-        hs, cs = [], []
-        for block in self.blocks:
-            h, c = block.init_hidden(input_size, batch_size)
-            h = h.to(device)
-            c = c.to(device)
-            hs.append(h)
-            cs.append(c)
-        return hs, cs
-
-    def forward(self, x, hidden, num_repeats):
-        if hidden is None:
-            hidden = self.init_hidden(x.shape[-2:], x.shape[:-3], device=x.device)
-
-        hs, cs = hidden
-        for _ in range(num_repeats):
-            for i, block in enumerate(self.blocks):
-                input_i = hs[i-1] if i > 0 else x
-                hs[i], cs[i] = block(input_i, (hs[i], cs[i]))
-
-        return hs[-1], (hs, cs)
-    
-
-class LuxConvLSTMModel(nn.Module):
-    def __init__(
-        self,
-        state_space_size: int,
-        global_state_space_size: int,
-        action_space_size: int,
-        num_layers: int,
-        hidden_dim: int, 
-        kernel_size: int = 3,
-        num_repeats: int = 1,
-    ) -> None:
-        super().__init__()
-
-        self.hidden_dim = hidden_dim
-        self.num_layers = num_layers
-        self.num_repeats = num_repeats
-        
-        self.inc = DoubleConv(state_space_size + global_state_space_size, self.hidden_dim, res=False)
-        
-        self.drc = DRC(
-            num_layers=self.num_layers,
-            input_dim=self.hidden_dim,
-            hidden_dim=self.hidden_dim,
-            kernel_size=kernel_size,
-            bias=True
-        )
-
-        self.policy_net = OutConv(self.hidden_dim, action_space_size)
-        self.sap_net = nn.Sequential(
-            ResidualBlock(self.hidden_dim, self.hidden_dim, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False),
-            ResidualBlock(self.hidden_dim, self.hidden_dim, EnvParams.map_width, EnvParams.map_width, squeeze_excitation=False),
-            OutConvWithNorm(self.hidden_dim, 1)
-        )
-
-
-    def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        state = batch["state"]
-        global_state = batch["global_state"]
-        _n, T, _c, _x, _y = state.shape
-        _ng, _tg, _cg = global_state.shape
-        gx = global_state.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, _x, _y)
-        x = torch.cat([state, gx], dim=2)
-
-        hidden = None
-        for t in range(T):
-            xt = x[:, t]
-            xt = self.inc(xt)
-            xt, hidden = self.drc(xt, hidden, num_repeats=self.num_repeats)    
-       
-        policy_logits = self.policy_net(xt)
-        sap_logits = self.sap_net(xt)
-        
-        return {
-            "policy": policy_logits,
-            "sap": sap_logits
-        }
-
-
 class MaskedFocalTverskyLoss(nn.Module):
     def __init__(
         self, alpha: float = 0.5, beta: float = 0.5, gamma: float = 1.0, smooth: float = 1e-6, reduction: str = "mean"
@@ -925,7 +776,58 @@ class ResidualBlock(nn.Module):
         x = self.squeeze_excitation(self.norm2(x))
         x = x + self.change_n_channels(identity)
         return self.final_act(x)
-    
+
+
+class LuxValueConvModel(nn.Module):
+    def __init__(
+        self,
+        state_space_size: int,
+        global_state_space_size: int,
+        n_stack: int,
+        bilinear: bool = True,
+        res: bool = True,
+    ) -> None:
+        super().__init__()
+        self.bilinear = bilinear
+
+        self.inc = DoubleConv(state_space_size, 64, res=res)
+        self.down1 = Down(64, 128, res=res)
+        self.down2 = Down(128, 256, res=res)
+        self.down3 = Down(256, 256, res=res)
+
+        self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.value_net = nn.Sequential(
+            nn.Linear((256 + global_state_space_size) * n_stack, 128),
+            nn.ReLU(),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1),
+        )
+
+    def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        state = batch["state"]
+        global_state = batch["global_state"]
+        _n, _t, _c, _x, _y = state.shape
+        x = state.view(-1, _c, _x, _y)
+        x1 = self.inc(x)
+        x2 = self.down1(x1)
+        x3 = self.down2(x2)
+        x4 = self.down3(x3)
+
+        # sx, syのマップにグローバルステートをブロードキャスト
+        sx, sy = x4.shape[2:]
+        _n, _t, _c = global_state.shape
+        gx = global_state.view(-1, _c, 1, 1)
+        gx = gx.repeat(1, 1, sx, sy)
+
+        x4 = torch.cat([x4, gx], dim=1)
+        x = self.global_avg_pool(x4).view(_n, -1)
+        value_logits = self.value_net(x)
+
+        return {
+            "value": value_logits,
+        }
+
 
 def save_model(model, output_dir: Path, latest: bool = False):
     if latest:
