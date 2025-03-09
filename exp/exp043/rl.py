@@ -91,7 +91,7 @@ class Config:
     # common
     exp_name: str = Path(__file__).parent.name
     debug: bool = False
-    notes: str = "学習を待つ"
+    notes: str = "最終層のみ学習"
     env_name: str = "lux-s3-v0"
     root_dir: Path = Path("/home/user/work")
     exp_dir: Path = root_dir / f"exp/{exp_name}"
@@ -135,7 +135,7 @@ class Config:
     rollout_fragment_length: int | str | None = 101
 
     # 評価
-    evaluation_interval: int = 30  # 何回trainをしたら評価を実施するか　１回が30secくらいなので50回で1500sec=25分くらい
+    evaluation_interval: int = 100  # 何回trainをしたら評価を実施するか　１回が30secくらいなので50回で1500sec=25分くらい
     evaluation_duration: int = 50  # 1回の評価で何エピソード分評価するか
     # learner
     gamma: float = 0.9995
@@ -150,7 +150,7 @@ class Config:
     vtrace_clip_pg_rho_threshold: float = 1.0  # ポリシー勾配のlossの係数
     vf_loss_coeff: float = 1e-1  # 価値関数のlossの係数
     entropy_coeff: float = 1e-5  # エントロピーのlossの係数(大きくすると探索が活発になる)
-    sap_loss_coeff: float = 1e-3  # sapのlossの係数
+    sap_loss_coeff: float = 0  # sapのlossの係数
     # reward
     point_weight: float = 0  # マッチの報酬を超えないようにすべきなので適用する場合1e-3程度
 
@@ -456,18 +456,18 @@ def freeze(model: nn.Module, model_name: Model):
             param.requires_grad = False
 
         # UNet後のpolicyネットワークのパラメータをTrueにする
-        for param in model.sap_net1.parameters():
-            param.requires_grad = True
-        for param in model.sap_net2.parameters():
-            param.requires_grad = True
-        for param in model.sap_net3.parameters():
-            param.requires_grad = True
-        for param in model.policy_net1_from_sap.parameters():
-            param.requires_grad = True
-        for param in model.policy_net2.parameters():
-            param.requires_grad = True
-        for param in model.policy_net3.parameters():
-            param.requires_grad = True
+        # for param in model.sap_net1.parameters():
+        #     param.requires_grad = True
+        # for param in model.sap_net2.parameters():
+        #     param.requires_grad = True
+        # for param in model.sap_net3.parameters():
+        #     param.requires_grad = True
+        # for param in model.policy_net1_from_sap.parameters():
+        #     param.requires_grad = True
+        # for param in model.policy_net2.parameters():
+        #     param.requires_grad = True
+        # for param in model.policy_net3.parameters():
+        #     param.requires_grad = True
         for param in model.policy_net4.parameters():
             param.requires_grad = True
 
