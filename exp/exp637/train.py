@@ -38,7 +38,7 @@ class Config:
     limit_train_batches: float = 1.0
     limit_val_batches: float = 1.0
     use_amp: bool = True
-    batch_size: int = 1024
+    batch_size: int = 2048
     num_workers: int = 24
     ckpt_path: str = None
     lr: float = 0.004
@@ -147,7 +147,7 @@ class TrainPipeline:
             limit_train_batches=self.cfg.limit_train_batches,
             limit_val_batches=self.cfg.limit_val_batches,
             deterministic=True,  # for reproducibility
-            devices=4,
+            devices=2,
             strategy="ddp_find_unused_parameters_true"
         )
         self.trainer.fit(self.model, datamodule=self.datamodule)
