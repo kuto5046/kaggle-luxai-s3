@@ -91,7 +91,7 @@ class Config:
     # common
     exp_name: str = Path(__file__).parent.name
     debug: bool = False
-    notes: str = "best modelを反映してfreeze解除して学習"
+    notes: str = "value loss小さくしてみる"
     env_name: str = "lux-s3-v0"
     root_dir: Path = Path("/home/kyohei.uto/kaggle-luxai-s3")
     exp_dir: Path = root_dir / f"exp/{exp_name}"
@@ -122,9 +122,9 @@ class Config:
     # そこで0を指定しlocal learnerとして動かし直接コードで学習時にcudaを指定するようにしている
     num_learners: int = 0
     # 評価用
-    evaluation_num_env_runners: int = 25
+    evaluation_num_env_runners: int = 5
     # データ収集用
-    num_env_runners: int = 70
+    num_env_runners: int = 18
 
     # 学習設定
     training_minutes: int = 60 * 24  # 1日
@@ -146,7 +146,7 @@ class Config:
     # loss
     vtrace_clip_rho_threshold: float = 1.0  # 価値関数のlossの係数
     vtrace_clip_pg_rho_threshold: float = 1.0  # ポリシー勾配のlossの係数
-    vf_loss_coeff: float = 1.0  # 価値関数のlossの係数
+    vf_loss_coeff: float = 0.1  # 価値関数のlossの係数
     entropy_coeff: float = 1e-5  # エントロピーのlossの係数(大きくすると探索が活発になる)
     sap_loss_coeff: float = 1e-3  # sapのlossの係数
     # reward
@@ -969,7 +969,7 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
         fwd_out: dict[str, TensorType],
     ) -> TensorType:
         module = self.module[module_id].unwrapped()
-        # start_time = time()
+        start_time = time()
 
         # multi-gpuだと異なるgpuのデータが混ざる？のでデバイスを揃える
         self.apply_device(batch, fwd_out, "cuda")
@@ -1112,9 +1112,9 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
             window=1,  # <- single items (should not be mean/ema-reduced over time).
         )
         # Return the total loss.
-        # device = fwd_out["unit_mask"].device
-        # batch_size = fwd_out["unit_mask"].shape[0]
-        # print(f"time: {time() - start_time:.2f} sec {batch_size=} {device=} {module_id=}")
+        device = fwd_out["unit_mask"].device
+        batch_size = fwd_out["unit_mask"].shape[0]
+        print(f"time: {time() - start_time:.2f} sec {batch_size=} {device=} {module_id=}")
         return total_loss
 
 
