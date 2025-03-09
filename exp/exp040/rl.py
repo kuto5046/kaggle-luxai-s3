@@ -91,7 +91,7 @@ class Config:
     # common
     exp_name: str = Path(__file__).parent.name
     debug: bool = False
-    notes: str = "self-play修正"
+    notes: str = "best modelを反映してfreeze解除して学習"
     env_name: str = "lux-s3-v0"
     root_dir: Path = Path("/home/user/work")
     exp_dir: Path = root_dir / f"exp/{exp_name}"
@@ -104,7 +104,7 @@ class Config:
     hidden_dim: int = 64
     kernel_size: int = 5
     num_repeats: int = 3
-    freeze: bool = True
+    freeze: bool = False
     overlap_penalty: float = 2.0
     stochastic: bool = True
     best_pretrained_path: Path | None = root_dir / "exp/rl_best/output/best_model.ckpt"
@@ -122,9 +122,9 @@ class Config:
     # そこで0を指定しlocal learnerとして動かし直接コードで学習時にcudaを指定するようにしている
     num_learners: int = 0
     # 評価用
-    evaluation_num_env_runners: int = 5
+    evaluation_num_env_runners: int = 25
     # データ収集用
-    num_env_runners: int = 18
+    num_env_runners: int = 70
 
     # 学習設定
     training_minutes: int = 60 * 24  # 1日
