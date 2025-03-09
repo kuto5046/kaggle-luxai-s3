@@ -113,7 +113,7 @@ class DataProcessor:
     def _process_episode(self, row) -> tuple[str, int, int]:
         sub_id = row["SubmissionId"]
         episode_id = row["EpisodeId"]
-        episode_path = self.episode_dir / f"{sub_id}/{episode_id}.json.gz"
+        episode_path = self.episode_dir / f"{sub_id}/{episode_id}.json"
 
         try:
             with open(episode_path) as f:
