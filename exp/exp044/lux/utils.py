@@ -605,28 +605,20 @@ class OpponetTracker:
         self, unit_id: int, tile_type_map: np.ndarray, sensor_map: np.ndarray, position: tuple[int, int]
     ) -> None:
         nxt_positions = np.zeros((EnvParams.map_height, EnvParams.map_width), dtype=np.int16)
-        dx = [-1, 0, 1, 0]
-        dy = [0, -1, 0, 1]
         if unit_id in self.non_spawned_units:
             pass
         # 現在位置が割れている場合は特定できる
         elif position[0] != -1 and position[1] != -1 and sensor_map[position[1], position[0]] == 1:
             nxt_positions[position[1], position[0]] = 1
         else:
-            # (x,y)にいる可能性があるかを調べる
-            for y in range(EnvParams.map_height):
-                for x in range(EnvParams.map_width):
-                    if sensor_map[y, x] == 0:
-                        nxt_positions[y, x] = self.positions[unit_id, y, x]
-                        for i in range(4):
-                            nx = x + dx[i]
-                            ny = y + dy[i]
-                            if in_map((nx, ny)) and tile_type_map[y, x] != TileType.ASTEROID:
-                                if self.positions[unit_id, ny, nx] == 1:
-                                    nxt_positions[y, x] = 1
-                    else:
-                        # 今見えているところにはいないことがわかっている
-                        nxt_positions[y, x] = 0
+            # シフト演算で前の位置から移動した場合にいる地点を計算
+            nxt_positions = self.positions[unit_id].copy()  # 移動しない場合
+            nxt_positions[:-1, :] |= self.positions[unit_id][1:, :]
+            nxt_positions[1:, :] |= self.positions[unit_id][:-1, :]
+            nxt_positions[:, :-1] |= self.positions[unit_id][:, 1:]
+            nxt_positions[:, 1:] |= self.positions[unit_id][:, :-1]
+            nxt_positions[tile_type_map == TileType.ASTEROID] = 0  # asteroidにはいない
+            nxt_positions[sensor_map == 1] = 0  # 今見えているところにはいないことがわかっている
 
         self.positions[unit_id, :, :] = nxt_positions
 

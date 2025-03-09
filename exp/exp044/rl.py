@@ -91,9 +91,9 @@ class Config:
     # common
     exp_name: str = Path(__file__).parent.name
     debug: bool = False
-    notes: str = "最終層のみ学習"
+    notes: str = "高速化した上で最終層のみ学習"
     env_name: str = "lux-s3-v0"
-    root_dir: Path = Path("/home/user/work")
+    root_dir: Path = Path("/home/kyohei.uto/kaggle-luxai-s3")
     exp_dir: Path = root_dir / f"exp/{exp_name}"
     output_dir: Path = root_dir / f"output/{exp_name}"
 
@@ -122,9 +122,9 @@ class Config:
     # そこで0を指定しlocal learnerとして動かし直接コードで学習時にcudaを指定するようにしている
     num_learners: int = 0
     # 評価用
-    evaluation_num_env_runners: int = 5
+    evaluation_num_env_runners: int = 25
     # データ収集用
-    num_env_runners: int = 18
+    num_env_runners: int = 70
 
     # 学習設定
     training_minutes: int = 60 * 24  # 1日
@@ -157,13 +157,10 @@ class Config:
     def __post_init__(self):
         if self.debug:
             self.num_env_runners = 1
-            self.num_cpus_per_env_runner = 1
             self.evaluation_num_env_runners = 1
-            self.evaluation_interval = 100
+            self.evaluation_interval = 1
             self.evaluation_duration = 1
             self.training_minutes = 10
-            self.train_batch_size_per_learner = 128
-            self.learner_queue_size = 1
             self.num_epochs = 1
 
 
@@ -1322,7 +1319,7 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
             eager_tracing=True,
             # モデルのコンパイルを行う設定。3090環境では速度改善効果はなかった.
             # torch_compile_worker=True,
-            # torch_compile_worker_dynamo_backend="onnxrt",
+            # torch_compile_worker_dynamo_backend="",
             # torch_compile_worker_dynamo_mode="default",
         )
         .callbacks(WandbLoggerCallback)
@@ -1331,7 +1328,6 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
             evaluation_interval=cfg.evaluation_interval,
             evaluation_duration=cfg.evaluation_duration,
             evaluation_duration_unit="episodes",
-            evaluation_sample_timeout_s=60 * 20,
             evaluation_force_reset_envs_before_iteration=True,  # 各評価の前に環境をリセット
             evaluation_parallel_to_training=True,  # 評価と学習を並列に実行
             # # 評価用の上書き設定.これにより評価時はlb_bestポリシーと自身の対戦になる

@@ -20,6 +20,7 @@ from .utils import (
     get_legal_policy,
     calc_relative_pos,
     extract_global_state,
+    is_kaggle_environment,
 )
 from .params import EnvParams
 
@@ -210,13 +211,11 @@ class ILAgent:
 def use_cpp_flow():
     # 提出環境ではpythonのflow計算を使う想定. kaggle環境でpybind周りをなんとかすれば使えるはずだが未整備
     # debugモードではpythonのflow計算との比較を行うため使用している
-    # return not is_kaggle_environment() or Config().debug
-    return False
+    return not is_kaggle_environment() or Config().debug
 
 
 def use_py_flow():
-    # return is_kaggle_environment() or Config().debug
-    return True
+    return is_kaggle_environment() or Config().debug
 
 
 if use_cpp_flow():
