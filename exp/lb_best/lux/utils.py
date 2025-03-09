@@ -605,28 +605,20 @@ class OpponetTracker:
         self, unit_id: int, tile_type_map: np.ndarray, sensor_map: np.ndarray, position: tuple[int, int]
     ) -> None:
         nxt_positions = np.zeros((EnvParams.map_height, EnvParams.map_width), dtype=np.int16)
-        dx = [-1, 0, 1, 0]
-        dy = [0, -1, 0, 1]
         if unit_id in self.non_spawned_units:
             pass
         # 現在位置が割れている場合は特定できる
         elif position[0] != -1 and position[1] != -1 and sensor_map[position[1], position[0]] == 1:
             nxt_positions[position[1], position[0]] = 1
         else:
-            # (x,y)にいる可能性があるかを調べる
-            for y in range(EnvParams.map_height):
-                for x in range(EnvParams.map_width):
-                    if sensor_map[y, x] == 0:
-                        nxt_positions[y, x] = self.positions[unit_id, y, x]
-                        for i in range(4):
-                            nx = x + dx[i]
-                            ny = y + dy[i]
-                            if in_map((nx, ny)) and tile_type_map[y, x] != TileType.ASTEROID:
-                                if self.positions[unit_id, ny, nx] == 1:
-                                    nxt_positions[y, x] = 1
-                    else:
-                        # 今見えているところにはいないことがわかっている
-                        nxt_positions[y, x] = 0
+            # シフト演算で前の位置から移動した場合にいる地点を計算
+            nxt_positions = self.positions[unit_id].copy()
+            nxt_positions[:-1, :] |= self.positions[unit_id][1:, :]
+            nxt_positions[1:, :] |= self.positions[unit_id][:-1, :]
+            nxt_positions[:, :-1] |= self.positions[unit_id][:, 1:]
+            nxt_positions[:, 1:] |= self.positions[unit_id][:, :-1]
+            nxt_positions[tile_type_map == TileType.ASTEROID] = 0  # asteroidにはいない
+            nxt_positions[sensor_map == 1] = 0  # 今見えているところにはいないことがわかっている
 
         self.positions[unit_id, :, :] = nxt_positions
 
@@ -1317,7 +1309,7 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
 
         # available_unit_ids = np.where(unit_masks)[0]
         opponent_available_area = episode_store.opponent_tracker.get_opponent_available_positions()
-        # state_map[State.OPP_UNIT_COUNT, :, :] = opponent_available_area / EnvParams.max_units
+        state_map[State.OPP_UNIT_COUNT, :, :] = opponent_available_area / EnvParams.max_units
         for unit_id in range(EnvParams.max_units):
             unit_energy = unit_energies[unit_id]
             x, y = unit_positions[unit_id]
@@ -1339,7 +1331,7 @@ def extract_state(obs: dict[str, Any], target_team_id: int, episode_store: Episo
                             state_map[State.SAP_AVAILABLE_AREA, ny, nx] = 1
                 # state_map[State.OWN_UNIT_MASK, y, x] = unit_mask
             else:
-                state_map[State.OPP_UNIT_COUNT, y, x] += 1 / EnvParams.max_units
+                # state_map[State.OPP_UNIT_COUNT, y, x] += 1 / EnvParams.max_units
                 state_map[State.OPP_UNIT_ENERGY, y, x] += unit_energy / EnvParams.init_unit_energy
                 opp_unit_position_set.add((x, y))
                 # state_map[State.OPP_UNIT_MASK, y, x] = unit_mask
