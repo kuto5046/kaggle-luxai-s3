@@ -37,7 +37,7 @@ class Config:
     # 同じマスに複数のユニットが移動する場合のペナルティ、0=重複を許可(greedy)、1=重複を禁止
     overlap_penalty: float = 2.0
 
-    tta: bool = False
+    tta: bool = True
     debug: bool = False
 
     checkpoint_path: Path = Path(__file__).parent / "output/best_model.ckpt"
@@ -169,6 +169,10 @@ class ILAgent:
         )
         return policy
 
+    def transpose_sap(self, sap: torch.Tensor) -> torch.Tensor:
+        assert sap.dim() == 4
+        return sap.permute(0, 1, 3, 2)
+
     def predict(
         self, obs: dict[str, Any], team_id: int, episode_store: EpisodeStore, cfg: Config
     ) -> tuple[np.ndarray, np.ndarray]:
@@ -198,7 +202,10 @@ class ILAgent:
             if torch.cuda.is_available():
                 output = {k: v.cpu() for k, v in output.items()}
             if cfg.tta:
-                output["policy"] = (output["policy"][:1] + self.transpose_policy(output["policy"][1:])) / 2
+                assert output["policy"].shape[0] == 2
+                assert output["sap"].shape[0] == 2
+                output["policy"] = (output["policy"][:1] + self.transpose_policy(output["policy"][1:2])) / 2
+                output["sap"] = (output["sap"][:1] + self.transpose_sap(output["sap"][1:2])) / 2
             if do_flip:
                 output["sap"] = torch.flip(output["sap"], [-2, -1])
             policy_map = output["policy"].squeeze().numpy()
