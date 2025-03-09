@@ -40,7 +40,7 @@ class Config:
     tta: bool = True
     debug: bool = False
 
-    checkpoint_path: Path = Path(__file__).parent / "output/best_model_exp629.ckpt"
+    checkpoint_path: Path = Path(__file__).parent / "output/best_model.ckpt"
 
 
 ###########################################################################
