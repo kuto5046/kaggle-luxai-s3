@@ -91,7 +91,7 @@ class Config:
     # common
     exp_name: str = Path(__file__).parent.name
     debug: bool = False
-    notes: str = "高速化した上で最終層のみ学習"
+    notes: str = "高速化した上でlr=1e-4で最終層のみ学習"
     env_name: str = "lux-s3-v0"
     root_dir: Path = Path("/home/kyohei.uto/kaggle-luxai-s3")
     exp_dir: Path = root_dir / f"exp/{exp_name}"
@@ -139,7 +139,7 @@ class Config:
     evaluation_duration: int = 50  # 1回の評価で何エピソード分評価するか
     # learner
     gamma: float = 0.9995
-    lr: float = 5e-5
+    lr: float = 1e-4
     grad_clip: float = 0.5
     grad_clip_by: str = "global_norm"
     train_batch_size_per_learner: int = 256
