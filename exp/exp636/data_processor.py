@@ -37,8 +37,8 @@ class Config:
     stratify: bool = False
     root_dir: Path = Path("/kaggle")
     input_dir: Path = root_dir / "input"
-    episode_dir: Path = root_dir / "data/42704976_latest/episodes"
-    episode_path: Path = root_dir / "data/42704976_latest/episodes.csv"
+    episode_dir: Path = root_dir / "episodes"
+    episode_path: Path = root_dir / "episodes/episodes.csv"
     feature_dir: Path = root_dir / f"output/feature_store/{exp_name}"
     target_team_name: str = "Frog Parade"
     target_sub_ids: list[int] = field(default_factory=lambda: [42704976])
@@ -113,13 +113,16 @@ class DataProcessor:
     def _process_episode(self, row) -> tuple[str, int, int]:
         sub_id = row["SubmissionId"]
         episode_id = row["EpisodeId"]
-        episode_path = self.episode_dir / f"{sub_id}/{episode_id}.json"
+        episode_path = self.episode_dir / f"{sub_id}/{episode_id}.json.gz"
 
         try:
-            with open(episode_path) as f:
+            with gzip.open(episode_path, "rt") as f:
                 json_load = json.load(f)
         except json.JSONDecodeError as e:
-            print(f"EpisodeId {row['EpisodeId']}: {e}")
+            print(f"EpisodeId {episode_id}: {e}")
+            return None
+        except gzip.BadGzipFile as e:
+            print(f"EpisodeId {episode_id}: {e}")
             return None
         
         rewards = json_load["rewards"]
@@ -208,7 +211,7 @@ class DataProcessor:
 
         # 一時ファイルを1つのh5ファイルにマージ
         with h5py.File(self.feature_dir / "episodes.h5", "w") as out_f:
-            for episode_id in tqdm(valid_ids, total=len(valid_ids)):
+            for episode_id in valid_ids:
                 temp_path = self.feature_dir / f"temp_{episode_id}.h5"
                 with h5py.File(temp_path, "r") as temp_f:
                     temp_f.copy(f"{episode_id}", out_f)
