@@ -154,14 +154,17 @@ class ILAgent:
 
     def transpose_state(self, state: torch.Tensor) -> torch.Tensor:
         assert state.dim() == 5
-        return state.permute(0, 1, 2, 4, 3)
+        state = state.clone().detach()
+        return torch.permute(state, [0, 1, 2, 4, 3])
 
     def transpose_global_state(self, global_state: torch.Tensor) -> torch.Tensor:
+        global_state = global_state.clone().detach()
         return global_state
 
     def transpose_policy(self, policy: torch.Tensor) -> torch.Tensor:
         assert policy.dim() == 4
-        policy = policy.permute(0, 1, 3, 2)
+        policy = policy.clone().detach()
+        policy = torch.permute(policy, [0, 1, 3, 2])
         policy[:, Action.UP], policy[:, Action.LEFT] = policy[:, Action.LEFT].clone(), policy[:, Action.UP].clone()
         policy[:, Action.DOWN], policy[:, Action.RIGHT] = (
             policy[:, Action.RIGHT].clone(),
@@ -171,7 +174,8 @@ class ILAgent:
 
     def transpose_sap(self, sap: torch.Tensor) -> torch.Tensor:
         assert sap.dim() == 4
-        return sap.permute(0, 1, 3, 2)
+        sap = sap.clone().detach()
+        return torch.permute(sap, [0, 1, 3, 2])
 
     def predict(
         self, obs: dict[str, Any], team_id: int, episode_store: EpisodeStore, cfg: Config
@@ -204,8 +208,22 @@ class ILAgent:
             if cfg.tta:
                 assert output["policy"].shape[0] == 2
                 assert output["sap"].shape[0] == 2
-                output["policy"] = (output["policy"][:1] + self.transpose_policy(output["policy"][1:2])) / 2
-                output["sap"] = (output["sap"][:1] + self.transpose_sap(output["sap"][1:2])) / 2
+                # output["policy"] = (output["policy"][:1] + self.transpose_policy(output["policy"][1:2])) / 2
+                # output["sap"] = (output["sap"][:1] + self.transpose_sap(output["sap"][1:2])) / 2
+                weight_low_policy = 0.5
+                weight_low_sap = 0.5
+                output_policy_maximum = torch.maximum(
+                    output["policy"][:1], self.transpose_policy(output["policy"][1:2])
+                )
+                output_policy_minimum = torch.minimum(
+                    output["policy"][:1], self.transpose_policy(output["policy"][1:2])
+                )
+                output["policy"] = (
+                    output_policy_maximum + (output_policy_minimum - output_policy_maximum) * weight_low_policy
+                )
+                output_sap_maximum = torch.maximum(output["sap"][:1], self.transpose_sap(output["sap"][1:2]))
+                output_sap_minimum = torch.minimum(output["sap"][:1], self.transpose_sap(output["sap"][1:2]))
+                output["sap"] = output_sap_maximum + (output_sap_minimum - output_sap_maximum) * weight_low_sap
             if do_flip:
                 output["sap"] = torch.flip(output["sap"], [-2, -1])
             policy_map = output["policy"].squeeze().numpy()
