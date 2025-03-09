@@ -122,9 +122,9 @@ class Config:
     # そこで0を指定しlocal learnerとして動かし直接コードで学習時にcudaを指定するようにしている
     num_learners: int = 0
     # 評価用
-    evaluation_num_env_runners: int = 25
+    evaluation_num_env_runners: int = 5
     # データ収集用
-    num_env_runners: int = 70
+    num_env_runners: int = 18
 
     # 学習設定
     training_minutes: int = 60 * 24  # 1日
