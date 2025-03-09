@@ -116,13 +116,10 @@ class DataProcessor:
         episode_path = self.episode_dir / f"{sub_id}/{episode_id}.json.gz"
 
         try:
-            with gzip.open(episode_path, "rt") as f:
+            with open(episode_path) as f:
                 json_load = json.load(f)
         except json.JSONDecodeError as e:
-            print(f"EpisodeId {episode_id}: {e}")
-            return None
-        except gzip.BadGzipFile as e:
-            print(f"EpisodeId {episode_id}: {e}")
+            print(f"EpisodeId {row['EpisodeId']}: {e}")
             return None
         
         rewards = json_load["rewards"]
