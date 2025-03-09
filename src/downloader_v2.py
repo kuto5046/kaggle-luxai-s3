@@ -24,15 +24,10 @@ def saveEpisode(epid: int, save_path: Path) -> None:
 
 def main():
     max_episode_count = 3000
-    df = pl.read_csv("./episodes/episodes.csv")
+    df = pl.read_csv("./episodes/episodes_flat-neurons.csv", ignore_errors=True)
     agents_to_load = [
-        42704976,  # Frog Parade
-        # 42705163,  # Frog Parade
-        43152191,  # Frog Parade
-        43155694,  # Frog Parade
-        43212163,  # Frog Parade
-        43212846,  # Frog Parade
-        43276830,  # Frog Parade
+        43317109, 
+        43320130
     ]
     df = df.filter(pl.col("SubmissionId").is_in(agents_to_load))
     start_time = datetime.datetime.now(tz=datetime.timezone.utc)
