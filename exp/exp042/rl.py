@@ -91,7 +91,7 @@ class Config:
     # common
     exp_name: str = Path(__file__).parent.name
     debug: bool = False
-    notes: str = "value loss小さくしてみる"
+    notes: str = "学習を待つ"
     env_name: str = "lux-s3-v0"
     root_dir: Path = Path("/home/user/work")
     exp_dir: Path = root_dir / f"exp/{exp_name}"
@@ -140,17 +140,19 @@ class Config:
     # learner
     gamma: float = 0.9995
     lr: float = 5e-5
+    grad_clip: float = 0.5
+    grad_clip_by: str = "global_norm"
     train_batch_size_per_learner: int = 256
     num_epochs: int = 1  # 1回の学習のepoch数。新しいデータがどんどん追加されてくるためepoch数は1にしている
     replay_proportion: float = 0.0  # リプレイバッファの割合
     # loss
     vtrace_clip_rho_threshold: float = 1.0  # 価値関数のlossの係数
     vtrace_clip_pg_rho_threshold: float = 1.0  # ポリシー勾配のlossの係数
-    vf_loss_coeff: float = 0.1  # 価値関数のlossの係数
+    vf_loss_coeff: float = 1e-1  # 価値関数のlossの係数
     entropy_coeff: float = 1e-5  # エントロピーのlossの係数(大きくすると探索が活発になる)
     sap_loss_coeff: float = 1e-3  # sapのlossの係数
     # reward
-    point_weight: float = 1e-3  # マッチの報酬を超えないようにすべきなので適用する場合1e-3程度
+    point_weight: float = 0  # マッチの報酬を超えないようにすべきなので適用する場合1e-3程度
 
     def __post_init__(self):
         if self.debug:
@@ -1263,11 +1265,15 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
             opt_type="adam",
             gamma=cfg.gamma,
             lr=cfg.lr,
+            grad_clip=cfg.grad_clip,
+            grad_clip_by=cfg.grad_clip_by,
             num_epochs=cfg.num_epochs,
             # learnerの設定
             train_batch_size_per_learner=cfg.train_batch_size_per_learner,
             learner_queue_size=cfg.learner_queue_size,
             replay_proportion=cfg.replay_proportion,
+            # データが溜まっていない場合に学習を待つ時間
+            timeout_s_sampler_manager=60 * 2,
             # loss
             vtrace=True,
             vtrace_clip_rho_threshold=cfg.vtrace_clip_rho_threshold,
