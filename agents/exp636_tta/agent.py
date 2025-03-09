@@ -8,9 +8,9 @@ import numpy as np
 import torch
 from lightning import seed_everything
 from lux.utils import (
+    is_kaggle_environment,
     State,
     Action,
-    HiddenState,
     GlobalState,
     EpisodeStore,
     in_map,
@@ -23,7 +23,7 @@ from lux.utils import (
     get_nearby_enemy_unit_ids,
     get_nearby_point_positions,
 )
-from lux.models import LuxUNetModel, LuxConvLSTMModel
+from lux.models import LuxUNetModel
 from lux.params import EnvParams
 from scipy.special import softmax
 
@@ -37,7 +37,8 @@ class Config:
     # 同じマスに複数のユニットが移動する場合のペナルティ、0=重複を許可(greedy)、1=重複を禁止
     overlap_penalty: float = 2.0
 
-    tta: bool = False
+    tta: bool = True
+    debug: bool = False
 
     checkpoint_path: Path = Path(__file__).parent / "output/best_model.ckpt"
 
@@ -49,7 +50,7 @@ class Config:
 
 # verified http://judge.u-aizu.ac.jp/onlinejudge/review.jsp?rid=4675288#1
 class MinimumCostFlow:
-    inf = 1000000000000000000
+    inf = 10**18  # 十分大きな値
 
     def __init__(self, n):
         self.n = n
@@ -59,7 +60,7 @@ class MinimumCostFlow:
         self.edges[f].append([t, capacity, cost, len(self.edges[t]), action])
         self.edges[t].append([f, 0, -cost, len(self.edges[f]) - 1, -1])  # reverse edge
 
-    def flow(self, s, t, flow, timeout=0.5):
+    def flow(self, s, t, flow, timeout=1.0):
         n = self.n
         g = self.edges
         inf = MinimumCostFlow.inf
@@ -71,10 +72,11 @@ class MinimumCostFlow:
 
         res = 0
         start_time = time.time()
+        eps = 1e-9  # 浮動小数点誤差対策用の許容値
 
-        while flow != 0:
+        while flow > 0:
             if time.time() - start_time > timeout:
-                return -1
+                return -2
 
             dist = [inf for i in range(n)]
             dist[s] = 0
@@ -82,27 +84,32 @@ class MinimumCostFlow:
 
             while que:
                 if time.time() - start_time > timeout:
-                    return -1
+                    return -2
 
                 c, v = heappop(que)
-                if dist[v] < c:
+                if dist[v] < c - eps:
                     continue
-                r0 = dist[v] + h[v]
+                # 隣接する各辺を緩和
                 for i, e in enumerate(g[v]):
                     w, cap, cost, _, _ = e
-                    if cap > 0 and r0 + cost - h[w] < dist[w]:
-                        r = r0 + cost - h[w]
-                        dist[w] = r
-                        prevv[w] = v
-                        preve[w] = i
-                        heappush(que, (r, w))
+                    if cap > 0:
+                        r = dist[v] + cost + h[v] - h[w]
+                        if r < dist[w] - eps:
+                            dist[w] = r
+                            prevv[w] = v
+                            preve[w] = i
+                            heappush(que, (r, w))
 
+            # t への到達がなければ経路が存在しない
             if dist[t] == inf:
                 return -1
 
+            # 到達可能なノードのみ h を更新する
             for i in range(n):
-                h[i] += dist[i]
+                if dist[i] < inf:
+                    h[i] += dist[i]
 
+            # この経路で流せる最大の流量 d を求める
             d = flow
             v = t
             while v != s:
@@ -110,6 +117,8 @@ class MinimumCostFlow:
                 v = prevv[v]
             flow -= d
             res += d * h[t]
+
+            # 経路に沿って辺の容量を更新
             v = t
             while v != s:
                 e = g[prevv[v]][preve[v]]
@@ -234,6 +243,16 @@ def get_legal_sap_policy(
     return sap_map
 
 
+def use_cpp_flow():
+    # 提出環境ではpythonのflow計算を使う想定. kaggle環境でpybind周りをなんとかすれば使えるはずだが未整備
+    # debugモードではpythonのflow計算との比較を行うため使用している
+    return not is_kaggle_environment() or Config().debug
+
+
+def use_py_flow():
+    return is_kaggle_environment() or Config().debug
+
+
 class SingleSapInfo:
     def __init__(
         self,
@@ -255,6 +274,8 @@ class SingleSapInfo:
 cfg = Config()
 seed_everything(cfg.seed, workers=True)
 imitation_model = ILAgent(EnvParams, cfg.checkpoint_path, cfg.n_stack, cfg.res)
+if use_cpp_flow():
+    import min_cost_flow
 
 
 class Agent:
@@ -353,7 +374,11 @@ class Agent:
         # フローネットワークの構築
         n_units = len(available_unit_ids)
         n_cells = len(all_next_positions)
-        flow = MinimumCostFlow(2 + n_units + 2 * n_cells)
+        if use_py_flow():
+            flow = MinimumCostFlow(2 + n_units + 2 * n_cells)
+        if use_cpp_flow():
+            mcf = min_cost_flow.MinimumCostFlow(2 + n_units + 2 * n_cells)
+
         nodes = {}
         nodes["source"] = 0
         nodes["sink"] = 1
@@ -364,20 +389,37 @@ class Agent:
             nodes[f"pos_{x}_{y}_additional"] = 2 + n_units + n_cells + i
 
         for i, unit_id in enumerate(available_unit_ids):
-            flow.add_edge(nodes["source"], nodes[f"unit_{i}"], capacity=1, cost=0, action=-1)
+            if use_py_flow():
+                flow.add_edge(nodes["source"], nodes[f"unit_{i}"], capacity=1, cost=0, action=-1)
+            if use_cpp_flow():
+                mcf.add_edge(nodes["source"], nodes[f"unit_{i}"], 1, 0, -1)
         for pos in all_next_positions:
             pos_node = nodes[f"pos_{pos[0]}_{pos[1]}"]
             pos_node_additional = nodes[f"pos_{pos[0]}_{pos[1]}_additional"]
+            dec = 0
             if pos not in sapped_unit_next_pos_set:
-                flow.add_edge(pos_node, nodes["sink"], capacity=1, cost=0, action=-1)
-            additional_capacity = max(len(available_unit_ids) - 1, 1)  # 最低でも1の容量を確保
-            flow.add_edge(
-                pos_node_additional,
-                nodes["sink"],
-                capacity=additional_capacity,
-                cost=self.cfg.overlap_penalty,
-                action=-1,
-            )
+                if use_py_flow():
+                    flow.add_edge(pos_node, nodes["sink"], capacity=1, cost=0, action=-1)
+                if use_cpp_flow():
+                    mcf.add_edge(pos_node, nodes["sink"], 1, 0, -1)
+                dec = 1
+            additional_capacity = max(len(available_unit_ids) - dec, 1)  # 最低でも1の容量を確保
+            if use_py_flow():
+                flow.add_edge(
+                    pos_node_additional,
+                    nodes["sink"],
+                    capacity=additional_capacity,
+                    cost=self.cfg.overlap_penalty,
+                    action=-1,
+                )
+            if use_cpp_flow():
+                mcf.add_edge(
+                    pos_node_additional,
+                    nodes["sink"],
+                    additional_capacity,
+                    self.cfg.overlap_penalty,
+                    -1,
+                )
 
         for i, unit_actions_list in enumerate(unit_actions):
             unit_node = nodes[f"unit_{i}"]
@@ -386,31 +428,43 @@ class Agent:
                 base_cost = action["score"]
                 pos_node = nodes[f"pos_{pos[0]}_{pos[1]}"]
                 pos_node_additional = nodes[f"pos_{pos[0]}_{pos[1]}_additional"]
-                flow.add_edge(unit_node, pos_node, capacity=1, cost=base_cost, action=action)
-                flow.add_edge(unit_node, pos_node_additional, capacity=1, cost=base_cost, action=action)
-        # try:
-        flow_result = flow.flow(nodes["source"], nodes["sink"], len(available_unit_ids))
-        assert flow_result != -1, "Flow calculation failed"
-        # except Exception as e:
-        #     print(f"フロー計算エラー: {e}")
-        #     self._assign_greedy_actions(actions, available_unit_ids, unit_positions, policy_map, point_map, obs, opp_unit_positions)
-        #     return
-        # if flow_result == -1:
-        #     print("flow=-1", file=sys.stderr)
-        #     self._assign_greedy_actions(
-        #         actions, available_unit_ids, unit_positions, policy_map, point_map, obs, opp_unit_positions
-        #     )
-        #     return
+                if use_py_flow():
+                    flow.add_edge(unit_node, pos_node, capacity=1, cost=base_cost, action=action)
+                    flow.add_edge(unit_node, pos_node_additional, capacity=1, cost=base_cost, action=action)
+                if use_cpp_flow():
+                    mcf.add_edge(unit_node, pos_node, 1, base_cost, action)
+                    mcf.add_edge(unit_node, pos_node_additional, 1, base_cost, action)
+
+        if use_py_flow():
+            flow_result = flow.flow(nodes["source"], nodes["sink"], len(available_unit_ids))
+            assert flow_result != -1, "Flow calculation failed"
+            assert flow_result != -2, "Flow calculation timeout"
+        if use_cpp_flow():
+            mcflow_result = mcf.flow(nodes["source"], nodes["sink"], len(available_unit_ids))
+            assert mcflow_result != -1, "Flow calculation failed"
+            assert mcflow_result != -2, "Flow calculation timeout"
+
+        if use_py_flow() and use_cpp_flow():
+            for i, unit_id in enumerate(available_unit_ids):
+                for original_edge, edge in zip(flow.edges[unit_id], mcf.edges[unit_id]):
+                    assert original_edge[1] == edge.cap
+                    assert original_edge[4] == edge.action
 
         # フローから行動を抽出
         for i, unit_id in enumerate(available_unit_ids):
             unit_node = nodes[f"unit_{i}"]
             unit_pos = unit_positions[unit_id]
             selected_action = None
-            for edge in flow.edges[unit_node]:
-                if edge[1] == 0 and edge[4] != -1:
-                    selected_action = edge[4]
-                    break
+            if use_cpp_flow():
+                for edge in mcf.edges[unit_node]:
+                    if edge.cap == 0 and edge.action != -1:
+                        selected_action = edge.action
+                        break
+            elif use_py_flow():
+                for edge in flow.edges[unit_node]:
+                    if edge[1] == 0 and edge[4] != -1:
+                        selected_action = edge[4]
+                        break
             if selected_action is None:
                 actions[unit_id] = [Action.CENTER, 0, 0]
             else:
@@ -520,7 +574,10 @@ class Agent:
             for sap_pos in sap_info.sap_pos:
                 all_sap_positions.add(sap_pos)
         n_cells = len(all_sap_positions)
-        flow = MinimumCostFlow(2 + n_units + n_cells + 1)
+        if use_py_flow():
+            flow = MinimumCostFlow(2 + n_units + n_cells + 1)
+        if use_cpp_flow():
+            mcf = min_cost_flow.MinimumCostFlow(2 + n_units + n_cells + 1)
         nodes = {}
         nodes["source"] = 0
         nodes["sink"] = 1
@@ -531,13 +588,22 @@ class Agent:
             nodes[f"pos_{x}_{y}"] = 2 + n_units + i
             # nodes[f"pos_{x}_{y}_additional"] = 2 + n_units + n_cells + i
 
-        flow.add_edge(nodes["unit_move"], nodes["sink"], capacity=n_units, cost=0, action=-1)
+        if use_py_flow():
+            flow.add_edge(nodes["unit_move"], nodes["sink"], capacity=n_units, cost=0, action=-1)
+        if use_cpp_flow():
+            mcf.add_edge(nodes["unit_move"], nodes["sink"], n_units, 0, -1)
         for i, unit_id in enumerate(sap_unit_ids):
-            flow.add_edge(nodes["source"], nodes[f"unit_{i}"], capacity=1, cost=0, action=-1)
+            if use_py_flow():
+                flow.add_edge(nodes["source"], nodes[f"unit_{i}"], capacity=1, cost=0, action=-1)
+            if use_cpp_flow():
+                mcf.add_edge(nodes["source"], nodes[f"unit_{i}"], 1, 0, -1)
         for pos in all_sap_positions:
             pos_node = nodes[f"pos_{pos[0]}_{pos[1]}"]
             # pos_node_additional = nodes[f"pos_{pos[0]}_{pos[1]}_additional"]
-            flow.add_edge(pos_node, nodes["sink"], capacity=1, cost=0, action=-1)
+            if use_py_flow():
+                flow.add_edge(pos_node, nodes["sink"], capacity=1, cost=0, action=-1)
+            if use_cpp_flow():
+                mcf.add_edge(pos_node, nodes["sink"], 1, 0, -1)
             # additional_capacity = max(len(available_unit_ids) - 1, 1)  # 最低でも1の容量を確保
             # flow.add_edge(
             #     pos_node_additional,
@@ -549,13 +615,22 @@ class Agent:
 
         for i, sap_info in enumerate(sap_infos):
             unit_node = nodes[f"unit_{i}"]
-            flow.add_edge(
-                unit_node,
-                nodes["unit_move"],
-                capacity=1,
-                cost=sap_info.next_action["score"],
-                action=sap_info.next_action,
-            )
+            if use_py_flow():
+                flow.add_edge(
+                    unit_node,
+                    nodes["unit_move"],
+                    capacity=1,
+                    cost=sap_info.next_action["score"],
+                    action=sap_info.next_action,
+                )
+            if use_cpp_flow():
+                mcf.add_edge(
+                    unit_node,
+                    nodes["unit_move"],
+                    1,
+                    sap_info.next_action["score"],
+                    sap_info.next_action,
+                )
             for sap_pos, sap_policy in zip(sap_info.sap_pos, sap_info.sap_policy):
                 sap_pos_relative = calc_relative_pos(sap_info.unit_pos, sap_pos)
                 assert sap_policy >= 0 and sap_policy <= 1
@@ -565,17 +640,36 @@ class Agent:
                     "score": 1.0 - sap_policy,
                     "sap_pos": sap_pos_relative,
                 }
-                flow.add_edge(
-                    unit_node, nodes[f"pos_{sap_pos[0]}_{sap_pos[1]}"], capacity=1, cost=action["score"], action=action
-                )
+                if use_py_flow():
+                    flow.add_edge(
+                        unit_node,
+                        nodes[f"pos_{sap_pos[0]}_{sap_pos[1]}"],
+                        capacity=1,
+                        cost=action["score"],
+                        action=action,
+                    )
+                if use_cpp_flow():
+                    mcf.add_edge(unit_node, nodes[f"pos_{sap_pos[0]}_{sap_pos[1]}"], 1, action["score"], action)
 
         # try:
-        flow_result = flow.flow(nodes["source"], nodes["sink"], len(sap_unit_ids))
+        if use_py_flow():
+            flow_result = flow.flow(nodes["source"], nodes["sink"], len(sap_unit_ids))
+            assert flow_result != -1, "Flow calculation failed"
+            assert flow_result != -2, "Flow calculation timeout"
+        if use_cpp_flow():
+            mcflow_result = mcf.flow(nodes["source"], nodes["sink"], len(sap_unit_ids))
+            assert mcflow_result != -1, "Flow calculation failed"
+            assert mcflow_result != -2, "Flow calculation timeout"
+
+        if use_py_flow() and use_cpp_flow():
+            for i, sap_info in enumerate(sap_infos):
+                for original_edge, edge in zip(flow.edges[i], mcf.edges[i]):
+                    assert original_edge[1] == edge.cap
+                    assert original_edge[4] == edge.action
         # except Exception as e:
         #     print(f"フロー計算エラー: {e}")
         #     self._assign_greedy_actions(actions, available_unit_ids, unit_positions, policy_map, point_map, obs, opp_unit_positions)
         #     return
-        assert flow_result != -1, "Flow calculation failed"
         # if flow_result == -1:
         #     print("flow=-1", file=sys.stderr)
         #     for i, sap_info in enumerate(sap_infos):
@@ -588,9 +682,15 @@ class Agent:
             unit_node = nodes[f"unit_{i}"]
             unit_pos = unit_positions[unit_id]
             selected_action = None
-            for edge in flow.edges[unit_node]:
-                if edge[1] == 0 and edge[4] != -1:
-                    selected_action = edge[4]
-                    break
+            if use_cpp_flow():
+                for edge in mcf.edges[unit_node]:
+                    if edge.cap == 0 and edge.action != -1:
+                        selected_action = edge.action
+                        break
+            elif use_py_flow():
+                for edge in flow.edges[unit_node]:
+                    if edge[1] == 0 and edge[4] != -1:
+                        selected_action = edge[4]
+                        break
             if selected_action["action_id"] == Action.SAP:
                 actions[unit_id] = [Action.SAP, selected_action["sap_pos"][0], selected_action["sap_pos"][1]]
