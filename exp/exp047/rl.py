@@ -453,18 +453,18 @@ def freeze(model: nn.Module, model_name: Model):
             param.requires_grad = False
 
         # UNet後のpolicyネットワークのパラメータをTrueにする
-        # for param in model.sap_net1.parameters():
-        #     param.requires_grad = True
-        # for param in model.sap_net2.parameters():
-        #     param.requires_grad = True
-        # for param in model.sap_net3.parameters():
-        #     param.requires_grad = True
-        # for param in model.policy_net1_from_sap.parameters():
-        #     param.requires_grad = True
-        # for param in model.policy_net2.parameters():
-        #     param.requires_grad = True
-        # for param in model.policy_net3.parameters():
-        #     param.requires_grad = True
+        for param in model.sap_net1.parameters():
+            param.requires_grad = True
+        for param in model.sap_net2.parameters():
+            param.requires_grad = True
+        for param in model.sap_net3.parameters():
+            param.requires_grad = True
+        for param in model.policy_net1_from_sap.parameters():
+            param.requires_grad = True
+        for param in model.policy_net2.parameters():
+            param.requires_grad = True
+        for param in model.policy_net3.parameters():
+            param.requires_grad = True
         for param in model.policy_net4.parameters():
             param.requires_grad = True
 
