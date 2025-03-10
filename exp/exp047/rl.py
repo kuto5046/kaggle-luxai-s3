@@ -142,7 +142,7 @@ class Config:
     lr: float = 5e-5
     grad_clip: float = 0.5
     grad_clip_by: str = "global_norm"
-    train_batch_size_per_learner: int = 256
+    train_batch_size_per_learner: int = 128
     num_epochs: int = 1  # 1回の学習のepoch数。新しいデータがどんどん追加されてくるためepoch数は1にしている
     replay_proportion: float = 0.0  # リプレイバッファの割合
     # loss
