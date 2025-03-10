@@ -34,22 +34,22 @@ class Config:
     output_dir = root_dir / f"exp/{exp_name}/output"
 
     # trainer
-    epoch: int = 30
+    epoch: int = 10
     limit_train_batches: float = 1.0
     limit_val_batches: float = 1.0
     use_amp: bool = True
     batch_size: int = 1024
     num_workers: int = 24
-    ckpt_path: str = None
-    lr: float = 0.002
+    ckpt_path: str = "exp/exp636/output/best_model.ckpt"
+    lr: float = 5e-4
     weight_decay: float = 0.01
-    warmup_step_rate: float = 0
+    warmup_step_rate: float = 0.1
     
     # model
     res: bool = True
     aug: bool = True
     n_stack: int = 4
-    freeze: bool = False
+    freeze: bool = True
     
     # loss
     loss_weight_policy: float = 1.0
@@ -147,8 +147,7 @@ class TrainPipeline:
             limit_train_batches=self.cfg.limit_train_batches,
             limit_val_batches=self.cfg.limit_val_batches,
             deterministic=True,  # for reproducibility
-            devices=2,
-            strategy="ddp_find_unused_parameters_true"
+            devices=1,
         )
         self.trainer.fit(self.model, datamodule=self.datamodule)
 

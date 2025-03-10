@@ -38,10 +38,10 @@ class Config:
     root_dir: Path = Path("/kaggle")
     input_dir: Path = root_dir / "input"
     episode_dir: Path = root_dir / "episodes"
-    episode_path: Path = root_dir / "episodes/episodes.csv"
+    episode_path: Path = root_dir / "episodes/episodes_flat-neurons_0310.csv"
     feature_dir: Path = root_dir / f"output/feature_store/{exp_name}"
-    target_team_name: str = "Frog Parade"
-    target_sub_ids: list[int] = field(default_factory=lambda: [42704976])
+    target_team_name: str = "Flat Neurons"
+    target_sub_ids: list[int] = field(default_factory=lambda: [43317109, 43320130, 43330358, 43330490])
     validation: bool = False
 
     use_only_win_data: bool = True

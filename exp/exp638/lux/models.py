@@ -248,12 +248,24 @@ class LaxLitModel(LightningModule):
         self.valid_outputs = {"ground_truth": [], "predictions": []}
 
     def freeze(self):
-        for param in self.model.inc.parameters():
+        for param in self.model.parameters():
             param.requires_grad = False
-        for param in self.model.drc.parameters():
-            param.requires_grad = False
-        for param in self.model.policy_net.parameters():
-            param.requires_grad = False
+
+        # UNet後のpolicyネットワークのパラメータをTrueにする
+        for param in self.model.sap_net1.parameters():
+            param.requires_grad = True
+        for param in self.model.sap_net2.parameters():
+            param.requires_grad = True
+        for param in self.model.sap_net3.parameters():
+            param.requires_grad = True
+        for param in self.model.policy_net1_from_sap.parameters():
+            param.requires_grad = True
+        for param in self.model.policy_net2.parameters():
+            param.requires_grad = True
+        for param in self.model.policy_net3.parameters():
+            param.requires_grad = True
+        for param in self.model.policy_net4.parameters():
+            param.requires_grad = True
             
     def forward(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
         return self.model(batch)
