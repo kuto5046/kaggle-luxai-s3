@@ -24,9 +24,9 @@ def saveEpisode(epid: int, save_path: Path) -> None:
 
 def main():
     max_episode_count = 3000
-    df = pl.read_csv("./episodes/episodes_43276830.csv", ignore_errors=True)
+    df = pl.read_csv("./episodes/episodes_43330358.csv", ignore_errors=True)
     agents_to_load = [
-        43276830
+        43330358
     ]
     df = df.filter(pl.col("SubmissionId").is_in(agents_to_load))
     start_time = datetime.datetime.now(tz=datetime.timezone.utc)
