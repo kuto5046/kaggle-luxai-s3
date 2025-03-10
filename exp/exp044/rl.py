@@ -91,7 +91,7 @@ class Config:
     # common
     exp_name: str = Path(__file__).parent.name
     debug: bool = False
-    notes: str = "高速化した上で最終層のみ学習"
+    notes: str = "高速化した上でfreeze=Falseで学習"
     env_name: str = "lux-s3-v0"
     root_dir: Path = Path("/home/kyohei.uto/kaggle-luxai-s3")
     exp_dir: Path = root_dir / f"exp/{exp_name}"
@@ -104,7 +104,7 @@ class Config:
     hidden_dim: int = 64
     kernel_size: int = 5
     num_repeats: int = 3
-    freeze: bool = True
+    freeze: bool = False
     overlap_penalty: float = 2.0
     stochastic: bool = True
     best_pretrained_path: Path | None = root_dir / "exp/rl_best/output/best_model.ckpt"
