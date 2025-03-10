@@ -44,7 +44,7 @@ class Config:
     target_sub_ids: list[int] = field(default_factory=lambda: [43276830])
     validation: bool = False
 
-    use_only_win_data: bool = True
+    use_only_win_data: bool = False
     ignore_after_3_wins: bool = False
     only_win_final_match: bool = False
 
