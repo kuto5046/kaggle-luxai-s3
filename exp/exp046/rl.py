@@ -135,7 +135,7 @@ class Config:
     rollout_fragment_length: int | str | None = 101
 
     # 評価
-    evaluation_interval: int = 100  # 何回trainをしたら評価を実施するか　１回が30secくらいなので50回で1500sec=25分くらい
+    evaluation_interval: int = 10  # 何回trainをしたら評価を実施するか　１回が30secくらいなので50回で1500sec=25分くらい
     evaluation_duration: int = 50  # 1回の評価で何エピソード分評価するか
     # learner
     gamma: float = 0.9995
