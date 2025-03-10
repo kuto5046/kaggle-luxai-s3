@@ -41,7 +41,7 @@ class Config:
     batch_size: int = 1024
     num_workers: int = 24
     ckpt_path: str = "exp/exp636/output/best_model.ckpt"
-    lr: float = 5e-4
+    lr: float = 1e-4
     weight_decay: float = 0.01
     warmup_step_rate: float = 0.1
     
