@@ -182,7 +182,7 @@ class LaxLitDataModule(LightningDataModule):
 
     def setup(self, stage: str | None = None) -> None:
         df = pl.read_csv(self.cfg.feature_dir / "train.csv")
-        df = df.filter(pl.col("Win"))  # 勝利したエピソードのみを使用
+        # df = df.filter(pl.col("Win"))  # 勝利したエピソードのみを使用
         train = df.filter(pl.col("fold") != self.cfg.use_fold)
         valid = df.filter(pl.col("fold") == self.cfg.use_fold)
         self.train_dataset = LaxDataset(train, self.cfg, mode="train")
