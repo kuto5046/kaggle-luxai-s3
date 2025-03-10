@@ -40,10 +40,10 @@ class Config:
     use_amp: bool = True
     batch_size: int = 1024
     num_workers: int = 24
-    ckpt_path: str = None
-    lr: float = 0.002
+    ckpt_path: str = "exp/exp636/output/best_model.ckpt"
+    lr: float = 5e-4
     weight_decay: float = 0.01
-    warmup_step_rate: float = 0
+    warmup_step_rate: float = 0.1
     
     # model
     res: bool = True
