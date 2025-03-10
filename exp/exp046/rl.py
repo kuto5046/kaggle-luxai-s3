@@ -91,7 +91,7 @@ class Config:
     # common
     exp_name: str = Path(__file__).parent.name
     debug: bool = False
-    notes: str = "高速化した上で最終層のみ学習"
+    notes: str = "sapの教師ありのみ実施"
     env_name: str = "lux-s3-v0"
     root_dir: Path = Path("/home/kyohei.uto/kaggle-luxai-s3")
     exp_dir: Path = root_dir / f"exp/{exp_name}"
@@ -139,7 +139,7 @@ class Config:
     evaluation_duration: int = 50  # 1回の評価で何エピソード分評価するか
     # learner
     gamma: float = 0.9995
-    lr: float = 5e-5
+    lr: float = 1e-4
     grad_clip: float = 0.5
     grad_clip_by: str = "global_norm"
     train_batch_size_per_learner: int = 256
@@ -148,9 +148,10 @@ class Config:
     # loss
     vtrace_clip_rho_threshold: float = 1.0  # 価値関数のlossの係数
     vtrace_clip_pg_rho_threshold: float = 1.0  # ポリシー勾配のlossの係数
-    vf_loss_coeff: float = 1e-1  # 価値関数のlossの係数
-    entropy_coeff: float = 1e-5  # エントロピーのlossの係数(大きくすると探索が活発になる)
-    sap_loss_coeff: float = 0  # sapのlossの係数
+    pi_loss_coeff: float = 0  # ポリシー勾配のlossの係数
+    vf_loss_coeff: float = 0  # 価値関数のlossの係数
+    entropy_coeff: float = 0  # エントロピーのlossの係数(大きくすると探索が活発になる)
+    sap_loss_coeff: float = 1  # sapのlossの係数
     # reward
     point_weight: float = 0  # マッチの報酬を超えないようにすべきなので適用する場合1e-3程度
 
@@ -453,20 +454,20 @@ def freeze(model: nn.Module, model_name: Model):
             param.requires_grad = False
 
         # UNet後のpolicyネットワークのパラメータをTrueにする
-        # for param in model.sap_net1.parameters():
-        #     param.requires_grad = True
-        # for param in model.sap_net2.parameters():
-        #     param.requires_grad = True
-        # for param in model.sap_net3.parameters():
-        #     param.requires_grad = True
+        for param in model.sap_net1.parameters():
+            param.requires_grad = True
+        for param in model.sap_net2.parameters():
+            param.requires_grad = True
+        for param in model.sap_net3.parameters():
+            param.requires_grad = True
         # for param in model.policy_net1_from_sap.parameters():
         #     param.requires_grad = True
         # for param in model.policy_net2.parameters():
         #     param.requires_grad = True
         # for param in model.policy_net3.parameters():
         #     param.requires_grad = True
-        for param in model.policy_net4.parameters():
-            param.requires_grad = True
+        # for param in model.policy_net4.parameters():
+        #     param.requires_grad = True
 
     elif model_name == Model.ConvLSTM:
         for param in model.inc.parameters():
@@ -1091,7 +1092,7 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
 
         # The summed weighted loss.
         total_loss = (
-            mean_pi_loss
+            mean_pi_loss * config.pi_loss_coeff
             + mean_vf_loss * config.vf_loss_coeff
             + (mean_entropy_loss * self.entropy_coeff_schedulers_per_module[module_id].get_current_value())
             + mean_sap_loss
@@ -1346,6 +1347,7 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
     )
     # あまり良くなさそうだが参照しやすいようにここに係数を追加しておく
     config.sap_loss_coeff = cfg.sap_loss_coeff
+    config.pi_loss_coeff = cfg.pi_loss_coeff
     return config
 
 
