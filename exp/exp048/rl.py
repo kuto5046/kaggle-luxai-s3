@@ -91,7 +91,7 @@ class Config:
     # common
     exp_name: str = Path(__file__).parent.name
     debug: bool = False
-    notes: str = "高速化した上でfreeze=Falseで学習"
+    notes: str = "1から学習してみる"
     env_name: str = "lux-s3-v0"
     root_dir: Path = Path("/home/kyohei.uto/kaggle-luxai-s3")
     exp_dir: Path = root_dir / f"exp/{exp_name}"
@@ -107,8 +107,8 @@ class Config:
     freeze: bool = False
     overlap_penalty: float = 2.0
     stochastic: bool = True
-    best_pretrained_path: Path | None = root_dir / "exp/rl_best/output/best_model.ckpt"
-    lb_best_pretrained_path: Path | None = root_dir / "exp/lb_best/output/best_model.ckpt"
+    best_pretrained_path: Path | None = None  # root_dir / "exp/rl_best/output/best_model.ckpt"
+    lb_best_pretrained_path: Path | None = None  # root_dir / "exp/lb_best/output/best_model.ckpt"
 
     num_cpus_per_learner: int = 1
     num_gpus_per_learner: int = 1
@@ -122,14 +122,14 @@ class Config:
     # そこで0を指定しlocal learnerとして動かし直接コードで学習時にcudaを指定するようにしている
     num_learners: int = 0
     # 評価用
-    evaluation_num_env_runners: int = 25
+    evaluation_num_env_runners: int = 5
     # データ収集用
-    num_env_runners: int = 70
+    num_env_runners: int = 18
 
     # 学習設定
     training_minutes: int = 60 * 24  # 1日
     # workerからLearnerに送られるバッチのキューの最大サイズ. env_runner数と同じくらいが良いのではと思っている
-    learner_queue_size: int = 100
+    learner_queue_size: int = 50
     # 学習時に同じ時系列として扱いたいstep数を設定してやる。報酬が含まれるように1マッチ分の長さにする
     # batch_mode="truncate_episodes"の場合はmin(rollout_fragment_length, 101)stepごとにデータが送信される
     rollout_fragment_length: int | str | None = 101
@@ -152,7 +152,7 @@ class Config:
     entropy_coeff: float = 1e-5  # エントロピーのlossの係数(大きくすると探索が活発になる)
     sap_loss_coeff: float = 1e-3  # sapのlossの係数
     # reward
-    point_weight: float = 0  # マッチの報酬を超えないようにすべきなので適用する場合1e-3程度
+    point_weight: float = 1e-3  # マッチの報酬を超えないようにすべきなので適用する場合1e-3程度
 
     def __post_init__(self):
         if self.debug:
@@ -1295,7 +1295,7 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
                 else random.choice(
                     [
                         OWN_POLICY,  # self-play
-                        BEST_POLICY,
+                        # BEST_POLICY,
                         # LB_BEST_POLICY,
                     ]
                 )
