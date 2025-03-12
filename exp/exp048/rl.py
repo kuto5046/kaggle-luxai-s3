@@ -93,7 +93,7 @@ class Config:
     debug: bool = False
     notes: str = "1から学習してみる"
     env_name: str = "lux-s3-v0"
-    root_dir: Path = Path("/home/kyohei.uto/kaggle-luxai-s3")
+    root_dir: Path = Path("/home/user/work")
     exp_dir: Path = root_dir / f"exp/{exp_name}"
     output_dir: Path = root_dir / f"output/{exp_name}"
 
