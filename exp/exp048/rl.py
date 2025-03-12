@@ -107,7 +107,7 @@ class Config:
     freeze: bool = False
     overlap_penalty: float = 2.0
     stochastic: bool = True
-    best_pretrained_path: Path | None = None  # root_dir / "exp/rl_best/output/best_model.ckpt"
+    best_pretrained_path: Path | None = root_dir / "exp/rl_best/output/best_model.ckpt"
     lb_best_pretrained_path: Path | None = None  # root_dir / "exp/lb_best/output/best_model.ckpt"
 
     num_cpus_per_learner: int = 1
@@ -1194,6 +1194,17 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
     tmp_env = env_creator(env_config)
     observation_space = tmp_env.get_observation_space("player_0")
     action_space = tmp_env.get_action_space("player_0")
+    train_rl_module_spec = RLModuleSpec(
+        module_class=LuxUnetTorchRLModule,
+        observation_space=observation_space,
+        action_space=action_space,
+        model_config={
+            "n_stack": cfg.unet_n_stack,
+            "pretrained_path": None,  # 一から学習してみる
+            "freeze": cfg.freeze,
+            "model_name": Model.UNet,
+        },
+    )
     best_rl_module_spec = RLModuleSpec(
         module_class=LuxUnetTorchRLModule,
         observation_space=observation_space,
@@ -1308,7 +1319,7 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
             rl_module_spec=MultiRLModuleSpec(
                 # policy名とモデルの紐づけ
                 rl_module_specs={
-                    OWN_POLICY: best_rl_module_spec,
+                    OWN_POLICY: train_rl_module_spec,
                     BEST_POLICY: best_rl_module_spec,
                     # LB_BEST_POLICY: lb_best_rl_module_spec,
                 }
