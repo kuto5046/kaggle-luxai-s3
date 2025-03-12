@@ -91,7 +91,7 @@ class Config:
     # common
     exp_name: str = Path(__file__).parent.name
     debug: bool = False
-    notes: str = "1から学習してみる"
+    notes: str = "policyにsoftmaxを適用して1から学習してみる"
     env_name: str = "lux-s3-v0"
     root_dir: Path = Path("/home/user/work")
     exp_dir: Path = root_dir / f"exp/{exp_name}"
@@ -578,7 +578,7 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
         masked_policy_logits = masked_policy_logits.reshape(batch_size, num_actions, -1).transpose(2, 1)
         unit_mask = unit_mask.reshape(batch_size, -1)
         return {
-            Columns.ACTION_DIST_INPUTS: masked_policy_logits,
+            Columns.ACTION_DIST_INPUTS: torch.softmax(masked_policy_logits, dim=-1),
             # unit位置のみpolicyを学習する
             "unit_mask": unit_mask,
             # 行動に利用されるsapの確率
