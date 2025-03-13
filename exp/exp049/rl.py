@@ -91,7 +91,7 @@ class Config:
     # common
     exp_name: str = Path(__file__).parent.name
     debug: bool = False
-    notes: str = "policyにsoftmaxを適用して1から学習してみる"
+    notes: str = "parameter変えてみる"
     env_name: str = "lux-s3-v0"
     root_dir: Path = Path("/home/user/work")
     exp_dir: Path = root_dir / f"exp/{exp_name}"
@@ -150,7 +150,7 @@ class Config:
     vtrace_clip_pg_rho_threshold: float = 1.0  # ポリシー勾配のlossの係数
     vf_loss_coeff: float = 1.0  # 価値関数のlossの係数
     entropy_coeff: float = 1e-3  # エントロピーのlossの係数(大きくすると探索が活発になる)
-    sap_loss_coeff: float = 1.0  # sapのlossの係数
+    sap_loss_coeff: float = 1e-1  # sapのlossの係数
     # reward
     point_weight: float = 1e-3  # マッチの報酬を超えないようにすべきなので適用する場合1e-3程度
 
@@ -578,7 +578,7 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
         masked_policy_logits = masked_policy_logits.reshape(batch_size, num_actions, -1).transpose(2, 1)
         unit_mask = unit_mask.reshape(batch_size, -1)
         return {
-            Columns.ACTION_DIST_INPUTS: torch.softmax(masked_policy_logits, dim=-1),
+            Columns.ACTION_DIST_INPUTS: masked_policy_logits,
             # unit位置のみpolicyを学習する
             "unit_mask": unit_mask,
             # 行動に利用されるsapの確率
