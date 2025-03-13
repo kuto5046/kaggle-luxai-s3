@@ -139,8 +139,8 @@ class Config:
     evaluation_duration: int = 50  # 1回の評価で何エピソード分評価するか
     # learner
     gamma: float = 0.9995
-    lr: float = 5e-5
-    grad_clip: float = 0.5
+    lr: float = 1e-5
+    grad_clip: float = 1.0
     grad_clip_by: str = "global_norm"
     train_batch_size_per_learner: int = 128
     num_epochs: int = 1  # 1回の学習のepoch数。新しいデータがどんどん追加されてくるためepoch数は1にしている
@@ -148,9 +148,9 @@ class Config:
     # loss
     vtrace_clip_rho_threshold: float = 1.0  # 価値関数のlossの係数
     vtrace_clip_pg_rho_threshold: float = 1.0  # ポリシー勾配のlossの係数
-    vf_loss_coeff: float = 1e-1  # 価値関数のlossの係数
-    entropy_coeff: float = 1e-5  # エントロピーのlossの係数(大きくすると探索が活発になる)
-    sap_loss_coeff: float = 1e-3  # sapのlossの係数
+    vf_loss_coeff: float = 1.0  # 価値関数のlossの係数
+    entropy_coeff: float = 1e-3  # エントロピーのlossの係数(大きくすると探索が活発になる)
+    sap_loss_coeff: float = 1.0  # sapのlossの係数
     # reward
     point_weight: float = 1e-3  # マッチの報酬を超えないようにすべきなので適用する場合1e-3程度
 
