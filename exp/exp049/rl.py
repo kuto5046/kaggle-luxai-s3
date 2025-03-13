@@ -138,8 +138,8 @@ class Config:
     evaluation_interval: int = 100  # 何回trainをしたら評価を実施するか　１回が30secくらいなので50回で1500sec=25分くらい
     evaluation_duration: int = 50  # 1回の評価で何エピソード分評価するか
     # learner
-    gamma: float = 0.9995
-    lr: float = 1e-5
+    gamma: float = 0.999
+    lr: float = 1e-4
     grad_clip: float = 1.0
     grad_clip_by: str = "global_norm"
     train_batch_size_per_learner: int = 128
@@ -149,7 +149,7 @@ class Config:
     vtrace_clip_rho_threshold: float = 1.0  # 価値関数のlossの係数
     vtrace_clip_pg_rho_threshold: float = 1.0  # ポリシー勾配のlossの係数
     vf_loss_coeff: float = 1.0  # 価値関数のlossの係数
-    entropy_coeff: float = 1e-3  # エントロピーのlossの係数(大きくすると探索が活発になる)
+    entropy_coeff: float = 1e-2  # エントロピーのlossの係数(大きくすると探索が活発になる)
     sap_loss_coeff: float = 1e-1  # sapのlossの係数
     # reward
     point_weight: float = 1e-3  # マッチの報酬を超えないようにすべきなので適用する場合1e-3程度
@@ -981,7 +981,8 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
         recurrent_seq_len = batch.get("seq_lens")
 
         loss_mask = fwd_out["unit_mask"].float()
-        size_loss_mask = torch.sum(loss_mask)
+        # size_loss_mask = torch.sum(loss_mask)
+        size_loss_mask = loss_mask.shape[0]  # batch_size
 
         # Behavior actions logp and target actions logp.
         behaviour_actions_logp = batch[Columns.ACTION_LOGP]
