@@ -108,7 +108,7 @@ class Config:
     overlap_penalty: float = 2.0
     stochastic: bool = True
     best_pretrained_path: Path | None = root_dir / "exp/rl_best/output/best_model.ckpt"
-    lb_best_pretrained_path: Path | None = None  # root_dir / "exp/lb_best/output/best_model.ckpt"
+    # lb_best_pretrained_path: Path | None = None  # root_dir / "exp/lb_best/output/best_model.ckpt"
 
     num_cpus_per_learner: int = 1
     num_gpus_per_learner: int = 1
@@ -1217,21 +1217,21 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
             "model_name": Model.UNet,
         },
     )
-    lb_best_rl_module_spec = RLModuleSpec(
-        module_class=LuxUnetTorchRLModule,
-        observation_space=observation_space,
-        action_space=action_space,
-        model_config={
-            "n_stack": cfg.lstm_n_stack,
-            "pretrained_path": cfg.lb_best_pretrained_path,
-            "freeze": cfg.freeze,
-            "model_name": Model.ConvLSTM,
-            "num_layers": cfg.num_layers,
-            "hidden_dim": cfg.hidden_dim,
-            "kernel_size": cfg.kernel_size,
-            "num_repeats": cfg.num_repeats,
-        },
-    )
+    # lb_best_rl_module_spec = RLModuleSpec(
+    #     module_class=LuxUnetTorchRLModule,
+    #     observation_space=observation_space,
+    #     action_space=action_space,
+    #     model_config={
+    #         "n_stack": cfg.lstm_n_stack,
+    #         "pretrained_path": cfg.lb_best_pretrained_path,
+    #         "freeze": cfg.freeze,
+    #         "model_name": Model.ConvLSTM,
+    #         "num_layers": cfg.num_layers,
+    #         "hidden_dim": cfg.hidden_dim,
+    #         "kernel_size": cfg.kernel_size,
+    #         "num_repeats": cfg.num_repeats,
+    #     },
+    # )
     config = (
         IMPALAConfig()
         .api_stack(
