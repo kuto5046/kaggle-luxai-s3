@@ -36,8 +36,8 @@ class Config:
     tta: bool = False
     debug: bool = False
 
-    checkpoint_path: Path = Path(__file__).parent.parent / "output/best_model.ckpt"
-    # checkpoint_path: Path = Path(__file__).parent.parent / "output/policy_latest_model.pth"
+    # checkpoint_path: Path = Path(__file__).parent.parent / "output/best_model.ckpt"
+    checkpoint_path: Path = Path("/home/user/work/output/exp049/policy_latest_model.pth")
 
 
 def load_model(model: nn.Module, checkpoint_path: Path) -> nn.Module:

@@ -563,6 +563,10 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
         sap_logits = sap_logits - (1 - sap_available_area) * 1e32
         sap_logits = sap_logits.reshape(batch_size, -1)  # (batch, height * width)
         opp_unit_map = opp_unit_map.reshape(batch_size, -1)  # (batch, height * width)
+        # maskも復元
+        unit_mask = batch[Columns.OBS]["state"][:, -1, State.OWN_UNIT_COUNT] > 0
+        flipped_unit_mask = torch.flip(unit_mask, [2, 3]).clone()
+        unit_mask = torch.where(player_1_mask, flipped_unit_mask, unit_mask)
         # batch方向に1つ手前にずらすことで次のstepの敵ユニット位置をtargetとする (sap_targets[0, :] == opp_unit_map[1, :]という関係)
         # rollout_fragment_lengthが101なので連続してる想定だが101stepは連続している。
         # rolloutの境界ではtargetがズレるのでloss計算から除外する処理を後段で行う
@@ -570,8 +574,7 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
 
         num_actions = policy_logits.shape[1]
         # stateは(batch, stack, ch, height, width)なので最新のunit位置を以下のように取得(batch, height, width)
-        unit_mask = batch[Columns.OBS]["state"][:, -1, State.OWN_UNIT_COUNT] > 0
-        action_mask = batch[Columns.OBS]["legal_action_mask"]
+        action_mask = batch[Columns.OBS]["legal_action_mask"]  # 反転していないので復元不要
         # 無効な行動(action_mask=0)は負の大きな値になるためsoftmax後は0になる。
         masked_policy_logits = policy_logits - 1e32 * (1 - action_mask)
         # この時点では(batch, action, height, width)なので(batch, height, width, action)に変換
@@ -1059,7 +1062,7 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
         # The policy gradients loss.
         pi_loss = -torch.sum(target_actions_logp_time_major * pg_advantages)
 
-        # size_loss_maskで割ることで1step-1ユニットあたりのlossになる
+        # size_loss_maskで割ることで1stepあたりのlossになる
         mean_pi_loss = pi_loss / size_loss_mask
 
         # The baseline loss.
