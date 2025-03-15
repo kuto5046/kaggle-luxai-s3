@@ -1,6 +1,8 @@
 import os
+import copy
 import random
 import logging
+import argparse
 from enum import IntEnum, auto
 from time import time
 from typing import Any, Optional
@@ -67,7 +69,7 @@ from lux.utils import (
     extract_global_state,
     get_valid_policy_map,
 )
-from lux.models import LuxUNetModel, LuxConvLSTMModel, LuxValueConvModel, LuxUNetModelInferenceWrapper
+from lux.models import LuxUNetModel, LuxValueConvModel, LuxUNetModelInferenceWrapper
 from lux.params import EnvParams
 from lux.imitation_agent import action_map_to_action
 
@@ -91,7 +93,7 @@ class Config:
     # common
     exp_name: str = Path(__file__).parent.name
     debug: bool = False
-    notes: str = "parameter変えてみる"
+    notes: str = "KL lossを追加"
     env_name: str = "lux-s3-v0"
     root_dir: Path = Path("/home/user/work")
     exp_dir: Path = root_dir / f"exp/{exp_name}"
@@ -103,7 +105,9 @@ class Config:
     overlap_penalty: float = 2.0
     stochastic: bool = True
     best_pretrained_path: Path | None = root_dir / "exp/rl_best/output/best_model.ckpt"
-    # lb_best_pretrained_path: Path | None = None  # root_dir / "exp/lb_best/output/best_model.ckpt"
+    teacher_model_path: Path | None = (
+        root_dir / "exp/rl_best/output/best_model.ckpt"
+    )  # KLダイバージェンスのためのtargetモデル
 
     num_cpus_per_learner: int = 1
     num_gpus_per_learner: int = 1
@@ -143,9 +147,14 @@ class Config:
     # loss
     vtrace_clip_rho_threshold: float = 1.0  # 価値関数のlossの係数
     vtrace_clip_pg_rho_threshold: float = 1.0  # ポリシー勾配のlossの係数
+    vtrace_pi_loss_coeff: float = 1.0  # ポリシー勾配のlossの係数
+    upgo_pi_loss_coeff: float = 1.0  # ポリシー勾配のlossの係数
     vf_loss_coeff: float = 1e-1  # 価値関数のlossの係数
     entropy_coeff: float = 1e-2  # エントロピーのlossの係数(大きくすると探索が活発になる)
+    kl_loss_coeff: float = 1e-2  # KLダイバージェンスのlossの係数
     sap_loss_coeff: float = 1e-1  # sapのlossの係数
+    upgo_lmb: float = 0.9  # upgoのlambda
+
     # reward
     point_weight: float = 1e-3  # マッチの報酬を超えないようにすべきなので適用する場合1e-3程度
 
@@ -153,10 +162,27 @@ class Config:
         if self.debug:
             self.num_env_runners = 1
             self.evaluation_num_env_runners = 1
-            self.evaluation_interval = 1
+            self.evaluation_interval = 100
             self.evaluation_duration = 1
             self.training_minutes = 10
             self.num_epochs = 1
+
+    @classmethod
+    def from_args(cls) -> "Config":
+        """
+        configをコマンドライン引数から読み込む
+        $ uv run python exp/exp016/train.py --debug --epoch 2
+        """
+        parser = argparse.ArgumentParser()
+        for field in cls.__dataclass_fields__.values():
+            parser.add_argument(
+                f"--{field.name}",
+                type=field.type,
+                default=field.default,
+                help=f"{field.name} (default: {field.default})",
+            )
+        args = parser.parse_args()
+        return cls(**vars(args))
 
 
 def env_creator(config: dict[str, Any]) -> MultiAgentEnv:
@@ -514,17 +540,7 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
                 n_stack=self.n_stack,
                 res=True,
             )
-        elif model_name == Model.ConvLSTM:
-            assert False, "ConvLSTMはcache未対応"
-            base_policy_model = LuxConvLSTMModel(
-                state_space_size=len(State),
-                global_state_space_size=len(GlobalState),
-                action_space_size=len(Action),
-                num_layers=self.model_config["num_layers"],
-                hidden_dim=self.model_config["hidden_dim"],
-                kernel_size=self.model_config["kernel_size"],
-                num_repeats=self.model_config["num_repeats"],
-            )
+            teacher_policy_model = copy.deepcopy(base_policy_model)
         else:
             raise ValueError(f"Invalid model name: {model_name}")
 
@@ -536,12 +552,20 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
             state_dict = {k.replace("model.", ""): v for k, v in ckpt["state_dict"].items()}
             base_policy_model.load_state_dict(state_dict)
             print(f"Loaded model from {self.model_config['pretrained_path']} on {self.device}")
-
         if self.model_config["freeze"]:
             freeze(base_policy_model, model_name)
 
+        if self.model_config["teacher_model_path"]:
+            ckpt = torch.load(self.model_config["teacher_model_path"], weights_only=False, map_location=self.device)
+            state_dict = {k.replace("model.", ""): v for k, v in ckpt["state_dict"].items()}
+            teacher_policy_model.load_state_dict(state_dict)
+            for param in teacher_policy_model.parameters():
+                param.requires_grad = False
+            print(f"Loaded teacher model from {self.model_config['teacher_model_path']} on {self.device}")
+
         # モデルを明示的に同じデバイスに配置
         self.policy_model = LuxUNetModelInferenceWrapper(base_policy_model, self.n_stack)
+        self.teacher_policy_model = LuxUNetModelInferenceWrapper(teacher_policy_model, self.n_stack)
         self.value_model = LuxValueConvModel(
             state_space_size=len(State),
             global_state_space_size=len(GlobalState),
@@ -554,6 +578,7 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
     def _forward(self, batch, is_train=False, **kwargs):
         batch_size = batch[Columns.OBS]["state"].shape[0]
         outputs = self.policy_model(batch[Columns.OBS], is_train)
+        teacher_outputs = self.teacher_policy_model(batch[Columns.OBS], is_train)
         # batch方向に1つ手前にずらすことで次のstepの敵ユニット位置をtargetとする (sap_targets[0, :] == opp_unit_map[1, :]という関係)
         # rollout_fragment_lengthが101なので連続してる想定だが101stepは連続している。
         # rolloutの境界ではtargetがズレるのでloss計算から除外する処理を後段で行う
@@ -563,8 +588,12 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
         masked_policy_logits = outputs["policy"] - 1e32 * (1 - batch[Columns.OBS]["legal_action_mask"])
         # この時点では(batch, action, height, width)なので(batch, height, width, action)に変換
         masked_policy_logits = masked_policy_logits.reshape(batch_size, len(Action), -1).transpose(2, 1)
+        # targetモデルも同じ
+        masked_teacher_policy_logits = teacher_outputs["policy"] - 1e32 * (1 - batch[Columns.OBS]["legal_action_mask"])
+        masked_teacher_policy_logits = masked_teacher_policy_logits.reshape(batch_size, len(Action), -1).transpose(2, 1)
         return {
             Columns.ACTION_DIST_INPUTS: masked_policy_logits,
+            "teacher_policy_logits": masked_teacher_policy_logits,
             # unit位置のみpolicyを学習する
             "unit_mask": (batch[Columns.OBS]["state"][:, -1, State.OWN_UNIT_COUNT] > 0).reshape(batch_size, -1),
             # 行動に利用されるsapの確率
@@ -794,22 +823,16 @@ class WandbLoggerCallback(RLlibCallback):
         if result.get("learners"):
             # learner_metrics = result["learners"][OWN_POLICY].keys()
             learner_metrics = [
-                # "num_non_trainable_parameters",  # 一定
                 "gradients_default_optimizer_global_norm",
                 "diff_num_grad_updates_vs_sampler_policy",
-                # "module_train_batch_size_mean",  # 一定
-                # "pi_loss",  # mean_pi_lossと同じ
                 "num_module_steps_trained_lifetime",  # これが学習したstep数
-                # "weights_seq_no",  # 一定
                 "total_loss",
-                # "default_optimizer_learning_rate",  # 一定
-                "mean_pi_loss",
+                "vtrace_pi_loss",
+                # "upgo_pi_loss",
                 "num_module_steps_trained",
-                "mean_vf_loss",
-                # "num_trainable_parameters",  # 一定
-                # "curr_entropy_coeff",  # 一定
-                # "vf_loss",  # mean_vf_lossと同じ
+                "vf_loss",
                 "entropy",
+                "kl_loss",
                 "sap_loss",
             ]
             for key in learner_metrics:
@@ -974,6 +997,13 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
         behaviour_actions_logp = batch[Columns.ACTION_LOGP]
         target_policy_dist = module.get_train_action_dist_cls().from_logits(fwd_out[Columns.ACTION_DIST_INPUTS])
         target_actions_logp = target_policy_dist.logp(batch[Columns.ACTIONS]["action"])
+
+        # 学習中の方策とtargetモデルの方策のKLダイバージェンスを計算
+        teacher_policy_dist = module.get_train_action_dist_cls().from_logits(fwd_out["teacher_policy_logits"])
+        kl_divergences = target_policy_dist.kl(teacher_policy_dist)
+        kl_divergences = torch.where(torch.isfinite(kl_divergences), kl_divergences, torch.zeros_like(kl_divergences))
+        mean_kl_loss = ((kl_divergences * loss_mask).sum() * config.kl_loss_coeff) / size_loss_mask
+
         # loss_maskを適用した上でマップの次元を潰す
         # (batch_size, 24*24)のマップ状態をもつデータをunit位置のmaskを適用した上で(batch_size, 1)に潰す
         behaviour_actions_logp = (behaviour_actions_logp * loss_mask).sum(dim=1)
@@ -1031,7 +1061,7 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
         ) * config.gamma
 
         # Note that vtrace will compute the main loop on the CPU for better performance.
-        vtrace_adjusted_target_values, pg_advantages = vtrace_torch(
+        vtrace_adjusted_target_values, vtrace_pg_advantages = vtrace_torch(
             target_action_log_probs=target_actions_logp_time_major,
             behaviour_action_log_probs=behaviour_actions_logp_time_major,
             discounts=discounts_time_major,
@@ -1042,20 +1072,31 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
             clip_pg_rho_threshold=config.vtrace_clip_pg_rho_threshold,
         )
 
+        # _upgo_adjusted_target_values, upgo_pg_advantages = upgo(
+        #     rewards=rewards_time_major,
+        #     values=values_time_major,
+        #     bootstrap_value=bootstrap_values,
+        #     discounts=discounts_time_major,
+        #     lmb=config.upgo_lmb,
+        # )
+
         # The policy gradients loss.
-        pi_loss = -torch.sum(target_actions_logp_time_major * pg_advantages)
+        vtrace_pi_loss = -torch.sum(target_actions_logp_time_major * vtrace_pg_advantages)
+        # upgo_pi_loss = -torch.sum(target_actions_logp_time_major * upgo_pg_advantages)
 
         # size_loss_maskで割ることで1stepあたりのlossになる
-        mean_pi_loss = pi_loss / size_loss_mask
-
+        mean_vtrace_pi_loss = vtrace_pi_loss * config.vtrace_pi_loss_coeff / size_loss_mask
+        # mean_upgo_pi_loss = upgo_pi_loss * config.upgo_pi_loss_coeff / size_loss_mask
         # The baseline loss.
         delta = values_time_major - vtrace_adjusted_target_values
         vf_loss = 0.5 * torch.sum(torch.pow(delta, 2.0))
-        mean_vf_loss = vf_loss / size_loss_mask
+        mean_vf_loss = (vf_loss * config.vf_loss_coeff) / size_loss_mask
 
         # The entropy loss.
         entropy_loss = -torch.sum(target_policy_dist.entropy() * loss_mask)
-        mean_entropy_loss = entropy_loss / size_loss_mask
+        mean_entropy_loss = (
+            entropy_loss * self.entropy_coeff_schedulers_per_module[module_id].get_current_value()
+        ) / size_loss_mask
 
         # SAPの教師あり学習
         sap_loss = torch.nn.functional.binary_cross_entropy_with_logits(
@@ -1078,20 +1119,22 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
 
         # The summed weighted loss.
         total_loss = (
-            mean_pi_loss
-            + mean_vf_loss * config.vf_loss_coeff
-            + (mean_entropy_loss * self.entropy_coeff_schedulers_per_module[module_id].get_current_value())
+            mean_vtrace_pi_loss
+            # + mean_upgo_pi_loss
+            + mean_vf_loss
+            + mean_entropy_loss
             + mean_sap_loss
+            + mean_kl_loss
         )
 
         # Log important loss stats.
         self.metrics.log_dict(
             {
-                "pi_loss": pi_loss,
-                "mean_pi_loss": mean_pi_loss,
-                "vf_loss": vf_loss,
-                "mean_vf_loss": mean_vf_loss,
+                "vtrace_pi_loss": mean_vtrace_pi_loss,
+                # "upgo_pi_loss": mean_upgo_pi_loss,
+                "vf_loss": mean_vf_loss,
                 ENTROPY_KEY: -mean_entropy_loss,
+                "kl_loss": mean_kl_loss,
                 "sap_loss": mean_sap_loss,
             },
             key=module_id,
@@ -1157,6 +1200,25 @@ class CustomGetActions(ConnectorV2):
                 batch[Columns.ACTION_LOGP] = action_dist.logp(actions)
 
 
+# https://github.com/IsaiahPressman/Kaggle_Lux_AI_2021/blob/973a6c6c63211b6c7ab6fdf50e026e458d1f6e4e/lux_ai/torchbeast/core/upgo.py
+def upgo(
+    rewards: torch.Tensor, values: torch.Tensor, bootstrap_value: torch.Tensor, discounts: torch.Tensor, lmb: float
+) -> torch.Tensor:
+    # Append bootstrapped value to get [v1, ..., v_t+1]
+    values_t_plus_1 = torch.cat([values[1:], torch.unsqueeze(bootstrap_value, 0)], dim=0)
+    target_values = [bootstrap_value]
+    for t in range(discounts.shape[0] - 1, -1, -1):
+        # noinspection PyUnresolvedReferences
+        target_values.append(
+            rewards[t]
+            + discounts[t] * torch.max(values_t_plus_1[t], (1 - lmb) * values_t_plus_1[t] + lmb * target_values[-1])
+        )
+    target_values.reverse()
+    # Remove bootstrap value from end of target_values list
+    target_values = torch.stack(target_values[:-1], dim=0)
+    return target_values, target_values - values
+
+
 def custom_module_to_env_connector(env: MultiAgentEnv) -> list[ConnectorV2]:
     return [
         # GetActions(),
@@ -1187,8 +1249,8 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
         action_space=action_space,
         model_config={
             "n_stack": cfg.n_stack,
-            "pretrained_path": None,  # 一から学習してみる
-            # "pretrained_path": cfg.best_pretrained_path,
+            "pretrained_path": None,  # 一から学習
+            "teacher_model_path": cfg.teacher_model_path,
             "freeze": cfg.freeze,
             "model_name": Model.UNet,
         },
@@ -1201,6 +1263,7 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
         model_config={
             "n_stack": cfg.n_stack,
             "pretrained_path": cfg.best_pretrained_path,
+            "teacher_model_path": cfg.teacher_model_path,
             "freeze": cfg.freeze,
             "model_name": Model.UNet,
         },
@@ -1328,8 +1391,12 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
         #     export_native_model_files=True,
         # )
     )
-    # あまり良くなさそうだが参照しやすいようにここに係数を追加しておく
+    # あまり良くなさそうだがloss計算時に参照しやすいようにここに係数を追加しておく
+    config.vtrace_pi_loss_coeff = cfg.vtrace_pi_loss_coeff
+    config.upgo_pi_loss_coeff = cfg.upgo_pi_loss_coeff
     config.sap_loss_coeff = cfg.sap_loss_coeff
+    config.kl_loss_coeff = cfg.kl_loss_coeff
+    config.upgo_lmb = cfg.upgo_lmb
     return config
 
 
