@@ -98,12 +98,7 @@ class Config:
     output_dir: Path = root_dir / f"output/{exp_name}"
 
     # pretrained model
-    unet_n_stack: int = 4
-    lstm_n_stack: int = 8
-    num_layers: int = 3
-    hidden_dim: int = 64
-    kernel_size: int = 5
-    num_repeats: int = 3
+    n_stack: int = 4
     freeze: bool = False
     overlap_penalty: float = 2.0
     stochastic: bool = True
@@ -148,7 +143,7 @@ class Config:
     # loss
     vtrace_clip_rho_threshold: float = 1.0  # 価値関数のlossの係数
     vtrace_clip_pg_rho_threshold: float = 1.0  # ポリシー勾配のlossの係数
-    vf_loss_coeff: float = 1.0  # 価値関数のlossの係数
+    vf_loss_coeff: float = 1e-1  # 価値関数のlossの係数
     entropy_coeff: float = 1e-2  # エントロピーのlossの係数(大きくすると探索が活発になる)
     sap_loss_coeff: float = 1e-1  # sapのlossの係数
     # reward
@@ -322,9 +317,23 @@ class RLLibLuxEnv(MultiAgentEnv):
         agent0_legal_action_mask = get_valid_policy_map(obs["player_0"], 0, self.episode_store1)
         agent1_legal_action_mask = get_valid_policy_map(obs["player_1"], 1, self.episode_store2)
 
+        # 自陣が(0, 0)になるようにlegal_action_maskを反転
+        agent1_legal_action_mask = np.flip(agent1_legal_action_mask, [1, 2])
+        (
+            agent1_legal_action_mask[Action.UP],
+            agent1_legal_action_mask[Action.DOWN],
+            agent1_legal_action_mask[Action.LEFT],
+            agent1_legal_action_mask[Action.RIGHT],
+        ) = (
+            agent1_legal_action_mask[Action.DOWN].copy(),
+            agent1_legal_action_mask[Action.UP].copy(),
+            agent1_legal_action_mask[Action.RIGHT].copy(),
+            agent1_legal_action_mask[Action.LEFT].copy(),
+        )
+
         # 敵の観測データを使うことで完全な敵ユニット位置を推定できる
-        player0_opp_unit_count = agent1_state[State.OWN_UNIT_COUNT] * EnvParams.max_units
-        player1_opp_unit_count = agent0_state[State.OWN_UNIT_COUNT] * EnvParams.max_units
+        player0_opp_unit_count = np.flip(agent1_state[State.OWN_UNIT_COUNT], axis=(0, 1)) * EnvParams.max_units
+        player1_opp_unit_count = np.flip(agent0_state[State.OWN_UNIT_COUNT], axis=(0, 1)) * EnvParams.max_units
         # 1の周囲8マスに0.5を割り振るためのカーネル
         kernel = np.array([[0.3, 0.3, 0.3], [0.3, 1.0, 0.3], [0.3, 0.3, 0.3]])
 
@@ -364,16 +373,28 @@ class RLLibLuxEnv(MultiAgentEnv):
         actions = {agent_id: np.zeros((EnvParams.max_units, 3), dtype=np.int32) for agent_id in self.agents}
 
         # 1次元マップの行動空間で渡ってくるので2次元マップに変換
-        action_map1 = action_dict["player_0"]["action"].reshape(EnvParams.map_height, EnvParams.map_width)
-        action_map2 = action_dict["player_1"]["action"].reshape(EnvParams.map_height, EnvParams.map_width)
+        action_map0 = action_dict["player_0"]["action"].reshape(EnvParams.map_height, EnvParams.map_width)
+        action_map1 = action_dict["player_1"]["action"].reshape(EnvParams.map_height, EnvParams.map_width)
 
         # sapアクションも2次元マップに変換
-        sap_map1 = action_dict["player_0"]["sap"].reshape(EnvParams.map_height, EnvParams.map_width)
-        sap_map2 = action_dict["player_1"]["sap"].reshape(EnvParams.map_height, EnvParams.map_width)
+        sap_map0 = action_dict["player_0"]["sap"].reshape(EnvParams.map_height, EnvParams.map_width)
+        sap_map1 = action_dict["player_1"]["sap"].reshape(EnvParams.map_height, EnvParams.map_width)
+
+        # player1は(0,0)が自陣となるように反転しているため復元する
+        action_map1 = np.flip(action_map1, axis=(0, 1))
+        action_map1 = np.where(action_map1 == Action.UP, -1, action_map1)
+        action_map1 = np.where(action_map1 == Action.DOWN, Action.UP, action_map1)
+        action_map1 = np.where(action_map1 == -1, Action.DOWN, action_map1)
+
+        action_map1 = np.where(action_map1 == Action.LEFT, -1, action_map1)
+        action_map1 = np.where(action_map1 == Action.RIGHT, Action.LEFT, action_map1)
+        action_map1 = np.where(action_map1 == -1, Action.RIGHT, action_map1)
+
+        sap_map1 = np.flip(sap_map1, axis=(0, 1))
 
         actions["player_0"] = action_map_to_action(
-            action_map1,
-            sap_map1,
+            action_map0,
+            sap_map0,
             self.obs["player_0"],
             0,
             self.env_params,
@@ -382,8 +403,8 @@ class RLLibLuxEnv(MultiAgentEnv):
             self.episode_store1,
         )
         actions["player_1"] = action_map_to_action(
-            action_map2,
-            sap_map2,
+            action_map1,
+            sap_map1,
             self.obs["player_1"],
             1,
             self.env_params,
@@ -531,65 +552,27 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
 
     @override(TorchRLModule)
     def _forward(self, batch, is_train=False, **kwargs):
-        # (batch, stack, ch, height, width)であり,stackはモデルによって異なる。大きめのstackで渡ってくるためモデルに合わせて変形する
-        batch[Columns.OBS]["state"] = batch[Columns.OBS]["state"][:, -self.n_stack :, :, :, :].clone()
-        batch[Columns.OBS]["global_state"] = batch[Columns.OBS]["global_state"][:, -self.n_stack :].clone()
-
         batch_size = batch[Columns.OBS]["state"].shape[0]
         outputs = self.policy_model(batch[Columns.OBS], is_train)
-        policy_logits = outputs["policy"]
-        sap_logits = outputs["sap"]
-        opp_unit_map = batch[Columns.OBS]["opp_unit_map"]  # 反転処理は元々していないためここでも反転はしない
-        sap_available_area = batch[Columns.OBS]["state"][:, -1:, State.SAP_AVAILABLE_AREA]
-        player_id = batch[Columns.OBS]["player_id"]
-
-        # player_id1のポリシーを反転して自陣を復元する(自陣固定の後処理)
-        player_1_mask = (player_id == 1).view(-1, 1, 1, 1)  # バッチ次元に合わせてブロードキャスト可能な形に変換
-        flipped_policy_logits = torch.flip(policy_logits, [2, 3]).clone()
-        flipped_policy_logits[:, Action.DOWN, :, :], flipped_policy_logits[:, Action.UP, :, :] = (
-            flipped_policy_logits[:, Action.UP, :, :].clone(),
-            flipped_policy_logits[:, Action.DOWN, :, :].clone(),
-        )
-        flipped_policy_logits[:, Action.RIGHT, :, :], flipped_policy_logits[:, Action.LEFT, :, :] = (
-            flipped_policy_logits[:, Action.LEFT, :, :].clone(),
-            flipped_policy_logits[:, Action.RIGHT, :, :].clone(),
-        )
-        policy_logits = torch.where(player_1_mask, flipped_policy_logits, policy_logits)
-        # sapも復元
-        flipped_sap_logits = torch.flip(sap_logits, [2, 3]).clone()
-        flipped_sap_available_area = torch.flip(sap_available_area, [2, 3]).clone()
-        sap_logits = torch.where(player_1_mask, flipped_sap_logits, sap_logits)
-        sap_available_area = torch.where(player_1_mask, flipped_sap_available_area, sap_available_area)
-        sap_logits = sap_logits - (1 - sap_available_area) * 1e32
-        sap_logits = sap_logits.reshape(batch_size, -1)  # (batch, height * width)
-        opp_unit_map = opp_unit_map.reshape(batch_size, -1)  # (batch, height * width)
-        # maskも復元
-        unit_mask = batch[Columns.OBS]["state"][:, -1, State.OWN_UNIT_COUNT] > 0
-        flipped_unit_mask = torch.flip(unit_mask, [2, 3]).clone()
-        unit_mask = torch.where(player_1_mask, flipped_unit_mask, unit_mask)
         # batch方向に1つ手前にずらすことで次のstepの敵ユニット位置をtargetとする (sap_targets[0, :] == opp_unit_map[1, :]という関係)
         # rollout_fragment_lengthが101なので連続してる想定だが101stepは連続している。
         # rolloutの境界ではtargetがズレるのでloss計算から除外する処理を後段で行う
-        sap_targets = torch.roll(opp_unit_map, shifts=-1, dims=0)
-
-        num_actions = policy_logits.shape[1]
-        # stateは(batch, stack, ch, height, width)なので最新のunit位置を以下のように取得(batch, height, width)
-        action_mask = batch[Columns.OBS]["legal_action_mask"]  # 反転していないので復元不要
+        sap_targets = torch.roll(batch[Columns.OBS]["opp_unit_map"].reshape(batch_size, -1), shifts=-1, dims=0)
+        sap_logits = outputs["sap"].reshape(batch_size, -1)
         # 無効な行動(action_mask=0)は負の大きな値になるためsoftmax後は0になる。
-        masked_policy_logits = policy_logits - 1e32 * (1 - action_mask)
+        masked_policy_logits = outputs["policy"] - 1e32 * (1 - batch[Columns.OBS]["legal_action_mask"])
         # この時点では(batch, action, height, width)なので(batch, height, width, action)に変換
-        masked_policy_logits = masked_policy_logits.reshape(batch_size, num_actions, -1).transpose(2, 1)
-        unit_mask = unit_mask.reshape(batch_size, -1)
+        masked_policy_logits = masked_policy_logits.reshape(batch_size, len(Action), -1).transpose(2, 1)
         return {
             Columns.ACTION_DIST_INPUTS: masked_policy_logits,
             # unit位置のみpolicyを学習する
-            "unit_mask": unit_mask,
+            "unit_mask": (batch[Columns.OBS]["state"][:, -1, State.OWN_UNIT_COUNT] > 0).reshape(batch_size, -1),
             # 行動に利用されるsapの確率
             "sap": torch.sigmoid(sap_logits),
             # 以下はsapの学習に利用する.
             "sap_logits": sap_logits,
             "sap_targets": sap_targets,
-            "sap_available_area": sap_available_area.reshape(batch_size, -1),
+            "sap_available_area": batch[Columns.OBS]["state"][:, -1:, State.SAP_AVAILABLE_AREA].reshape(batch_size, -1),
         }
 
     @override(TorchRLModule)
@@ -1190,7 +1173,7 @@ def custom_module_to_env_connector(env: MultiAgentEnv) -> list[ConnectorV2]:
 def create_rl_config(cfg: Config) -> AlgorithmConfig:
     env_config = {
         # 環境では大きめにstackを作成しておきモデル側で必要なstackを抽出する
-        "n_stack": max(cfg.unet_n_stack, cfg.lstm_n_stack),
+        "n_stack": cfg.n_stack,
         "stochastic": cfg.stochastic,
         "overlap_penalty": cfg.overlap_penalty,
         "point_weight": cfg.point_weight,
@@ -1203,8 +1186,9 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
         observation_space=observation_space,
         action_space=action_space,
         model_config={
-            "n_stack": cfg.unet_n_stack,
-            "pretrained_path": None,  # 一から学習してみる
+            "n_stack": cfg.n_stack,
+            # "pretrained_path": None,  # 一から学習してみる
+            "pretrained_path": cfg.best_pretrained_path,
             "freeze": cfg.freeze,
             "model_name": Model.UNet,
         },
@@ -1215,27 +1199,12 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
         action_space=action_space,
         # モデル内部でself.model_config["key"]でアクセスできる
         model_config={
-            "n_stack": cfg.unet_n_stack,
+            "n_stack": cfg.n_stack,
             "pretrained_path": cfg.best_pretrained_path,
             "freeze": cfg.freeze,
             "model_name": Model.UNet,
         },
     )
-    # lb_best_rl_module_spec = RLModuleSpec(
-    #     module_class=LuxUnetTorchRLModule,
-    #     observation_space=observation_space,
-    #     action_space=action_space,
-    #     model_config={
-    #         "n_stack": cfg.lstm_n_stack,
-    #         "pretrained_path": cfg.lb_best_pretrained_path,
-    #         "freeze": cfg.freeze,
-    #         "model_name": Model.ConvLSTM,
-    #         "num_layers": cfg.num_layers,
-    #         "hidden_dim": cfg.hidden_dim,
-    #         "kernel_size": cfg.kernel_size,
-    #         "num_repeats": cfg.num_repeats,
-    #     },
-    # )
     config = (
         IMPALAConfig()
         .api_stack(
