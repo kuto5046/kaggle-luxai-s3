@@ -578,7 +578,6 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
     def _forward(self, batch, is_train=False, **kwargs):
         batch_size = batch[Columns.OBS]["state"].shape[0]
         outputs = self.policy_model(batch[Columns.OBS], is_train)
-        teacher_outputs = self.teacher_policy_model(batch[Columns.OBS], is_train)
         # batch方向に1つ手前にずらすことで次のstepの敵ユニット位置をtargetとする (sap_targets[0, :] == opp_unit_map[1, :]という関係)
         # rollout_fragment_lengthが101なので連続してる想定だが101stepは連続している。
         # rolloutの境界ではtargetがズレるのでloss計算から除外する処理を後段で行う
@@ -589,8 +588,16 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
         # この時点では(batch, action, height, width)なので(batch, height, width, action)に変換
         masked_policy_logits = masked_policy_logits.reshape(batch_size, len(Action), -1).transpose(2, 1)
         # targetモデルも同じ
-        masked_teacher_policy_logits = teacher_outputs["policy"] - 1e32 * (1 - batch[Columns.OBS]["legal_action_mask"])
-        masked_teacher_policy_logits = masked_teacher_policy_logits.reshape(batch_size, len(Action), -1).transpose(2, 1)
+        if is_train:
+            teacher_outputs = self.teacher_policy_model(batch[Columns.OBS], is_train)
+            masked_teacher_policy_logits = teacher_outputs["policy"] - 1e32 * (
+                1 - batch[Columns.OBS]["legal_action_mask"]
+            )
+            masked_teacher_policy_logits = masked_teacher_policy_logits.reshape(batch_size, len(Action), -1).transpose(
+                2, 1
+            )
+        else:
+            masked_teacher_policy_logits = None
         return {
             Columns.ACTION_DIST_INPUTS: masked_policy_logits,
             "teacher_policy_logits": masked_teacher_policy_logits,
