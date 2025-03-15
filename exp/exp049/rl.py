@@ -1187,8 +1187,8 @@ def create_rl_config(cfg: Config) -> AlgorithmConfig:
         action_space=action_space,
         model_config={
             "n_stack": cfg.n_stack,
-            # "pretrained_path": None,  # 一から学習してみる
-            "pretrained_path": cfg.best_pretrained_path,
+            "pretrained_path": None,  # 一から学習してみる
+            # "pretrained_path": cfg.best_pretrained_path,
             "freeze": cfg.freeze,
             "model_name": Model.UNet,
         },
