@@ -138,7 +138,7 @@ class Config:
     evaluation_duration: int = 50  # 1回の評価で何エピソード分評価するか
     # learner
     gamma: float = 0.999
-    lr: float = 1e-4
+    lr: float = 5e-5
     grad_clip: float = 1.0
     grad_clip_by: str = "global_norm"
     train_batch_size_per_learner: int = 128
@@ -835,7 +835,7 @@ class WandbLoggerCallback(RLlibCallback):
                 "num_module_steps_trained_lifetime",  # これが学習したstep数
                 "total_loss",
                 "vtrace_pi_loss",
-                # "upgo_pi_loss",
+                "upgo_pi_loss",
                 "num_module_steps_trained",
                 "vf_loss",
                 "entropy",
@@ -1076,7 +1076,7 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
             clip_pg_rho_threshold=config.vtrace_clip_pg_rho_threshold,
         )
         vtrace_pi_loss = -torch.sum(target_actions_logp_time_major * vtrace_pg_advantages)
-        mean_vtrace_pi_loss = vtrace_pi_loss * config.vtrace_pi_loss_coeff / size_loss_mask
+        mean_vtrace_pi_loss = (vtrace_pi_loss * config.vtrace_pi_loss_coeff) / size_loss_mask
 
         _, upgo_pg_advantages = upgo(
             rewards=rewards_time_major,
@@ -1088,7 +1088,7 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
         log_rhos = target_actions_logp_time_major - behaviour_actions_logp_time_major
         upgo_clipped_importance = torch.minimum(log_rhos.exp(), torch.ones_like(log_rhos)).detach()
         upgo_pi_loss = -torch.sum(target_actions_logp_time_major * upgo_pg_advantages * upgo_clipped_importance)
-        mean_upgo_pi_loss = upgo_pi_loss * config.upgo_pi_loss_coeff / size_loss_mask
+        mean_upgo_pi_loss = (upgo_pi_loss * config.upgo_pi_loss_coeff) / size_loss_mask
 
         # The baseline loss. (L1 loss)
         delta = values_time_major - vtrace_adjusted_target_values
@@ -1133,7 +1133,7 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
         self.metrics.log_dict(
             {
                 "vtrace_pi_loss": mean_vtrace_pi_loss,
-                # "upgo_pi_loss": mean_upgo_pi_loss,
+                "upgo_pi_loss": mean_upgo_pi_loss,
                 "vf_loss": mean_vf_loss,
                 ENTROPY_KEY: -mean_entropy_loss,
                 "kl_loss": mean_kl_loss,
