@@ -597,7 +597,7 @@ class LuxUnetTorchRLModule(TorchRLModule, ValueFunctionAPI):
                 2, 1
             )
         else:
-            masked_teacher_policy_logits = None
+            masked_teacher_policy_logits = masked_policy_logits
         return {
             Columns.ACTION_DIST_INPUTS: masked_policy_logits,
             "teacher_policy_logits": masked_teacher_policy_logits,
