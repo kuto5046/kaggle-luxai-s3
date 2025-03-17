@@ -93,7 +93,7 @@ class Config:
     # common
     exp_name: str = Path(__file__).parent.name
     debug: bool = False
-    notes: str = "KL lossを追加"
+    notes: str = "KL lossとUPGO Lossを追加"
     env_name: str = "lux-s3-v0"
     root_dir: Path = Path("/home/user/work")
     exp_dir: Path = root_dir / f"exp/{exp_name}"
@@ -1007,9 +1007,6 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
 
         # 学習中の方策とtargetモデルの方策のKLダイバージェンスを計算
         teacher_policy_dist = module.get_train_action_dist_cls().from_logits(fwd_out["teacher_policy_logits"])
-        kl_divergences = target_policy_dist.kl(teacher_policy_dist)
-        kl_divergences = torch.where(torch.isfinite(kl_divergences), kl_divergences, torch.zeros_like(kl_divergences))
-        mean_kl_loss = ((kl_divergences * loss_mask).sum() * config.kl_loss_coeff) / size_loss_mask
 
         # loss_maskを適用した上でマップの次元を潰す
         # (batch_size, 24*24)のマップ状態をもつデータをunit位置のmaskを適用した上で(batch_size, 1)に潰す
@@ -1078,23 +1075,22 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
             clip_rho_threshold=config.vtrace_clip_rho_threshold,
             clip_pg_rho_threshold=config.vtrace_clip_pg_rho_threshold,
         )
-
-        # _upgo_adjusted_target_values, upgo_pg_advantages = upgo(
-        #     rewards=rewards_time_major,
-        #     values=values_time_major,
-        #     bootstrap_value=bootstrap_values,
-        #     discounts=discounts_time_major,
-        #     lmb=config.upgo_lmb,
-        # )
-
-        # The policy gradients loss.
         vtrace_pi_loss = -torch.sum(target_actions_logp_time_major * vtrace_pg_advantages)
-        # upgo_pi_loss = -torch.sum(target_actions_logp_time_major * upgo_pg_advantages)
-
-        # size_loss_maskで割ることで1stepあたりのlossになる
         mean_vtrace_pi_loss = vtrace_pi_loss * config.vtrace_pi_loss_coeff / size_loss_mask
-        # mean_upgo_pi_loss = upgo_pi_loss * config.upgo_pi_loss_coeff / size_loss_mask
-        # The baseline loss.
+
+        _, upgo_pg_advantages = upgo(
+            rewards=rewards_time_major,
+            values=values_time_major,
+            bootstrap_value=bootstrap_values,
+            discounts=discounts_time_major,
+            lmb=config.upgo_lmb,
+        )
+        log_rhos = target_actions_logp_time_major - behaviour_actions_logp_time_major
+        upgo_clipped_importance = torch.minimum(log_rhos.exp(), torch.ones_like(log_rhos)).detach()
+        upgo_pi_loss = -torch.sum(target_actions_logp_time_major * upgo_pg_advantages * upgo_clipped_importance)
+        mean_upgo_pi_loss = upgo_pi_loss * config.upgo_pi_loss_coeff / size_loss_mask
+
+        # The baseline loss. (L1 loss)
         delta = values_time_major - vtrace_adjusted_target_values
         vf_loss = 0.5 * torch.sum(torch.pow(delta, 2.0))
         mean_vf_loss = (vf_loss * config.vf_loss_coeff) / size_loss_mask
@@ -1105,7 +1101,11 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
             entropy_loss * self.entropy_coeff_schedulers_per_module[module_id].get_current_value()
         ) / size_loss_mask
 
-        # SAPの教師あり学習
+        kl_divergences = target_policy_dist.kl(teacher_policy_dist)
+        kl_divergences = torch.where(torch.isfinite(kl_divergences), kl_divergences, torch.zeros_like(kl_divergences))
+        mean_kl_loss = ((kl_divergences * loss_mask).sum() * config.kl_loss_coeff) / size_loss_mask
+
+        # sap loss by supervised learning
         sap_loss = torch.nn.functional.binary_cross_entropy_with_logits(
             fwd_out["sap_logits"], fwd_out["sap_targets"], reduction="none"
         )
@@ -1126,12 +1126,7 @@ class CustomIMPALATorchLearner(IMPALALearner, TorchLearner):
 
         # The summed weighted loss.
         total_loss = (
-            mean_vtrace_pi_loss
-            # + mean_upgo_pi_loss
-            + mean_vf_loss
-            + mean_entropy_loss
-            + mean_sap_loss
-            + mean_kl_loss
+            mean_vtrace_pi_loss + mean_upgo_pi_loss + mean_vf_loss + mean_entropy_loss + mean_sap_loss + mean_kl_loss
         )
 
         # Log important loss stats.
