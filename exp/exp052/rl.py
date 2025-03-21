@@ -93,7 +93,7 @@ class Config:
     # common
     exp_name: str = Path(__file__).parent.name
     debug: bool = False
-    notes: str = "KL lossとUPGO Lossを追加"
+    notes: str = "rollout lengthを2ndに合わせる"
     env_name: str = "lux-s3-v0"
     root_dir: Path = Path("/home/user/work")
     exp_dir: Path = root_dir / f"exp/{exp_name}"
@@ -131,14 +131,14 @@ class Config:
     learner_queue_size: int = 50
     # 学習時に同じ時系列として扱いたいstep数を設定してやる。報酬が含まれるように1マッチ分の長さにする
     # batch_mode="truncate_episodes"の場合はmin(rollout_fragment_length, 101)stepごとにデータが送信される
-    rollout_fragment_length: int | str | None = 101
+    rollout_fragment_length: int | str | None = 32
 
     # 評価
     evaluation_interval: int = 100  # 何回trainをしたら評価を実施するか　１回が30secくらいなので50回で1500sec=25分くらい
     evaluation_duration: int = 50  # 1回の評価で何エピソード分評価するか
     # learner
     gamma: float = 0.999
-    lr: float = 5e-5
+    lr: float = 1e-5
     grad_clip: float = 1.0
     grad_clip_by: str = "global_norm"
     train_batch_size_per_learner: int = 128
