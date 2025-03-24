@@ -1474,6 +1474,37 @@ def get_valid_sap_map(obs: dict[str, Any], team_id: int, episode_store: EpisodeS
     return validate_sap_map
 
 
+def get_valid_sap_positions_by_units(
+    obs: dict[str, Any], team_id: int, unit_sap_range: int, state: np.ndarray
+) -> np.ndarray:
+    validate_sap_map = np.zeros((EnvParams.max_units, EnvParams.map_width * EnvParams.map_height), dtype=np.float32)
+    for unit_id in range(EnvParams.max_units):
+        x, y = np.array(obs["units"]["position"][team_id][unit_id])
+        # sap_range内を1にする
+        for dx in range(-unit_sap_range, unit_sap_range + 1):
+            for dy in range(-unit_sap_range, unit_sap_range + 1):
+                nx, ny = x + dx, y + dy
+                if in_map((nx, ny)) and state[State.SAP_AVAILABLE_AREA, ny, nx] == 1:
+                    validate_sap_map[unit_id, ny * EnvParams.map_width + nx] = 1
+    return validate_sap_map
+
+
+def pos2d_to_1d(x: np.ndarray | int, y: np.ndarray | int) -> np.ndarray | int:
+    if isinstance(x, np.ndarray):
+        return y * EnvParams.map_width + x
+    else:
+        return y * EnvParams.map_width + x
+
+
+def pos1d_to_2d(pos: np.ndarray | int) -> tuple[np.ndarray | int, np.ndarray | int]:
+    if isinstance(pos, np.ndarray):
+        y = pos // EnvParams.map_width
+        x = pos % EnvParams.map_width
+        return x, y
+    else:
+        return pos % EnvParams.map_width, pos // EnvParams.map_width
+
+
 def calc_next_pos(pos: tuple[int, int], action: Action) -> tuple[int, int]:
     x, y = pos
     if action == Action.CENTER:

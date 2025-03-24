@@ -102,30 +102,6 @@ def create_dummy_policy(action_map: np.ndarray, obs: dict[str, Any], team_id: in
     return policy_map
 
 
-def action_map_to_action(
-    action_map: np.ndarray,
-    sap_map,
-    obs: dict[str, Any],
-    team_id: int,
-    env_cfg: EnvParams,
-    stochastic: bool,
-    overlap_penalty: float,
-    episode_store: EpisodeStore,
-) -> np.ndarray:
-    """
-    RLLibではpolicyからサンプリングされた行動が渡されるためpolicyをもとにactionを決定することができない
-    そこでサンプリングされた行動から簡易的にactionを生成する
-    """
-    # action_mapから擬似的にpolicy_mapを生成
-    policy_map = create_dummy_policy(action_map, obs, team_id, env_cfg)
-    policy_map = get_legal_policy(obs, policy_map, team_id, episode_store)
-    # 初回stepはlegal_action_mapが0で
-    if obs["steps"].item() > 0:
-        return policy_map_to_action(policy_map, sap_map, obs, team_id, env_cfg, stochastic, overlap_penalty)
-    else:
-        return np.zeros((env_cfg.max_units, 3), dtype=int)
-
-
 class ILAgent:
     def __init__(self, model: nn.Module, cfg: dataclass) -> None:
         self.model = model
